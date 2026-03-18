@@ -364,6 +364,7 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
 <div class="section"><h2>By Diameter / 按管径</h2><div class="diam-grid" id="diam"></div></div>
 <div class="toolbar">
   <input type="text" id="q" placeholder="Search spool / 搜索管段..." oninput="filter()">
+  <select id="fd" onchange="filter()"><option value="">All Diameters</option></select>
   <select id="fl" onchange="filter()"><option value="">All Lines</option><option value="A">Line A</option><option value="B">Line B</option><option value="C">Line C</option></select>
   <select id="fs" onchange="filter()"><option value="">All Status</option><option value="done">Done</option><option value="wip">In Progress</option><option value="todo">Not Started</option></select>
   <a class="btn" href="/api/project/{{ project }}/export">Export Excel</a>
@@ -387,6 +388,12 @@ async function load(){
     <div class="pbar-bg" style="margin-top:6px"><div class="pbar-fill" style="width:${v.avg_pct}%;background:${v.avg_pct>=100?'#27ae60':'#2F5496'}"></div></div>
     <div style="font-size:12px;margin-top:4px;font-weight:600">${v.avg_pct}%</div></div>`).join('');
   render(all);
+  // Populate diameter dropdown
+  const diamsSet = [...new Set(all.map(s=>s.spool.main_diameter||'?'))].sort((a,b)=>(parseInt(b)||0)-(parseInt(a)||0));
+  const fdEl = document.getElementById('fd');
+  const curFd = fdEl.value;
+  fdEl.innerHTML = '<option value="">All Diameters</option>' + diamsSet.map(d=>`<option value="${d}">${d}</option>`).join('');
+  fdEl.value = curFd;
   if(st.recent_activity&&st.recent_activity.length)
     document.getElementById('act').innerHTML='<h2 style="font-size:16px;color:#2F5496;margin:8px 0">Recent / 最近动态</h2>'+
       st.recent_activity.slice(0,10).map(a=>`<div class="activity-item"><strong>${a.spool_id}</strong> — ${a.details||a.action} <span style="color:#aaa;font-size:11px">${a.timestamp||''}</span></div>`).join('');
@@ -401,9 +408,10 @@ function render(sp){
       <div class="pct ${c}">${p}%</div></div>`;}).join('');
 }
 function filter(){
-  const q=document.getElementById('q').value.toLowerCase(),l=document.getElementById('fl').value,s=document.getElementById('fs').value;
+  const q=document.getElementById('q').value.toLowerCase(),d=document.getElementById('fd').value,l=document.getElementById('fl').value,s=document.getElementById('fs').value;
   render(all.filter(x=>{
     if(q&&!x.spool.spool_id.toLowerCase().includes(q)&&!(x.spool.iso_no||'').toLowerCase().includes(q))return false;
+    if(d&&(x.spool.main_diameter||'?')!==d)return false;
     if(l&&x.spool.line!==l)return false;
     if(s==='done'&&x.progress_pct<100)return false;
     if(s==='wip'&&(x.progress_pct<=0||x.progress_pct>=100))return false;

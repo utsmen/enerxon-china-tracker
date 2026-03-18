@@ -258,6 +258,59 @@ def api_update_weight(project, spool_id):
     db_commit()
     return jsonify({'ok': True, 'weight_kg': weight})
 
+@app.route('/api/project/<project>/spool/<spool_id>/drawing', methods=['POST'])
+def api_upload_drawing(project, spool_id):
+    """Upload a PDF drawing for a spool."""
+    if 'file' in request.files:
+        pdf_data = request.files['file'].read()
+    else:
+        pdf_data = request.get_data()
+    if not pdf_data:
+        return jsonify({'error': 'No data'}), 400
+    if USE_PG:
+        import psycopg2
+        db_execute("DELETE FROM drawings WHERE project=%s AND spool_id=%s", (project, spool_id))
+        cur = get_db().cursor()
+        cur.execute("INSERT INTO drawings (project, spool_id, pdf_data) VALUES (%s, %s, %s)",
+                    (project, spool_id, psycopg2.Binary(pdf_data)))
+    else:
+        db_execute("DELETE FROM drawings WHERE project=? AND spool_id=?", (project, spool_id))
+        db_execute("INSERT INTO drawings (project, spool_id, pdf_data) VALUES (?,?,?)",
+                    (project, spool_id, pdf_data))
+    db_commit()
+    return jsonify({'ok': True, 'size_kb': round(len(pdf_data)/1024, 1)})
+
+@app.route('/api/project/<project>/spool/<spool_id>/drawing')
+def api_get_drawing(project, spool_id):
+    """Serve the PDF drawing for a spool."""
+    if USE_PG:
+        cur = get_db().cursor()
+        cur.execute("SELECT pdf_data FROM drawings WHERE project=%s AND spool_id=%s", (project, spool_id))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'No drawing'}), 404
+        pdf_data = bytes(row[0])
+    else:
+        row = db_fetchone("SELECT pdf_data FROM drawings WHERE project=? AND spool_id=?", (project, spool_id))
+        if not row:
+            return jsonify({'error': 'No drawing'}), 404
+        pdf_data = row['pdf_data']
+    from flask import Response
+    return Response(pdf_data, mimetype='application/pdf',
+                    headers={'Content-Disposition': f'inline; filename={spool_id}.pdf'})
+
+@app.route('/api/project/<project>/drawings/list')
+def api_list_drawings(project):
+    """List which spools have drawings uploaded."""
+    if USE_PG:
+        cur = get_db().cursor()
+        cur.execute("SELECT spool_id, length(pdf_data) as size_bytes FROM drawings WHERE project=%s", (project,))
+        rows = cur.fetchall()
+        return jsonify([{'spool_id': r[0], 'size_kb': round(r[1]/1024,1)} for r in rows])
+    else:
+        rows = db_fetchall("SELECT spool_id, length(pdf_data) as size_bytes FROM drawings WHERE project=?", (project,))
+        return jsonify([{'spool_id': r['spool_id'], 'size_kb': round(r['size_bytes']/1024,1)} for r in rows])
+
 @app.route('/api/migrate', methods=['POST'])
 def api_migrate():
     """Run DB migrations and clear data for fresh import."""
@@ -268,6 +321,17 @@ def api_migrate():
             except: get_db().rollback(); results.append("has_branches exists")
             try: db_execute("ALTER TABLE spools ADD COLUMN actual_weight_kg REAL DEFAULT 0"); results.append("added actual_weight_kg")
             except: get_db().rollback(); results.append("actual_weight_kg exists")
+            try:
+                cur = get_db().cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS drawings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BYTEA NOT NULL, UNIQUE(project, spool_id))")
+                get_db().commit()
+                results.append("created drawings table")
+            except: get_db().rollback(); results.append("drawings table exists")
+        else:
+            try:
+                db_execute("CREATE TABLE IF NOT EXISTS drawings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BLOB NOT NULL, UNIQUE(project, spool_id))")
+                db_commit()
+            except: pass
         db_execute("DELETE FROM activity_log"); db_execute("DELETE FROM progress"); db_execute("DELETE FROM spools")
         db_commit(); results.append("cleared all data")
     except Exception as e: results.append(str(e))
@@ -459,12 +523,24 @@ SPOOL_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
 <div class="info-bar" id="ib"></div>
 <div class="prog"><div class="big" id="bp">0%</div><div class="lbl">Production Progress / 生产进度</div></div>
 <div class="pbar-bg" style="margin:0 16px"><div class="pbar-fill" id="mb" style="width:0%"></div></div>
+<div id="drawing-btn" style="padding:8px 16px;display:none">
+  <a id="drawing-link" target="_blank" style="display:block;background:#2F5496;color:#fff;text-align:center;padding:12px;border-radius:8px;font-size:14px;font-weight:600;text-decoration:none">
+    View Drawing / 查看图纸
+  </a>
+</div>
 <div class="op-input"><input type="text" id="op" placeholder="Your name / 你的姓名"></div>
 <div class="checklist" id="cl"></div>
 <script>
 const P='{{project}}',SID='{{spool_id}}'; let D;
 async function load(){
   const r=await fetch(`/api/project/${P}/spool/${SID}`); D=await r.json(); render();
+  // Check if drawing exists
+  fetch(`/api/project/${P}/spool/${SID}/drawing`,{method:'HEAD'}).then(r=>{
+    if(r.ok){
+      document.getElementById('drawing-btn').style.display='block';
+      document.getElementById('drawing-link').href=`/api/project/${P}/spool/${SID}/drawing`;
+    }
+  }).catch(()=>{});
 }
 function render(){
   const s=D.spool, p=D.progress_pct;

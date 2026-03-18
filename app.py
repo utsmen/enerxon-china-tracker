@@ -247,6 +247,17 @@ def api_export(project):
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False); wb.save(tmp.name)
     return send_file(tmp.name, as_attachment=True, download_name=f"{project}_progress_{date.today().strftime('%Y%m%d')}.xlsx")
 
+@app.route('/api/project/<project>/spool/<spool_id>/weight', methods=['POST'])
+def api_update_weight(project, spool_id):
+    d = request.get_json() or {}
+    weight = d.get('weight_kg', 0)
+    op = d.get('operator', '')
+    db_execute("UPDATE spools SET actual_weight_kg=? WHERE project=? AND spool_id=?", (weight, project, spool_id))
+    db_execute("INSERT INTO activity_log (project,spool_id,step_number,action,operator,details) VALUES (?,?,?,?,?,?)",
+        (project, spool_id, 0, 'weight', op, f"Weight recorded: {weight} kg by {op}"))
+    db_commit()
+    return jsonify({'ok': True, 'weight_kg': weight})
+
 @app.route('/api/migrate', methods=['POST'])
 def api_migrate():
     """Run DB migrations and clear data for fresh import."""
@@ -255,6 +266,8 @@ def api_migrate():
         if USE_PG:
             try: db_execute("ALTER TABLE spools ADD COLUMN has_branches INTEGER DEFAULT 0"); results.append("added has_branches")
             except: get_db().rollback(); results.append("has_branches exists")
+            try: db_execute("ALTER TABLE spools ADD COLUMN actual_weight_kg REAL DEFAULT 0"); results.append("added actual_weight_kg")
+            except: get_db().rollback(); results.append("actual_weight_kg exists")
         db_execute("DELETE FROM activity_log"); db_execute("DELETE FROM progress"); db_execute("DELETE FROM spools")
         db_commit(); results.append("cleared all data")
     except Exception as e: results.append(str(e))
@@ -446,7 +459,8 @@ function render(){
     <span class="line-badge line-${s.line}">${s.line}</span>
     <div class="info-item"><span class="lb">Diameter:</span> <span class="vl">${s.main_diameter}</span></div>
     <div class="info-item"><span class="lb">ISO:</span> <span class="vl">${s.iso_no||'-'}</span></div>
-    <div class="info-item"><span class="lb">MK:</span> <span class="vl">${s.mk_number||'-'}</span></div>`;
+    <div class="info-item"><span class="lb">MK:</span> <span class="vl">${s.mk_number||'-'}</span></div>
+    <div class="info-item" style="flex-basis:100%;margin-top:4px"><span class="lb">Marking:</span> <span class="vl">${s.marking||'-'}</span></div>`;
   const sm={}; D.steps.forEach(x=>{sm[x.step_number]=x});
   document.getElementById('cl').innerHTML=D.step_definitions.map(d=>{
     const st=sm[d.number]||{}, dn=!!st.completed;
@@ -459,6 +473,25 @@ function render(){
       ${dn&&st.completed_by?`<div class="step-meta">\u2713 ${st.completed_by} · ${st.completed_at||''}</div>`:''}
       <div class="step-rem"><input type="text" placeholder="Remarks / 备注" value="${st.remarks||''}" onchange="rem(${d.number},this.value)" onclick="event.stopPropagation()"></div>
     </div>`;}).join('');
+
+  // Weight input at the end
+  document.getElementById('cl').innerHTML += `
+    <div style="background:#fff;border-radius:10px;padding:16px;margin-top:12px;box-shadow:0 1px 2px rgba(0,0,0,.05);border-left:4px solid #2F5496">
+      <div style="font-size:13px;font-weight:600;color:#2F5496;margin-bottom:8px">Actual Weight / \u5b9e\u9645\u91cd\u91cf (kg)</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="number" id="weight-input" placeholder="Enter weight in kg / \u8f93\u5165\u91cd\u91cf" value="${D.spool.actual_weight_kg||''}"
+          style="flex:1;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:16px;font-weight:600" step="0.1" min="0">
+        <button onclick="saveWeight()" style="background:#2F5496;color:#fff;border:none;padding:10px 20px;border-radius:6px;font-size:14px;cursor:pointer">Save</button>
+      </div>
+      ${D.spool.actual_weight_kg ? '<div style="font-size:11px;color:#888;margin-top:6px">\u2713 Weight recorded / \u91cd\u91cf\u5df2\u8bb0\u5f55</div>' : '<div style="font-size:11px;color:#e74c3c;margin-top:6px">\u26a0 Weight not recorded yet / \u91cd\u91cf\u5c1a\u672a\u8bb0\u5f55</div>'}
+    </div>`;
+}
+async function saveWeight(){
+  const w = document.getElementById('weight-input').value;
+  const op = document.getElementById('op').value||'Unknown';
+  await fetch('/api/project/'+P+'/spool/'+SID+'/weight',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({weight_kg:parseFloat(w)||0, operator:op})});
+  await load();
 }
 async function tog(n,c){
   const op=document.getElementById('op').value||'Unknown';

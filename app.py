@@ -51,7 +51,7 @@ def get_db():
             import psycopg2
             import psycopg2.extras
             url = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
-            g.db = psycopg2.connect(url)
+            g.db = psycopg2.connect(url, connect_timeout=10)
             g.db.autocommit = False
             g.db_type = 'pg'
         else:
@@ -376,8 +376,7 @@ def api_update_step(spool_id, step_number):
     db_execute("""
         INSERT INTO activity_log (spool_id, step_number, action, operator, details)
         VALUES (?, ?, ?, ?, ?)
-    """.replace('?' if USE_PG else '!NEVER!', '%s'),
-        (spool_id, step_number, action, operator, f"{step_name}: {action} by {operator}"))
+    """, (spool_id, step_number, action, operator, f"{step_name}: {action} by {operator}"))
 
     db_commit()
     pct = get_spool_progress(spool_id)
@@ -652,7 +651,23 @@ load();
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
-init_db()
+@app.route('/healthz')
+def healthz():
+    """Health check endpoint."""
+    try:
+        db = get_db()
+        db_execute("SELECT 1")
+        return jsonify({'status': 'ok', 'db': 'connected'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'db': str(e)}), 500
+
+# Initialize database tables on startup
+try:
+    init_db()
+    print("Database initialized successfully")
+except Exception as e:
+    print(f"WARNING: Database init failed: {e}")
+    print("Tables may already exist or DB will init on first request")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

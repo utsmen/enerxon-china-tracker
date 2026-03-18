@@ -392,7 +392,8 @@ async function load(){
   const diamsSet = [...new Set(all.map(s=>s.spool.main_diameter||'?'))].sort((a,b)=>(parseInt(b)||0)-(parseInt(a)||0));
   const fdEl = document.getElementById('fd');
   const curFd = fdEl.value;
-  fdEl.innerHTML = '<option value="">All Diameters</option>' + diamsSet.map(d=>`<option value="${d}">${d}</option>`).join('');
+  fdEl.innerHTML = '<option value="">All Diameters</option>';
+  diamsSet.forEach(d=>{ const o=document.createElement('option'); o.value=d; o.textContent=d; fdEl.appendChild(o); });
   fdEl.value = curFd;
   if(st.recent_activity&&st.recent_activity.length)
     document.getElementById('act').innerHTML='<h2 style="font-size:16px;color:#2F5496;margin:8px 0">Recent / 最近动态</h2>'+

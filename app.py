@@ -5,12 +5,67 @@ URL structure: / → /project/<id> → /project/<id>/spool/<spool_id>
 """
 import os, sys, json
 from datetime import datetime, date
-from flask import Flask, render_template_string, request, jsonify, send_file, g
+from functools import wraps
+from flask import Flask, render_template_string, request, jsonify, send_file, g, session, redirect, url_for
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'charlie-dev-key')
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
 USE_PG = DATABASE_URL.startswith('postgres')
+SITE_PASSWORD = os.environ.get('SITE_PASSWORD', 'Enerxon@china')
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('authenticated'):
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'Not authenticated'}), 401
+            return redirect('/login')
+        return f(*args, **kwargs)
+    return decorated
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = ''
+    if request.method == 'POST':
+        pw = request.form.get('password', '')
+        if pw == SITE_PASSWORD:
+            session['authenticated'] = True
+            session.permanent = True
+            app.permanent_session_lifetime = __import__('datetime').timedelta(days=90)
+            return redirect('/')
+        error = 'Wrong password / \u5bc6\u7801\u9519\u8bef'
+    return render_template_string(LOGIN_HTML, error=error)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
+
+LOGIN_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ENERXON Tracker — Login</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#f0f2f5;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.login-box{background:#fff;border-radius:16px;padding:40px;width:320px;box-shadow:0 4px 20px rgba(0,0,0,0.1);text-align:center}
+.login-box h1{color:#2F5496;font-size:20px;margin-bottom:4px}
+.login-box .cn{color:#888;font-size:13px;margin-bottom:24px}
+.login-box input{width:100%;padding:12px;border:2px solid #ddd;border-radius:8px;font-size:16px;margin-bottom:16px;text-align:center}
+.login-box input:focus{border-color:#2F5496;outline:none}
+.login-box button{width:100%;padding:12px;background:#2F5496;color:#fff;border:none;border-radius:8px;font-size:16px;font-weight:600;cursor:pointer}
+.login-box button:hover{background:#1a3a6e}
+.error{color:#e74c3c;font-size:13px;margin-bottom:12px}
+</style></head><body>
+<div class="login-box">
+  <h1>ENERXON Tracker</h1>
+  <div class="cn">\u751f\u4ea7\u8fdb\u5ea6\u8ffd\u8e2a\u7cfb\u7edf</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <input type="password" name="password" placeholder="Password / \u5bc6\u7801" autofocus>
+    <button type="submit">Enter / \u8fdb\u5165</button>
+  </form>
+</div>
+</body></html>"""
 
 PRODUCTION_STEPS = [
     (1,"Material Receiving & Traceability","来料检验及可追溯性",5),
@@ -127,10 +182,12 @@ def fix_timestamps(rows):
 
 # ── API: Projects ─────────────────────────────────────────────────────────────
 @app.route('/')
+@login_required
 def home():
     return render_template_string(HOME_HTML)
 
 @app.route('/api/projects')
+@login_required
 def api_projects():
     rows = db_fetchall("SELECT project, COUNT(*) as spool_count FROM spools GROUP BY project ORDER BY project")
     result = []
@@ -143,10 +200,12 @@ def api_projects():
 
 # ── API: Project Dashboard ────────────────────────────────────────────────────
 @app.route('/project/<project>')
+@login_required
 def project_page(project):
     return render_template_string(PROJECT_HTML, project=project)
 
 @app.route('/api/project/<project>/dashboard')
+@login_required
 def api_project_dashboard(project):
     st = project_stats(project)
     act = db_fetchall("SELECT * FROM activity_log WHERE project=? ORDER BY timestamp DESC LIMIT 20", (project,))
@@ -154,6 +213,7 @@ def api_project_dashboard(project):
     return jsonify(st)
 
 @app.route('/api/project/<project>/spools')
+@login_required
 def api_project_spools(project):
     spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
     result = []
@@ -164,10 +224,12 @@ def api_project_spools(project):
 
 # ── API: Spool Detail ─────────────────────────────────────────────────────────
 @app.route('/project/<project>/spool/<spool_id>')
+@login_required
 def spool_page(project, spool_id):
     return render_template_string(SPOOL_HTML, project=project, spool_id=spool_id)
 
 @app.route('/api/project/<project>/spool/<spool_id>')
+@login_required
 def api_spool(project, spool_id):
     sp = db_fetchone("SELECT * FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
     if not sp: return jsonify({'error':'Not found'}), 404
@@ -179,6 +241,7 @@ def api_spool(project, spool_id):
         'has_branches': bool(sp.get('has_branches')) if sp else False})
 
 @app.route('/api/project/<project>/spool/<spool_id>/step/<int:step>', methods=['POST'])
+@login_required
 def api_update_step(project, spool_id, step):
     d = request.get_json() or {}
     comp = 1 if d.get('completed') else 0
@@ -226,6 +289,7 @@ def api_import():
     return jsonify({'ok':True, 'imported':count})
 
 @app.route('/api/project/<project>/export')
+@login_required
 def api_export(project):
     import openpyxl; from openpyxl.styles import Font, PatternFill, Alignment; import tempfile
     spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
@@ -248,6 +312,7 @@ def api_export(project):
     return send_file(tmp.name, as_attachment=True, download_name=f"{project}_progress_{date.today().strftime('%Y%m%d')}.xlsx")
 
 @app.route('/api/project/<project>/spool/<spool_id>/weight', methods=['POST'])
+@login_required
 def api_update_weight(project, spool_id):
     d = request.get_json() or {}
     weight = d.get('weight_kg', 0)
@@ -281,6 +346,7 @@ def api_upload_drawing(project, spool_id):
     return jsonify({'ok': True, 'size_kb': round(len(pdf_data)/1024, 1)})
 
 @app.route('/api/project/<project>/spool/<spool_id>/drawing')
+@login_required
 def api_get_drawing(project, spool_id):
     """Serve the PDF drawing for a spool."""
     if USE_PG:
@@ -300,6 +366,7 @@ def api_get_drawing(project, spool_id):
                     headers={'Content-Disposition': f'inline; filename={spool_id}.pdf'})
 
 @app.route('/api/project/<project>/drawings/list')
+@login_required
 def api_list_drawings(project):
     """List which spools have drawings uploaded."""
     if USE_PG:

@@ -247,9 +247,21 @@ def api_export(project):
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False); wb.save(tmp.name)
     return send_file(tmp.name, as_attachment=True, download_name=f"{project}_progress_{date.today().strftime('%Y%m%d')}.xlsx")
 
+@app.route('/api/migrate', methods=['POST'])
+def api_migrate():
+    """Run DB migrations and clear data for fresh import."""
+    results = []
+    try:
+        if USE_PG:
+            try: db_execute("ALTER TABLE spools ADD COLUMN has_branches INTEGER DEFAULT 0"); results.append("added has_branches")
+            except: get_db().rollback(); results.append("has_branches exists")
+        db_execute("DELETE FROM activity_log"); db_execute("DELETE FROM progress"); db_execute("DELETE FROM spools")
+        db_commit(); results.append("cleared all data")
+    except Exception as e: results.append(str(e))
+    return jsonify({'ok': True, 'results': results})
+
 @app.route('/api/cleanup', methods=['POST'])
 def api_cleanup():
-    """Remove spools with empty project."""
     db_execute("DELETE FROM activity_log WHERE project=''")
     db_execute("DELETE FROM progress WHERE project=''")
     db_execute("DELETE FROM spools WHERE project=''")

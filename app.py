@@ -273,6 +273,15 @@ def api_migrate():
     except Exception as e: results.append(str(e))
     return jsonify({'ok': True, 'results': results})
 
+
+@app.route('/api/project/<project>/spool/<spool_id>/delete', methods=['POST'])
+def api_delete_spool(project, spool_id):
+    db_execute("DELETE FROM activity_log WHERE project=? AND spool_id=?", (project, spool_id))
+    db_execute("DELETE FROM progress WHERE project=? AND spool_id=?", (project, spool_id))
+    db_execute("DELETE FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
+    db_commit()
+    return jsonify({'ok': True, 'deleted': spool_id})
+
 @app.route('/api/cleanup', methods=['POST'])
 def api_cleanup():
     db_execute("DELETE FROM activity_log WHERE project=''")

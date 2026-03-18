@@ -72,12 +72,8 @@ def init_db():
         import psycopg2
         c = psycopg2.connect(DATABASE_URL.replace('postgres://','postgresql://',1)); c.autocommit = True
         cur = c.cursor()
-        # Drop old tables and recreate with new schema (multi-project)
         cur.execute("""
-            DROP TABLE IF EXISTS activity_log;
-            DROP TABLE IF EXISTS progress;
-            DROP TABLE IF EXISTS spools;
-            CREATE TABLE spools (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, spool_full TEXT DEFAULT '', iso_no TEXT DEFAULT '', marking TEXT DEFAULT '', mk_number TEXT DEFAULT '', main_diameter TEXT DEFAULT '', line TEXT DEFAULT '', sequence INTEGER DEFAULT 0, project TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW(), UNIQUE(project, spool_id));
+            CREATE TABLE IF NOT EXISTS spools (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, spool_full TEXT DEFAULT '', iso_no TEXT DEFAULT '', marking TEXT DEFAULT '', mk_number TEXT DEFAULT '', main_diameter TEXT DEFAULT '', line TEXT DEFAULT '', sequence INTEGER DEFAULT 0, project TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW(), UNIQUE(project, spool_id));
             CREATE TABLE progress (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER NOT NULL, completed INTEGER DEFAULT 0, completed_by TEXT DEFAULT '', completed_at TIMESTAMP, remarks TEXT DEFAULT '', UNIQUE(project, spool_id, step_number));
             CREATE TABLE activity_log (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER, action TEXT NOT NULL, operator TEXT DEFAULT '', timestamp TIMESTAMP DEFAULT NOW(), details TEXT DEFAULT '');
             CREATE INDEX idx_progress_ps ON progress(project, spool_id);
@@ -241,6 +237,15 @@ def api_export(project):
     ws.column_dimensions['B'].width=15; ws.freeze_panes='A2'
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False); wb.save(tmp.name)
     return send_file(tmp.name, as_attachment=True, download_name=f"{project}_progress_{date.today().strftime('%Y%m%d')}.xlsx")
+
+@app.route('/api/cleanup', methods=['POST'])
+def api_cleanup():
+    """Remove spools with empty project."""
+    db_execute("DELETE FROM activity_log WHERE project=''")
+    db_execute("DELETE FROM progress WHERE project=''")
+    db_execute("DELETE FROM spools WHERE project=''")
+    db_commit()
+    return jsonify({'ok': True})
 
 @app.route('/healthz')
 def healthz():

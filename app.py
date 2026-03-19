@@ -187,6 +187,24 @@ def fix_timestamps(rows):
             if r.get(k) and not isinstance(r[k], str): r[k] = str(r[k])
     return rows
 
+def parse_date(val):
+    """Parse date from various formats (ISO, PG timestamp, HTTP date)."""
+    if not val: return None
+    s = str(val).strip()[:10]
+    try: return date.fromisoformat(s)
+    except: pass
+    # Try parsing "Wed, 11 Mar 2026 00:00:00 GMT" etc.
+    for fmt in ('%a, %d %b %Y', '%Y-%m-%d %H:%M:%S', '%d/%m/%Y'):
+        try: return datetime.strptime(str(val).strip()[:30], fmt + '%f' if '.' in str(val) else fmt).date()
+        except: pass
+    try: return datetime.strptime(str(val).strip().split('.')[0].split('+')[0], '%Y-%m-%d %H:%M:%S').date()
+    except: pass
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(str(val)).date()
+    except: pass
+    return None
+
 def schedule_status(project):
     """Calculate on-track/danger/delay status per diameter based on schedule vs actual progress."""
     sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
@@ -205,8 +223,8 @@ def schedule_status(project):
     for sc in sched:
         d = sc['diameter']
         if d not in sched_map: sched_map[d] = {}
-        sd = str(sc['planned_start'])[:10]; ed = str(sc['planned_end'])[:10]
-        sched_map[d][sc['task_type']] = {'start': sd, 'end': ed, 'spool_count': sc.get('spool_count',0), 'description': sc.get('description','')}
+        sd = parse_date(sc['planned_start']); ed = parse_date(sc['planned_end'])
+        sched_map[d][sc['task_type']] = {'start': str(sd) if sd else '', 'end': str(ed) if ed else '', 'spool_count': sc.get('spool_count',0), 'description': sc.get('description','')}
     result = []
     overall_expected = 0; overall_actual = 0; overall_count = 0
     for diam in DIAMETER_ORDER:
@@ -217,10 +235,11 @@ def schedule_status(project):
         paint = sm.get('painting', sm.get('Pintura', {}))
         if not fab: continue
         try:
-            fab_start = date.fromisoformat(fab['start']); fab_end = date.fromisoformat(fab['end'])
+            fab_start = parse_date(fab['start']); fab_end = parse_date(fab['end'])
+            if not fab_start or not fab_end: continue
             if paint:
-                paint_start = date.fromisoformat(paint['start']); paint_end = date.fromisoformat(paint['end'])
-                total_end = paint_end
+                paint_start = parse_date(paint['start']); paint_end = parse_date(paint['end'])
+                total_end = paint_end if paint_end else fab_end
             else:
                 total_end = fab_end
             total_days = max(1, (total_end - fab_start).days)

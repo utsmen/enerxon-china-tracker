@@ -86,6 +86,11 @@ PRODUCTION_STEPS = [
     (15,"Final Inspection — Released","最终检验 — 发货放行 ★见证",3),
 ]
 
+# Production rate estimates (spools per day by diameter) — same as charlie_gantt.py
+SPOOLS_PER_DAY = {'32':1.5,'24':1.7,'18':3.0,'16':2.0,'8':1.5,'2':2.5,'1':2.5}
+PAINTING_DAYS = 13
+DIAMETER_ORDER = ['32','24','18','16','8','2','1']
+
 # ── DB Layer ──────────────────────────────────────────────────────────────────
 def get_db():
     if 'db' not in g:
@@ -134,6 +139,7 @@ def init_db():
             CREATE TABLE activity_log (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER, action TEXT NOT NULL, operator TEXT DEFAULT '', timestamp TIMESTAMP DEFAULT NOW(), details TEXT DEFAULT '');
             CREATE INDEX idx_progress_ps ON progress(project, spool_id);
             CREATE INDEX idx_activity_ps ON activity_log(project, spool_id);
+            CREATE TABLE IF NOT EXISTS schedule (id SERIAL PRIMARY KEY, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start DATE NOT NULL, planned_end DATE NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type));
         """); c.close()
     else:
         import sqlite3
@@ -142,6 +148,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS spools (id INTEGER PRIMARY KEY AUTOINCREMENT, spool_id TEXT NOT NULL, spool_full TEXT DEFAULT '', iso_no TEXT DEFAULT '', marking TEXT DEFAULT '', mk_number TEXT DEFAULT '', main_diameter TEXT DEFAULT '', line TEXT DEFAULT '', sequence INTEGER DEFAULT 0, project TEXT DEFAULT '', has_branches INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), UNIQUE(project, spool_id));
             CREATE TABLE IF NOT EXISTS progress (id INTEGER PRIMARY KEY AUTOINCREMENT, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER NOT NULL, completed INTEGER DEFAULT 0, completed_by TEXT DEFAULT '', completed_at TEXT, remarks TEXT DEFAULT '', UNIQUE(project, spool_id, step_number));
             CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER, action TEXT NOT NULL, operator TEXT DEFAULT '', timestamp TEXT DEFAULT (datetime('now')), details TEXT DEFAULT '');
+            CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start TEXT NOT NULL, planned_end TEXT NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type));
         """); c.close()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -179,6 +186,101 @@ def fix_timestamps(rows):
         for k in ('completed_at','timestamp'):
             if r.get(k) and not isinstance(r[k], str): r[k] = str(r[k])
     return rows
+
+def schedule_status(project):
+    """Calculate on-track/danger/delay status per diameter based on schedule vs actual progress."""
+    sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
+    if not sched:
+        return None
+    spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
+    today = date.today()
+    # Group spools by diameter
+    by_diam = {}
+    for s in spools:
+        d = s['main_diameter'] or '?'
+        if d not in by_diam: by_diam[d] = []
+        by_diam[d].append(s)
+    # Build schedule map: diameter -> {fabrication: {start, end}, painting: {start, end}}
+    sched_map = {}
+    for sc in sched:
+        d = sc['diameter']
+        if d not in sched_map: sched_map[d] = {}
+        sd = str(sc['planned_start'])[:10]; ed = str(sc['planned_end'])[:10]
+        sched_map[d][sc['task_type']] = {'start': sd, 'end': ed, 'spool_count': sc.get('spool_count',0), 'description': sc.get('description','')}
+    result = []
+    overall_expected = 0; overall_actual = 0; overall_count = 0
+    for diam in DIAMETER_ORDER:
+        dk = f'{diam}"'
+        if dk not in sched_map and diam not in sched_map: continue
+        sm = sched_map.get(dk, sched_map.get(diam, {}))
+        fab = sm.get('fabrication', sm.get('Fabricacion', {}))
+        paint = sm.get('painting', sm.get('Pintura', {}))
+        if not fab: continue
+        try:
+            fab_start = date.fromisoformat(fab['start']); fab_end = date.fromisoformat(fab['end'])
+            if paint:
+                paint_start = date.fromisoformat(paint['start']); paint_end = date.fromisoformat(paint['end'])
+                total_end = paint_end
+            else:
+                total_end = fab_end
+            total_days = max(1, (total_end - fab_start).days)
+            elapsed = max(0, min((today - fab_start).days, total_days))
+            expected_pct = round(elapsed / total_days * 100, 1) if total_days > 0 else 0
+        except: continue
+        # Actual progress for this diameter
+        diam_spools = by_diam.get(dk, by_diam.get(f'{diam}\"', []))
+        if not diam_spools: continue
+        actual_sum = sum(spool_progress(project, s['spool_id']) for s in diam_spools)
+        actual_pct = round(actual_sum / len(diam_spools), 1)
+        diff = actual_pct - expected_pct
+        if today < fab_start:
+            status = 'not_started'
+        elif diff >= -5:
+            status = 'on_time'  # Green
+        elif diff >= -15:
+            status = 'at_risk'  # Orange
+        else:
+            status = 'delayed'  # Red
+        overall_expected += expected_pct; overall_actual += actual_pct; overall_count += 1
+        result.append({
+            'diameter': dk, 'spool_count': len(diam_spools),
+            'expected_pct': expected_pct, 'actual_pct': actual_pct, 'diff': round(diff, 1), 'status': status,
+            'fab_start': fab.get('start',''), 'fab_end': fab.get('end',''),
+            'paint_start': paint.get('start','') if paint else '', 'paint_end': paint.get('end','') if paint else '',
+            'total_start': fab.get('start',''), 'total_end': str(total_end),
+        })
+    overall_status = 'on_time'
+    if overall_count > 0:
+        avg_diff = (overall_actual - overall_expected) / overall_count
+        if avg_diff < -15: overall_status = 'delayed'
+        elif avg_diff < -5: overall_status = 'at_risk'
+    return {'diameters': result, 'overall_status': overall_status, 'today': str(today)}
+
+def daily_activity(project, day=None):
+    """Get activity for a specific day."""
+    if not day: day = date.today().strftime('%Y-%m-%d')
+    rows = db_fetchall("SELECT * FROM activity_log WHERE project=? AND timestamp LIKE ? ORDER BY timestamp DESC", (project, f"{day}%"))
+    return fix_timestamps(rows)
+
+def generate_report_data(project):
+    """Build full report data for a project."""
+    st = project_stats(project)
+    sched = schedule_status(project)
+    today = date.today().strftime('%Y-%m-%d')
+    today_act = daily_activity(project, today)
+    spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
+    # Count steps completed today
+    steps_today = len([a for a in today_act if a.get('action') == 'completed'])
+    # Spools completed (100%)
+    completed_spools = []
+    for s in spools:
+        p = spool_progress(project, s['spool_id'])
+        if p >= 100: completed_spools.append(s['spool_id'])
+    return {
+        'project': project, 'date': today, 'stats': st, 'schedule': sched,
+        'today_activity': today_act, 'steps_completed_today': steps_today,
+        'completed_spools': completed_spools, 'total_spools': len(spools),
+    }
 
 # ── API: Projects ─────────────────────────────────────────────────────────────
 @app.route('/')
@@ -394,9 +496,19 @@ def api_migrate():
                 get_db().commit()
                 results.append("created drawings table")
             except: get_db().rollback(); results.append("drawings table exists")
+            try:
+                cur = get_db().cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS schedule (id SERIAL PRIMARY KEY, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start DATE NOT NULL, planned_end DATE NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type))")
+                get_db().commit()
+                results.append("created schedule table")
+            except: get_db().rollback(); results.append("schedule table exists")
         else:
             try:
                 db_execute("CREATE TABLE IF NOT EXISTS drawings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BLOB NOT NULL, UNIQUE(project, spool_id))")
+                db_commit()
+            except: pass
+            try:
+                db_execute("CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start TEXT NOT NULL, planned_end TEXT NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type))")
                 db_commit()
             except: pass
         db_execute("DELETE FROM activity_log"); db_execute("DELETE FROM progress"); db_execute("DELETE FROM spools")
@@ -425,6 +537,196 @@ def api_cleanup():
 def healthz():
     try: db_execute("SELECT 1"); return jsonify({'status':'ok','db':'connected'})
     except Exception as e: return jsonify({'status':'error','db':str(e)}), 500
+
+# ── API: Schedule & Reports ──────────────────────────────────────────────────
+@app.route('/api/project/<project>/schedule', methods=['POST'])
+def api_set_schedule(project):
+    """Import schedule data. Accepts either:
+    1) JSON array of {diameter, task_type, planned_start, planned_end, spool_count, description}
+    2) JSON with {fab_start: "YYYY-MM-DD"} to auto-calculate from spool data using Gantt logic.
+    """
+    data = request.get_json()
+    if not data: return jsonify({'error': 'No JSON data'}), 400
+    count = 0
+    if isinstance(data, list):
+        # Direct schedule import
+        for item in data:
+            if USE_PG:
+                db_execute("INSERT INTO schedule (project,diameter,task_type,description,planned_start,planned_end,spool_count) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (project,diameter,task_type) DO UPDATE SET description=EXCLUDED.description,planned_start=EXCLUDED.planned_start,planned_end=EXCLUDED.planned_end,spool_count=EXCLUDED.spool_count",
+                    (project, item['diameter'], item['task_type'], item.get('description',''), item['planned_start'], item['planned_end'], item.get('spool_count',0)))
+            else:
+                db_execute("INSERT INTO schedule (project,diameter,task_type,description,planned_start,planned_end,spool_count) VALUES (?,?,?,?,?,?,?) ON CONFLICT(project,diameter,task_type) DO UPDATE SET description=excluded.description,planned_start=excluded.planned_start,planned_end=excluded.planned_end,spool_count=excluded.spool_count",
+                    (project, item['diameter'], item['task_type'], item.get('description',''), item['planned_start'], item['planned_end'], item.get('spool_count',0)))
+            count += 1
+    elif isinstance(data, dict) and 'fab_start' in data:
+        # Auto-calculate from spool data
+        from datetime import timedelta
+        fab_start = date.fromisoformat(data['fab_start'])
+        spools = db_fetchall("SELECT main_diameter FROM spools WHERE project=?", (project,))
+        diam_counts = {}
+        for s in spools:
+            d = (s['main_diameter'] or '?').replace('"','')
+            if d not in diam_counts: diam_counts[d] = 0
+            diam_counts[d] += 1
+        current_fab = fab_start
+        for diam in DIAMETER_ORDER:
+            if diam not in diam_counts: continue
+            cnt = diam_counts[diam]
+            rate = SPOOLS_PER_DAY.get(diam, 2.0)
+            fab_days = max(1, round(cnt / rate))
+            fab_end = current_fab + timedelta(days=fab_days)
+            paint_start = fab_end + timedelta(days=1)
+            paint_end = paint_start + timedelta(days=PAINTING_DAYS)
+            dk = f'{diam}"'
+            for tt, sd, ed, desc in [
+                ('fabrication', current_fab, fab_end, f'Fabrication {dk} ({cnt} spools)'),
+                ('painting', paint_start, paint_end, f'Painting {dk}'),
+            ]:
+                if USE_PG:
+                    db_execute("INSERT INTO schedule (project,diameter,task_type,description,planned_start,planned_end,spool_count) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (project,diameter,task_type) DO UPDATE SET description=EXCLUDED.description,planned_start=EXCLUDED.planned_start,planned_end=EXCLUDED.planned_end,spool_count=EXCLUDED.spool_count",
+                        (project, dk, tt, desc, str(sd), str(ed), cnt))
+                else:
+                    db_execute("INSERT INTO schedule (project,diameter,task_type,description,planned_start,planned_end,spool_count) VALUES (?,?,?,?,?,?,?) ON CONFLICT(project,diameter,task_type) DO UPDATE SET description=excluded.description,planned_start=excluded.planned_start,planned_end=excluded.planned_end,spool_count=excluded.spool_count",
+                        (project, dk, tt, desc, str(sd), str(ed), cnt))
+                count += 1
+            overlap = max(1, round(fab_days * 0.4))
+            current_fab = current_fab + timedelta(days=fab_days - overlap)
+    db_commit()
+    return jsonify({'ok': True, 'entries': count})
+
+@app.route('/api/project/<project>/schedule')
+@login_required
+def api_get_schedule(project):
+    rows = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
+    return jsonify(fix_timestamps(rows))
+
+@app.route('/api/project/<project>/report')
+@login_required
+def api_report_data(project):
+    return jsonify(generate_report_data(project))
+
+@app.route('/project/<project>/report')
+@login_required
+def report_page(project):
+    return render_template_string(REPORT_HTML, project=project)
+
+@app.route('/api/project/<project>/report/download')
+@login_required
+def api_report_download(project):
+    """Download a professional Excel production report for customer."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    import tempfile
+    rpt = generate_report_data(project)
+    st = rpt['stats']; sched = rpt.get('schedule')
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Production Report"
+    hf = Font(bold=True, size=11, color='FFFFFF'); hfill = PatternFill(start_color='2F5496', end_color='2F5496', fill_type='solid')
+    bf = Font(size=10); bfb = Font(bold=True, size=10)
+    green_fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+    orange_fill = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
+    red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+    thin = Border(left=Side('thin',color='C0C0C0'),right=Side('thin',color='C0C0C0'),top=Side('thin',color='C0C0C0'),bottom=Side('thin',color='C0C0C0'))
+    # Title
+    ws.merge_cells('A1:H1')
+    ws['A1'] = f"ENERXON — Production Report / 生产报告"; ws['A1'].font = Font(bold=True, size=16, color='2F5496')
+    ws['A2'] = f"Project: {project}"; ws['A2'].font = bfb
+    ws['A3'] = f"Date: {rpt['date']}"; ws['A3'].font = bf
+    ws['A4'] = f"Overall Progress: {st['overall_pct']}%"; ws['A4'].font = Font(bold=True, size=12, color='2F5496')
+    ws['A5'] = f"Total: {st['total']} spools | Done: {st['completed']} | In Progress: {st['in_progress']} | Pending: {st['not_started']}"; ws['A5'].font = bf
+    # Schedule status section
+    row = 7
+    if sched and sched.get('diameters'):
+        status_label = {'on_time': 'ON TIME ✓', 'at_risk': 'AT RISK ⚠', 'delayed': 'DELAYED ✗', 'not_started': 'NOT STARTED'}
+        ws.cell(row, 1, "PRODUCTION SCHEDULE STATUS / 生产计划状态").font = Font(bold=True, size=12, color='2F5496')
+        row += 1
+        for col, h in enumerate(['Diameter','Spools','Expected %','Actual %','Diff','Status','Fab Start','Fab End','Paint End'], 1):
+            c = ws.cell(row, col, h); c.font = hf; c.fill = hfill; c.alignment = Alignment(horizontal='center'); c.border = thin
+        row += 1
+        for d in sched['diameters']:
+            ws.cell(row, 1, d['diameter']).font = bfb; ws.cell(row, 1).border = thin
+            ws.cell(row, 2, d['spool_count']).font = bf; ws.cell(row, 2).alignment = Alignment(horizontal='center'); ws.cell(row, 2).border = thin
+            ws.cell(row, 3, d['expected_pct']).font = bf; ws.cell(row, 3).alignment = Alignment(horizontal='center'); ws.cell(row, 3).border = thin
+            ws.cell(row, 4, d['actual_pct']).font = bfb; ws.cell(row, 4).alignment = Alignment(horizontal='center'); ws.cell(row, 4).border = thin
+            ws.cell(row, 5, d['diff']).font = bf; ws.cell(row, 5).alignment = Alignment(horizontal='center'); ws.cell(row, 5).border = thin
+            sc = ws.cell(row, 6, status_label.get(d['status'], d['status']))
+            sc.font = bfb; sc.alignment = Alignment(horizontal='center'); sc.border = thin
+            if d['status'] == 'on_time': sc.fill = green_fill
+            elif d['status'] == 'at_risk': sc.fill = orange_fill
+            elif d['status'] == 'delayed': sc.fill = red_fill
+            ws.cell(row, 7, d['fab_start']).font = bf; ws.cell(row, 7).border = thin
+            ws.cell(row, 8, d['fab_end']).font = bf; ws.cell(row, 8).border = thin
+            ws.cell(row, 9, d.get('paint_end','')).font = bf; ws.cell(row, 9).border = thin
+            row += 1
+        row += 1
+        # Mini Gantt
+        ws.cell(row, 1, "GANTT OVERVIEW / 甘特图概览").font = Font(bold=True, size=12, color='2F5496')
+        row += 1
+        # Find date range for Gantt
+        all_starts = [d['fab_start'] for d in sched['diameters'] if d['fab_start']]
+        all_ends = [d.get('paint_end','') or d['fab_end'] for d in sched['diameters'] if d['fab_end']]
+        if all_starts and all_ends:
+            from datetime import timedelta
+            gmin = date.fromisoformat(min(all_starts)); gmax = date.fromisoformat(max(all_ends))
+            # Weeks
+            week_start = gmin - timedelta(days=gmin.weekday())
+            weeks = []
+            cur = week_start
+            while cur <= gmax + timedelta(days=7):
+                weeks.append(cur); cur += timedelta(days=7)
+            # Headers
+            ws.cell(row, 1, 'Diameter').font = hf; ws.cell(row, 1).fill = hfill; ws.cell(row, 1).border = thin
+            ws.cell(row, 2, 'Phase').font = hf; ws.cell(row, 2).fill = hfill; ws.cell(row, 2).border = thin
+            for i, w in enumerate(weeks):
+                c = ws.cell(row, 3+i, w.strftime('%d/%m'))
+                c.font = Font(bold=True, size=7, color='FFFFFF'); c.fill = hfill; c.alignment = Alignment(horizontal='center'); c.border = thin
+                ws.column_dimensions[openpyxl.utils.get_column_letter(3+i)].width = 4
+            # Today marker column
+            today_col = None
+            for i, w in enumerate(weeks):
+                wend = w + timedelta(days=6)
+                if w <= date.today() <= wend: today_col = 3+i; break
+            row += 1
+            fab_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+            paint_fill = PatternFill(start_color='70AD47', end_color='70AD47', fill_type='solid')
+            today_fill = PatternFill(start_color='FF0000', end_color='FF0000', fill_type='solid')
+            for d in sched['diameters']:
+                for phase, ps, pe, fill in [('Fab', d['fab_start'], d['fab_end'], fab_fill), ('Paint', d.get('paint_start',''), d.get('paint_end',''), paint_fill)]:
+                    if not ps or not pe: continue
+                    ws.cell(row, 1, d['diameter']).font = bfb; ws.cell(row, 1).border = thin
+                    ws.cell(row, 2, phase).font = bf; ws.cell(row, 2).border = thin
+                    psd = date.fromisoformat(ps); ped = date.fromisoformat(pe)
+                    for i, w in enumerate(weeks):
+                        wend = w + timedelta(days=6)
+                        col = 3+i
+                        ws.cell(row, col).border = thin
+                        if psd <= wend and ped >= w:
+                            ws.cell(row, col).fill = fill
+                        if today_col and col == today_col:
+                            ws.cell(row, col).border = Border(left=Side('medium',color='FF0000'),right=Side('medium',color='FF0000'),top=Side('thin',color='C0C0C0'),bottom=Side('thin',color='C0C0C0'))
+                    row += 1
+    # Column widths
+    ws.column_dimensions['A'].width = 14; ws.column_dimensions['B'].width = 10; ws.column_dimensions['C'].width = 12
+    ws.column_dimensions['D'].width = 12; ws.column_dimensions['E'].width = 8; ws.column_dimensions['F'].width = 16
+    ws.column_dimensions['G'].width = 12; ws.column_dimensions['H'].width = 12; ws.column_dimensions['I'].width = 12
+    # Today's activity
+    row += 1
+    if rpt.get('today_activity'):
+        ws.cell(row, 1, f"TODAY'S ACTIVITY ({rpt['date']}) / 今日动态").font = Font(bold=True, size=12, color='2F5496')
+        row += 1
+        for col, h in enumerate(['Time','Spool','Action','Operator','Details'], 1):
+            c = ws.cell(row, col, h); c.font = hf; c.fill = hfill; c.border = thin
+        row += 1
+        for a in rpt['today_activity'][:50]:
+            ts = str(a.get('timestamp',''))
+            ws.cell(row, 1, ts[11:19] if len(ts)>11 else ts).font = bf; ws.cell(row, 1).border = thin
+            ws.cell(row, 2, a.get('spool_id','')).font = bf; ws.cell(row, 2).border = thin
+            ws.cell(row, 3, a.get('action','')).font = bf; ws.cell(row, 3).border = thin
+            ws.cell(row, 4, a.get('operator','')).font = bf; ws.cell(row, 4).border = thin
+            ws.cell(row, 5, a.get('details','')).font = bf; ws.cell(row, 5).border = thin
+            row += 1
+    ws.freeze_panes = 'A7'
+    tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False); wb.save(tmp.name)
+    return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{date.today().strftime('%Y%m%d')}.xlsx")
 
 # ── HTML: Home (Project List) ─────────────────────────────────────────────────
 COMMON_CSS = """*{box-sizing:border-box;margin:0;padding:0}
@@ -508,6 +810,8 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
   <select id="fl" onchange="filter()"><option value="">All Lines</option><option value="A">Line A</option><option value="B">Line B</option><option value="C">Line C</option></select>
   <select id="fs" onchange="filter()"><option value="">All Status</option><option value="done">Done</option><option value="wip">In Progress</option><option value="todo">Not Started</option></select>
   <a class="btn" href="/api/project/{{ project }}/export">Export Excel</a>
+  <a class="btn" href="/project/{{ project }}/report" style="background:#27ae60">📊 Report</a>
+  <a class="btn" href="/api/project/{{ project }}/report/download" style="background:#ED7D31">📥 Report Excel</a>
 </div>
 <div class="section"><div class="spool-list" id="list"></div></div>
 <div class="section" id="act"></div>
@@ -664,6 +968,153 @@ async function rem(n,v){
   const sm={}; D.steps.forEach(x=>{sm[x.step_number]=x}); const st=sm[n]||{};
   await fetch(`/api/project/${P}/spool/${SID}/step/${n}`,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({completed:!!st.completed,operator:st.completed_by||document.getElementById('op').value||'',remarks:v})});
+}
+load();
+</script></body></html>"""
+
+# ── HTML: Production Report ──────────────────────────────────────────────────
+REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{{ project }} — Production Report</title><style>""" + COMMON_CSS + """
+.report-card{background:#fff;border-radius:12px;padding:20px;margin:12px 16px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.report-card h3{font-size:16px;color:#2F5496;margin-bottom:12px}
+.status-badge{display:inline-block;padding:6px 16px;border-radius:20px;font-weight:700;font-size:14px;color:#fff}
+.status-on_time{background:#27ae60}.status-at_risk{background:#f39c12}.status-delayed{background:#e74c3c}.status-not_started{background:#95a5a6}
+.status-label{font-size:11px;text-transform:uppercase;letter-spacing:1px}
+.diam-status{display:grid;gap:10px;margin-top:12px}
+.diam-row{background:#f8f9fa;border-radius:8px;padding:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.diam-row .d-name{font-size:18px;font-weight:700;color:#2F5496;min-width:50px}
+.diam-row .d-info{flex:1;min-width:150px}
+.diam-row .d-status{min-width:90px;text-align:center}
+.gantt-mini{margin-top:12px;overflow-x:auto}
+.gantt-table{border-collapse:collapse;width:100%;min-width:600px}
+.gantt-table th{background:#2F5496;color:#fff;padding:4px;font-size:9px;text-align:center;position:sticky;top:0}
+.gantt-table td{padding:3px 1px;border:1px solid #e8e8e8;height:20px;font-size:10px}
+.gantt-table .g-label{white-space:nowrap;padding:3px 6px;font-weight:600;font-size:11px}
+.g-fab{background:#4472C4}.g-paint{background:#70AD47}.g-today{border-left:2px solid #e74c3c;border-right:2px solid #e74c3c}
+.act-item{padding:8px 12px;border-bottom:1px solid #f0f2f5;display:flex;gap:10px;align-items:center;font-size:13px}
+.act-item .time{color:#888;font-size:11px;min-width:55px}.act-item .spool{font-weight:600;color:#2F5496;min-width:70px}
+.act-item .detail{flex:1;color:#555}
+.legend{display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;font-size:12px}
+.legend span{display:flex;align-items:center;gap:4px}
+.legend .box{width:14px;height:14px;border-radius:3px;display:inline-block}
+.expected-bar{background:#e8e8e8;border-radius:6px;height:8px;position:relative;overflow:visible;margin-top:4px}
+.expected-fill{position:absolute;left:0;top:0;height:100%;border-radius:6px;opacity:0.3;background:#2F5496}
+.actual-fill{position:absolute;left:0;top:0;height:100%;border-radius:6px}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:12px 0}
+.sum-card{text-align:center;padding:12px;border-radius:8px;background:#f8f9fa}
+.sum-card .v{font-size:24px;font-weight:700}.sum-card .l{font-size:11px;color:#888;margin-top:2px}
+@media print{.header{background:#2F5496!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}.no-print{display:none!important}}
+</style></head><body>
+<div class="header">
+  <a class="back no-print" href="/project/{{ project }}">← Back / 返回</a>
+  <h1>Production Report / 生产报告</h1>
+  <div class="sub">{{ project }} — <span id="rpt-date"></span></div>
+</div>
+<div id="rpt-content"><div style="text-align:center;padding:40px;color:#888">Loading report... / 加载报告中...</div></div>
+<div style="padding:16px;text-align:center" class="no-print">
+  <a class="btn" href="/api/project/{{ project }}/report/download">📥 Download Excel Report / 下载Excel报告</a>
+  <button class="btn" onclick="window.print()" style="margin-left:8px">🖨 Print / 打印</button>
+</div>
+<script>
+const P='{{project}}';
+const STATUS_LABELS = {on_time:'ON TIME / 按时',at_risk:'AT RISK / 有延迟风险',delayed:'DELAYED / 已延迟',not_started:'NOT STARTED / 未开始'};
+const STATUS_COLORS = {on_time:'#27ae60',at_risk:'#f39c12',delayed:'#e74c3c',not_started:'#95a5a6'};
+async function load(){
+  const r = await fetch(`/api/project/${P}/report`);
+  const d = await r.json();
+  document.getElementById('rpt-date').textContent = d.date;
+  let html = '';
+  // Overall status
+  const st = d.stats;
+  const sch = d.schedule;
+  const overallStatus = sch ? sch.overall_status : 'not_started';
+  html += `<div class="report-card">
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+      <div><h3 style="margin:0">Overall Status / 总体状态</h3>
+        <div class="status-badge status-${overallStatus}" style="margin-top:8px">${STATUS_LABELS[overallStatus]||overallStatus}</div></div>
+      <div style="flex:1;min-width:200px">
+        <div class="summary-grid">
+          <div class="sum-card"><div class="v" style="color:#2F5496">${st.overall_pct}%</div><div class="l">Progress / 进度</div></div>
+          <div class="sum-card"><div class="v">${st.total}</div><div class="l">Total / 总数</div></div>
+          <div class="sum-card"><div class="v" style="color:#27ae60">${st.completed}</div><div class="l">Done / 完成</div></div>
+          <div class="sum-card"><div class="v" style="color:#f39c12">${st.in_progress}</div><div class="l">WIP / 进行中</div></div>
+          <div class="sum-card"><div class="v" style="color:#e74c3c">${st.not_started}</div><div class="l">Pending / 待开始</div></div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+  // Schedule status per diameter
+  if(sch && sch.diameters && sch.diameters.length){
+    html += `<div class="report-card"><h3>Schedule Status by Diameter / 按管径计划状态</h3><div class="diam-status">`;
+    sch.diameters.forEach(dm => {
+      const color = STATUS_COLORS[dm.status] || '#95a5a6';
+      const barMax = Math.max(dm.expected_pct, dm.actual_pct, 1);
+      html += `<div class="diam-row" style="border-left:4px solid ${color}">
+        <div class="d-name">${dm.diameter}</div>
+        <div class="d-info">
+          <div style="font-size:12px;color:#888">${dm.spool_count} spools · Expected / 预期: ${dm.expected_pct}% · Actual / 实际: <strong>${dm.actual_pct}%</strong> (${dm.diff>=0?'+':''}${dm.diff}%)</div>
+          <div class="expected-bar" style="margin-top:6px">
+            <div class="expected-fill" style="width:${dm.expected_pct}%"></div>
+            <div class="actual-fill" style="width:${dm.actual_pct}%;background:${color}"></div>
+          </div>
+          <div style="font-size:10px;color:#aaa;margin-top:2px">Fab: ${dm.fab_start} → ${dm.fab_end} · Paint → ${dm.paint_end || 'N/A'}</div>
+        </div>
+        <div class="d-status"><span class="status-badge status-${dm.status}" style="font-size:11px;padding:4px 10px">${STATUS_LABELS[dm.status]||dm.status}</span></div>
+      </div>`;
+    });
+    html += `</div></div>`;
+    // Mini Gantt
+    html += `<div class="report-card"><h3>Gantt Overview / 甘特图概览</h3>
+      <div class="legend">
+        <span><span class="box" style="background:#4472C4"></span> Fabrication / 制作</span>
+        <span><span class="box" style="background:#70AD47"></span> Painting / 涂装</span>
+        <span><span class="box" style="background:#e74c3c;width:3px"></span> Today / 今天</span>
+      </div>
+      <div class="gantt-mini"><table class="gantt-table"><thead><tr><th style="min-width:70px">Diameter</th><th style="min-width:50px">Phase</th>`;
+    // Calculate weeks
+    const allStarts = sch.diameters.map(d=>d.fab_start).filter(x=>x);
+    const allEnds = sch.diameters.map(d=>d.paint_end||d.fab_end).filter(x=>x);
+    const gmin = new Date(Math.min(...allStarts.map(s=>new Date(s)))); const gmax = new Date(Math.max(...allEnds.map(s=>new Date(s))));
+    gmin.setDate(gmin.getDate() - gmin.getDay() + 1); // Monday
+    const weeks = []; let cur = new Date(gmin);
+    while(cur <= new Date(gmax.getTime()+7*86400000)){weeks.push(new Date(cur)); cur.setDate(cur.getDate()+7);}
+    const today = new Date(); today.setHours(0,0,0,0);
+    weeks.forEach(w => { html += `<th>${w.toLocaleDateString('en',{day:'2-digit',month:'short'})}</th>`; });
+    html += `</tr></thead><tbody>`;
+    sch.diameters.forEach(dm => {
+      [{phase:'Fab',start:dm.fab_start,end:dm.fab_end,cls:'g-fab'},{phase:'Paint',start:dm.paint_start,end:dm.paint_end,cls:'g-paint'}].forEach(ph => {
+        if(!ph.start||!ph.end) return;
+        const ps = new Date(ph.start), pe = new Date(ph.end);
+        html += `<tr><td class="g-label">${dm.diameter}</td><td class="g-label">${ph.phase}</td>`;
+        weeks.forEach(w => {
+          const we = new Date(w.getTime()+6*86400000);
+          let cls = '';
+          if(ps<=we && pe>=w) cls = ph.cls;
+          let todayCls = (today>=w && today<=we) ? ' g-today' : '';
+          html += `<td class="${cls}${todayCls}"></td>`;
+        });
+        html += `</tr>`;
+      });
+    });
+    html += `</tbody></table></div></div>`;
+  } else {
+    html += `<div class="report-card"><h3>Schedule Status / 计划状态</h3>
+      <p style="color:#888;padding:20px 0">No schedule configured. Use the API to set up a production schedule:<br>
+      <code>POST /api/project/${P}/schedule</code> with <code>{"fab_start":"YYYY-MM-DD"}</code></p></div>`;
+  }
+  // Today's activity
+  html += `<div class="report-card"><h3>Today's Activity / 今日动态 (${d.steps_completed_today} steps completed)</h3>`;
+  if(d.today_activity && d.today_activity.length){
+    d.today_activity.forEach(a => {
+      const ts = (a.timestamp||'').substring(11,19);
+      const icon = a.action==='completed' ? '✅' : a.action==='unchecked' ? '↩️' : '📝';
+      html += `<div class="act-item"><span class="time">${ts}</span><span class="spool">${a.spool_id}</span><span>${icon}</span><span class="detail">${a.details||a.action}</span></div>`;
+    });
+  } else {
+    html += `<div style="text-align:center;padding:20px;color:#aaa">No activity today yet / 今天暂无动态</div>`;
+  }
+  html += `</div>`;
+  document.getElementById('rpt-content').innerHTML = html;
 }
 load();
 </script></body></html>"""

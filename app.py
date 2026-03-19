@@ -278,7 +278,10 @@ def schedule_status(project):
 def daily_activity(project, day=None):
     """Get activity for a specific day."""
     if not day: day = date.today().strftime('%Y-%m-%d')
-    rows = db_fetchall("SELECT * FROM activity_log WHERE project=? AND timestamp LIKE ? ORDER BY timestamp DESC", (project, f"{day}%"))
+    if USE_PG:
+        rows = db_fetchall("SELECT * FROM activity_log WHERE project=? AND timestamp::date = ?::date ORDER BY timestamp DESC", (project, day))
+    else:
+        rows = db_fetchall("SELECT * FROM activity_log WHERE project=? AND timestamp LIKE ? ORDER BY timestamp DESC", (project, f"{day}%"))
     return fix_timestamps(rows)
 
 def generate_report_data(project):

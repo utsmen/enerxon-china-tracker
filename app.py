@@ -511,8 +511,8 @@ def api_migrate():
                 db_execute("CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start TEXT NOT NULL, planned_end TEXT NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type))")
                 db_commit()
             except: pass
-        db_execute("DELETE FROM activity_log"); db_execute("DELETE FROM progress"); db_execute("DELETE FROM spools")
-        db_commit(); results.append("cleared all data")
+        # NOTE: Data clearing removed for safety. Use /api/project/<id>/spool/<id>/delete for individual cleanup.
+        db_commit(); results.append("migration complete - no data cleared")
     except Exception as e: results.append(str(e))
     return jsonify({'ok': True, 'results': results})
 

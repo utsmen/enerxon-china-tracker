@@ -252,8 +252,10 @@ def schedule_status(project):
         actual_sum = sum(spool_progress(project, s['spool_id']) for s in diam_spools)
         actual_pct = round(actual_sum / len(diam_spools), 1)
         diff = actual_pct - expected_pct
-        if today < fab_start:
+        if today < fab_start and actual_pct == 0:
             status = 'not_started'
+        elif today < fab_start and actual_pct > 0:
+            status = 'on_time'  # Ahead of schedule — work started before planned date
         elif diff >= -5:
             status = 'on_time'  # Green
         elif diff >= -15:

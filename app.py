@@ -545,6 +545,7 @@ def api_migrate():
 def api_delete_spool(project, spool_id):
     db_execute("DELETE FROM activity_log WHERE project=? AND spool_id=?", (project, spool_id))
     db_execute("DELETE FROM progress WHERE project=? AND spool_id=?", (project, spool_id))
+    db_execute("DELETE FROM drawings WHERE project=? AND spool_id=?", (project, spool_id))
     db_execute("DELETE FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
     db_commit()
     return jsonify({'ok': True, 'deleted': spool_id})
@@ -554,6 +555,11 @@ def api_cleanup():
     db_execute("DELETE FROM activity_log WHERE project=''")
     db_execute("DELETE FROM progress WHERE project=''")
     db_execute("DELETE FROM spools WHERE project=''")
+    # Clean orphan drawings (drawings for spool_ids that no longer exist)
+    if USE_PG:
+        db_execute("DELETE FROM drawings WHERE NOT EXISTS (SELECT 1 FROM spools WHERE spools.project=drawings.project AND spools.spool_id=drawings.spool_id)")
+    else:
+        db_execute("DELETE FROM drawings WHERE NOT EXISTS (SELECT 1 FROM spools WHERE spools.project=drawings.project AND spools.spool_id=drawings.spool_id)")
     db_commit()
     return jsonify({'ok': True})
 

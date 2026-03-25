@@ -1421,32 +1421,53 @@ async function load(){
       }
       html += `</tr></thead><tbody>`;
 
-      // Standard schedule = each diameter's dates shifted forward by totalSaved days
-      // (The current schedule IS the expedited one. Standard = expedited + saved time)
+      // The current schedule IS the expedited schedule.
+      // Standard = SAME start, but end extended by totalSaved days (takes longer without expediting).
+      // Saved weeks = weeks where standard would still be working but expedited is already done.
+      // Forecast = dashed border on the week containing the forecast end date for that diameter.
+      const fcData = d.forecast ? d.forecast.diameters : {};
       let lastDiamIdx = sch.diameters.length - 1;
       sch.diameters.forEach((dm, dmIdx) => {
         const ap = dm.actual_pct;
+        const dmFc = fcData[dm.diameter] || {};
+        const fcEndDate = dmFc.forecast_end ? new Date(dmFc.forecast_end) : null;
+        const dmStarted = dmFc.started !== false;
+
         [{phase:'Fab',start:dm.fab_start,end:dm.fab_end,stdCls:'g-std-fab',expCls:'g-exp-fab'},
          {phase:'Paint',start:dm.paint_start,end:dm.paint_end,stdCls:'g-std-paint',expCls:'g-exp-paint'}].forEach((ph,idx) => {
           if(!ph.start||!ph.end) return;
           const ps=new Date(ph.start), pe=new Date(ph.end);
-          // Standard = expedited dates shifted forward by saved time
-          const stdPs = new Date(ps.getTime()+totalSaved*86400000);
+          // Standard: same start, end pushed out by totalSaved
           const stdPe = new Date(pe.getTime()+totalSaved*86400000);
           html += `<tr>`;
           if(idx===0) html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${ap}%"></div></div></td>`;
           html += `<td class="g-label" style="font-size:9px;color:#666">${ph.phase}</td>`;
           weeks.forEach(w => {
-            const inStd = stdPs<=w.end && stdPe>=w.start;
-            const inExp = ps<=w.end && pe>=w.start;
-            const isSaved = inStd && !inExp;
+            const inExp = ps<=w.end && pe>=w.start;         // Inside expedited schedule
+            const afterExp = ps<=w.end && stdPe>=w.start && !inExp;  // After expedited but within standard
             const isToday = w.current;
             const isLastPaintRow = dmIdx===lastDiamIdx && idx===1;
+            // Forecast: show dashed border on the week that contains the forecast end (fab row only)
+            const isForecast = idx===0 && fcEndDate && dmStarted && ap<100 && fcEndDate>=w.start && fcEndDate<=w.end;
             let content = '';
-            if(isSaved) content = `<div class="g-bar g-saved"></div>`;
-            else if(inExp && inStd) content = `<div class="g-bar g-std ${ph.stdCls}"></div><div class="g-bar ${ph.expCls}"></div>`;
-            else if(inExp) content = `<div class="g-bar ${ph.expCls}"></div>`;
-            else if(inStd) content = `<div class="g-bar g-std ${ph.stdCls}"></div>`;
+            if(afterExp){
+              // This week is saved (standard would still be working, expedited is done)
+              content = `<div class="g-bar g-saved"></div>`;
+            } else if(inExp){
+              // Active expedited bar
+              content = `<div class="g-bar ${ph.expCls}"></div>`;
+            }
+            // Forecast dashed border
+            if(isForecast) content += `<div class="g-bar g-forecast g-fc-fab"></div>`;
+            // Completed check marks (show ✓ in past completed weeks of expedited bars)
+            if(inExp && ap > 0){
+              const weekEnd = w.end;
+              const phaseDuration = (pe-ps)/86400000;
+              const weekPos = (weekEnd-ps)/86400000;
+              const weekPct = Math.min(weekPos/Math.max(phaseDuration,1)*100, 100);
+              if(weekPct <= ap && !isToday) content += `<div class="g-pct" style="color:#fff">✓</div>`;
+            }
+            // Today marker
             if(isToday && inExp) content += `<div class="g-today-line"></div><div class="g-pct">${ap}%</div>`;
             else if(isToday && isLastPaintRow) content += `<div class="g-today-line"></div><div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11;white-space:nowrap">TODAY</div>`;
             else if(isToday) content += `<div class="g-today-line"></div>`;

@@ -1642,10 +1642,13 @@ async function load(){
           } else if(isSaved){
             content = `<div class="g-bar g-saved"></div>`;
           }
-          // Show fab% on current week if not already shown on a bar
+          // Show fab% on current week — use blue bar as background
           if(isToday && !inExp){
-            content += `<div class="g-today-line"></div>`;
-            if(fabP > 0 && fabP < 100) content += `<div class="g-pct" style="color:#fff;background:#4472C4;padding:1px 4px;border-radius:3px;font-size:8px">${fabP}%</div>`;
+            if(fabP > 0 && fabP < 100){
+              content = `<div class="g-bar g-exp-fab"></div><div class="g-today-line"></div><div class="g-pct">${fabP}%</div>`;
+            } else {
+              content += `<div class="g-today-line"></div>`;
+            }
           }
           html += `<td>${content}</td>`;
         });
@@ -1671,10 +1674,13 @@ async function load(){
             content = `<div class="g-bar g-saved"></div>`;
           }
           if(isForecastPaint) content += `<div class="g-bar g-forecast" style="border-color:#ED7D31"></div>`;
-          // Show paint% on current week if not already shown on a bar
+          // Show paint% on current week — use orange bar as background
           if(isToday && !inExp){
-            content += `<div class="g-today-line"></div>`;
-            if(paintP > 0 && paintP < 100) content += `<div class="g-pct" style="color:#fff;background:#ED7D31;padding:1px 4px;border-radius:3px;font-size:8px">${paintP}%</div>`;
+            if(paintP > 0 && paintP < 100){
+              content = `<div class="g-bar g-exp-paint"></div><div class="g-today-line"></div><div class="g-pct">${paintP}%</div>`;
+            } else {
+              content += `<div class="g-today-line"></div>`;
+            }
           }
           if(isToday && isLast) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11">TODAY</div>`;
           html += `<td>${content}</td>`;

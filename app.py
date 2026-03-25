@@ -1464,12 +1464,14 @@ async function load(){
           html += `<td class="g-label" style="font-size:9px;color:#666">${ph.phase}</td>`;
           weeks.forEach(w => {
             const inStandard = ps<=w.end && pe>=w.start;
-            // Expedited bar: only if week starts ON or BEFORE commitEnd AND within scaled schedule
-            const inExpedited = inStandard && w.start<=commitEnd && expStartDate<=w.end && expEndDate>=w.start;
+            // Expedited: independent of standard position (scaled dates may be earlier)
+            const inExpedited = w.start<=commitEnd && expStartDate<=w.end && expEndDate>=w.start;
+            // Saved: standard bar exists but no expedited bar in this week
             const isSaved = inStandard && !inExpedited;
             const isToday = w.current;
             const isLastPaintRow = dmIdx===lastDiamIdx && idx===1;
-            const isForecast = idx===0 && overallFcEnd && overallFcEnd>=w.start && overallFcEnd<=w.end;
+            // Forecast: only on first diameter's fab row (shows once as column marker)
+            const isForecast = dmIdx===0 && idx===0 && overallFcEnd && overallFcEnd>=w.start && overallFcEnd<=w.end;
             let content = '';
             if(inExpedited){
               content = `<div class="g-bar ${ph.expCls}"></div>`;

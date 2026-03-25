@@ -1616,9 +1616,12 @@ async function load(){
           // Paint: starts after fab, scale duration, cap at commitEnd
           expPaintStart = new Date(Math.min(psDate.getTime() + (paintPs-psDate)*ratio, commitEnd.getTime()));
           expPaintEnd = new Date(Math.min(psDate.getTime() + (paintPe-psDate)*ratio, commitEnd.getTime()));
-          // Ensure paint starts after fab
+          // Ensure paint starts after fab, minimum 1 day duration
           if(expPaintStart < expFabEnd) expPaintStart = new Date(expFabEnd.getTime() + DAY);
-          if(expPaintEnd < expPaintStart) expPaintEnd = expPaintStart;
+          if(expPaintEnd <= expPaintStart) expPaintEnd = new Date(expPaintStart.getTime() + DAY);
+          // Cap at end of last week (not commitEnd) so bar is always visible
+          const lastWeekEnd = new Date(psDate.getTime() + (numWeeks-1)*7*DAY + 6*DAY);
+          if(expPaintEnd > lastWeekEnd) expPaintEnd = lastWeekEnd;
         } else {
           // No expediting — use standard dates
           expFabStart = fabPs; expFabEnd = fabPe;

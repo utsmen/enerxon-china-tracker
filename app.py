@@ -1434,7 +1434,7 @@ REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vi
 .g-exp-fab{background:#4472C4;z-index:1}.g-exp-paint{background:#ED7D31;z-index:1}
 .g-saved{background:#E2EFDA;border:1px solid #A9D18E;z-index:1;display:flex;align-items:center;justify-content:center}
 .g-saved::after{content:"✓";font-size:9px;color:#548235;font-weight:700}
-.g-forecast{border:3px dashed #e74c3c;z-index:20;pointer-events:none}
+.g-forecast{border:2px dashed #e74c3c;z-index:20;pointer-events:none}
 .g-today-line{position:absolute;top:0;bottom:0;width:3px;background:#e74c3c;z-index:10;left:30%}
 .g-pct{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:9px;font-weight:700;color:#fff;z-index:5}
 .mini-prog{width:100%;height:4px;background:#e8e8e8;border-radius:2px;margin-top:2px}
@@ -1694,7 +1694,7 @@ async function load(){
           <span><span class="box" style="background:#4472C4"></span> Fabrication / 制作</span>
           <span><span class="box" style="background:#ED7D31"></span> Painting / 涂装</span>
           ${hasExpediting?'<span><span class="box" style="background:#E2EFDA;border:1px solid #A9D18E"></span> Saved / 节省 ✓</span>':''}
-          <span><span class="box" style="border:3px dashed #e74c3c;width:12px;height:8px;display:inline-block;border-radius:2px"></span> Forecast / 预测</span>
+          <span><span class="box" style="border:2px dashed #e74c3c;width:12px;height:8px;display:inline-block;border-radius:2px"></span> Forecast / 预测</span>
           <span><span class="box" style="background:#e74c3c;width:3px"></span> Today / 今天</span>
         </div></div>`;
 

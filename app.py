@@ -154,32 +154,110 @@ def init_db():
         """); c.close()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+# Step hour definitions
+FAB_FIXED_STEPS = [1,2,3,4,5,7,8,9]  # 2h each
+BRANCH_STEP = 16  # 2h
+WELDING_STEP = 6  # variable: RAF / capability * 8h
+PAINT_FIXED_STEPS_2H = [10,13,14]  # 2h each
+PACKING_STEP = 15  # 3h
+SURFACE_STEPS = [11,12]  # variable: surface / capability * 8h (split equally)
+
+def spool_hours(spool_row, completed_steps, settings):
+    """Calculate hours-based progress for a single spool. Returns dict with breakdown."""
+    raf = float(spool_row.get('raf_inches') or 0)
+    surface = float(spool_row.get('surface_m2') or 0)
+    has_br = spool_row.get('has_branches', 0)
+    weld_cap = float(settings.get('welding_capability_ipd', '552'))
+    paint_cap = float(settings.get('painting_capability_m2d', '91'))
+
+    # Fab hours
+    weld_hrs = (raf / weld_cap * 8) if weld_cap > 0 and raf > 0 else 0
+    fab_fixed = len(FAB_FIXED_STEPS) * 2 + (2 if has_br else 0)
+    fab_total = fab_fixed + weld_hrs
+
+    fab_done = 0
+    for step in FAB_FIXED_STEPS:
+        if step in completed_steps: fab_done += 2
+    if has_br and BRANCH_STEP in completed_steps: fab_done += 2
+    if WELDING_STEP in completed_steps: fab_done += weld_hrs
+
+    # Paint hours
+    surface_hrs = (surface * 0.98 / paint_cap * 8) if paint_cap > 0 and surface > 0 else 0
+    paint_fixed = len(PAINT_FIXED_STEPS_2H) * 2 + 3  # steps 10,13,14 @2h + step 15 @3h
+    paint_total = paint_fixed + surface_hrs
+
+    paint_done = 0
+    for step in PAINT_FIXED_STEPS_2H:
+        if step in completed_steps: paint_done += 2
+    if PACKING_STEP in completed_steps: paint_done += 3
+    if 11 in completed_steps: paint_done += surface_hrs / 2
+    if 12 in completed_steps: paint_done += surface_hrs / 2
+
+    total = fab_total + paint_total
+    done = fab_done + paint_done
+    pct = round(done / total * 100, 1) if total > 0 else 0.0
+    fab_pct = round(fab_done / fab_total * 100, 1) if fab_total > 0 else 0.0
+    paint_pct = round(paint_done / paint_total * 100, 1) if paint_total > 0 else 0.0
+
+    return {
+        'fab_total': fab_total, 'fab_done': fab_done, 'fab_pct': fab_pct,
+        'paint_total': paint_total, 'paint_done': paint_done, 'paint_pct': paint_pct,
+        'total': total, 'done': done, 'pct': pct,
+        'raf_inches': raf, 'surface_m2': surface, 'weld_hrs': weld_hrs, 'surface_hrs': surface_hrs,
+    }
+
+def bulk_spool_progress(project, settings=None):
+    """Calculate hours-based progress for ALL spools at once. Returns {spool_id: hours_dict}."""
+    if not settings: settings = get_project_settings(project)
+    spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
+    all_progress = db_fetchall("SELECT spool_id, step_number, completed FROM progress WHERE project=?", (project,))
+    # Build completed steps per spool
+    completed_map = {}
+    for r in all_progress:
+        if r['completed']:
+            if r['spool_id'] not in completed_map: completed_map[r['spool_id']] = set()
+            completed_map[r['spool_id']].add(r['step_number'])
+    result = {}
+    for s in spools:
+        sid = s['spool_id']
+        done_steps = completed_map.get(sid, set())
+        result[sid] = spool_hours(s, done_steps, settings)
+        result[sid]['spool'] = s
+    return result
+
 def spool_progress(project, spool_id):
+    """Hours-based progress for a single spool. Returns percentage."""
+    settings = get_project_settings(project)
+    sp = db_fetchone("SELECT * FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
+    if not sp: return 0.0
     rows = db_fetchall("SELECT step_number, completed FROM progress WHERE project=? AND spool_id=?", (project, spool_id))
-    sp = db_fetchone("SELECT has_branches FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
-    has_br = sp and sp.get('has_branches')
-    wm = {s[0]:s[3] for s in PRODUCTION_STEPS if s[0] != 16 or has_br}
-    tw = sum(wm.values())
-    cw = sum(wm.get(r['step_number'],0) for r in rows if r['completed'] and r['step_number'] in wm)
-    return round(cw/tw*100, 1) if tw else 0.0
+    done_steps = set(r['step_number'] for r in rows if r['completed'])
+    return spool_hours(sp, done_steps, settings)['pct']
 
 def project_stats(project):
-    spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
-    st = {'total':len(spools),'completed':0,'in_progress':0,'not_started':0,'overall_pct':0.0,'by_diameter':{},'by_line':{}}
+    settings = get_project_settings(project)
+    bulk = bulk_spool_progress(project, settings)
+    spools = [v for v in bulk.values()]
+    total = len(spools)
+    st = {'total':total,'completed':0,'in_progress':0,'not_started':0,'overall_pct':0.0,'by_diameter':{},'by_line':{}}
     tp = 0
-    for s in spools:
-        p = spool_progress(project, s['spool_id']); tp += p
+    for v in spools:
+        p = v['pct']; tp += p; s = v['spool']
         if p>=100: st['completed']+=1
         elif p>0: st['in_progress']+=1
         else: st['not_started']+=1
         d = s['main_diameter'] or '?'
-        if d not in st['by_diameter']: st['by_diameter'][d] = {'total':0,'pct_sum':0}
+        if d not in st['by_diameter']: st['by_diameter'][d] = {'total':0,'pct_sum':0,'fab_pct_sum':0,'paint_pct_sum':0}
         st['by_diameter'][d]['total']+=1; st['by_diameter'][d]['pct_sum']+=p
+        st['by_diameter'][d]['fab_pct_sum']+=v['fab_pct']; st['by_diameter'][d]['paint_pct_sum']+=v['paint_pct']
         l = s['line'] or '?'
         if l not in st['by_line']: st['by_line'][l] = {'total':0,'pct_sum':0}
         st['by_line'][l]['total']+=1; st['by_line'][l]['pct_sum']+=p
-    if spools: st['overall_pct'] = round(tp/len(spools),1)
-    for v in st['by_diameter'].values(): v['avg_pct'] = round(v['pct_sum']/v['total'],1) if v['total'] else 0
+    if total: st['overall_pct'] = round(tp/total,1)
+    for v in st['by_diameter'].values():
+        v['avg_pct'] = round(v['pct_sum']/v['total'],1) if v['total'] else 0
+        v['fab_avg_pct'] = round(v['fab_pct_sum']/v['total'],1) if v['total'] else 0
+        v['paint_avg_pct'] = round(v['paint_pct_sum']/v['total'],1) if v['total'] else 0
     for v in st['by_line'].values(): v['avg_pct'] = round(v['pct_sum']/v['total'],1) if v['total'] else 0
     return st
 
@@ -207,11 +285,12 @@ def parse_date(val):
     except: pass
     return None
 
-def schedule_status(project):
+def schedule_status(project, bulk=None):
     """Calculate on-track/danger/delay status per diameter based on schedule vs actual progress."""
     sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
     if not sched:
         return None
+    if not bulk: bulk = bulk_spool_progress(project)
     spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
     today = date.today()
     # Group spools by diameter
@@ -248,11 +327,15 @@ def schedule_status(project):
             elapsed = max(0, min((today - fab_start).days, total_days))
             expected_pct = round(elapsed / total_days * 100, 1) if total_days > 0 else 0
         except: continue
-        # Actual progress for this diameter
+        # Actual progress for this diameter (from bulk progress)
         diam_spools = by_diam.get(dk, by_diam.get(f'{diam}\"', []))
         if not diam_spools: continue
-        actual_sum = sum(spool_progress(project, s['spool_id']) for s in diam_spools)
+        actual_sum = sum(bulk.get(s['spool_id'], {}).get('pct', 0) for s in diam_spools)
         actual_pct = round(actual_sum / len(diam_spools), 1)
+        fab_sum = sum(bulk.get(s['spool_id'], {}).get('fab_pct', 0) for s in diam_spools)
+        paint_sum = sum(bulk.get(s['spool_id'], {}).get('paint_pct', 0) for s in diam_spools)
+        fab_avg = round(fab_sum / len(diam_spools), 1)
+        paint_avg = round(paint_sum / len(diam_spools), 1)
         diff = actual_pct - expected_pct
         if today < fab_start and actual_pct == 0:
             status = 'not_started'
@@ -265,9 +348,14 @@ def schedule_status(project):
         else:
             status = 'delayed'  # Red
         overall_expected += expected_pct; overall_actual += actual_pct; overall_count += 1
+        # Calculate remaining RAF and surface for this diameter
+        remaining_raf = sum(bulk.get(s['spool_id'], {}).get('raf_inches', 0) for s in diam_spools if bulk.get(s['spool_id'], {}).get('fab_pct', 0) < 100)
+        remaining_m2 = sum(float(s.get('surface_m2') or 0) * 0.98 for s in diam_spools if bulk.get(s['spool_id'], {}).get('paint_pct', 0) < 100)
         result.append({
             'diameter': dk, 'spool_count': len(diam_spools),
             'expected_pct': expected_pct, 'actual_pct': actual_pct, 'diff': round(diff, 1), 'status': status,
+            'fab_pct': fab_avg, 'paint_pct': paint_avg,
+            'remaining_raf': round(remaining_raf, 0), 'remaining_m2': round(remaining_m2, 1),
             'fab_start': fab.get('start',''), 'fab_end': fab.get('end',''),
             'paint_start': paint.get('start','') if paint else '', 'paint_end': paint.get('end','') if paint else '',
             'total_start': fab.get('start',''), 'total_end': str(total_end),
@@ -292,79 +380,77 @@ def get_project_settings(project):
     """Get project settings with defaults."""
     rows = db_fetchall("SELECT key, value FROM project_settings WHERE project=?", (project,))
     settings = {r['key']: r['value'] for r in rows}
-    defaults = {'committed_weeks_saved':'5', 'committed_days_saved':'0', 'sea_transit_days':'45', 'standard_weeks':'9', 'paint_rate_m2_week':'800'}
+    defaults = {'committed_weeks_saved':'0', 'committed_days_saved':'0', 'sea_transit_days':'45', 'standard_weeks':'9', 'welding_capability_ipd':'552', 'painting_capability_m2d':'91'}
     for k,v in defaults.items():
         if k not in settings: settings[k] = v
     return settings
 
-def forecast_production(project):
-    """Calculate forecast end date per diameter and overall, based on actual production rate + painting surface."""
+def forecast_production(project, bulk=None):
+    """Forecast per diameter using capabilities: welding inches/day + painting m²/day."""
     from datetime import timedelta
     sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
     if not sched: return None
     settings = get_project_settings(project)
-    paint_rate_m2_per_day = float(settings.get('paint_rate_m2_week', '800')) / 7  # m²/day
-    spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
+    weld_cap = float(settings.get('welding_capability_ipd', '552'))
+    paint_cap = float(settings.get('painting_capability_m2d', '91'))
+    if not bulk: bulk = bulk_spool_progress(project, settings)
     today = date.today()
+    # Group by diameter
     by_diam = {}
-    for s in spools:
+    for sid, info in bulk.items():
+        s = info['spool']
         d = s['main_diameter'] or '?'
         if d not in by_diam: by_diam[d] = []
-        by_diam[d].append(s)
-    sched_map = {}
-    for sc in sched:
-        d = sc['diameter']
-        if d not in sched_map: sched_map[d] = {}
-        sched_map[d][sc['task_type']] = {'start': parse_date(sc['planned_start']), 'end': parse_date(sc['planned_end'])}
+        by_diam[d].append(info)
     result = {}
-    # Calculate overall weighted progress for resource-sharing forecast
-    total_weighted_work = 0  # sum of (spool_count * 100) for all diameters
-    total_weighted_done = 0  # sum of (spool_count * actual_pct) for all started diameters
-    earliest_start = None
+    overall_forecast = None
     for diam in DIAMETER_ORDER:
         dk = f'{diam}"'
-        sm = sched_map.get(dk, sched_map.get(diam, {}))
-        fab = sm.get('fabrication', {})
-        paint = sm.get('painting', {})
-        fab_start = fab.get('start')
-        if not fab_start: continue
-        paint_end = paint.get('end') or fab.get('end')
-        diam_spools = by_diam.get(dk, by_diam.get(f'{diam}"', []))
-        if not diam_spools: continue
-        actual_sum = sum(spool_progress(project, s['spool_id']) for s in diam_spools)
-        actual_pct = actual_sum / len(diam_spools)
-        started = actual_pct > 0
-        total_weighted_work += len(diam_spools) * 100
-        total_weighted_done += actual_sum
-        if earliest_start is None or fab_start < earliest_start:
-            earliest_start = fab_start
-        days_elapsed = max(1, (today - fab_start).days)
-        # Calculate painting days from surface area
-        diam_surface = sum(float(s.get('surface_m2') or 0) for s in diam_spools)
-        paint_days_raw = (diam_surface * 0.98) / paint_rate_m2_per_day if paint_rate_m2_per_day > 0 and diam_surface > 0 else 0
-        paint_days = max(1, paint_days_raw) if diam_surface > 0 else 0  # minimum 1 day if any surface
-        if actual_pct >= 100:
-            fab_forecast = today
-        elif actual_pct > 0:
-            daily_rate = actual_pct / days_elapsed
-            days_to_100 = (100 - actual_pct) / daily_rate
-            fab_forecast = today + timedelta(days=int(days_to_100 + 0.5))
+        diam_infos = by_diam.get(dk, by_diam.get(f'{diam}"', []))
+        if not diam_infos: continue
+        # Remaining RAF (spools without step 6 completed)
+        remaining_raf = sum(i['raf_inches'] for i in diam_infos if i['fab_pct'] < 100)
+        total_raf = sum(i['raf_inches'] for i in diam_infos)
+        # Remaining surface (spools without step 12 completed)
+        remaining_m2 = sum(i['surface_m2'] * 0.98 for i in diam_infos if i['paint_pct'] < 100)
+        total_m2 = sum(i['surface_m2'] for i in diam_infos)
+        # Fab forecast
+        fab_pct = sum(i['fab_pct'] for i in diam_infos) / len(diam_infos)
+        paint_pct = sum(i['paint_pct'] for i in diam_infos) / len(diam_infos)
+        started = fab_pct > 0
+        if remaining_raf <= 0:
+            fab_fc = today; fab_days = 0
+        elif weld_cap > 0:
+            fab_days = remaining_raf / weld_cap
+            fab_fc = today + timedelta(days=max(1, int(fab_days + 0.5)))
         else:
-            fab_forecast = paint_end
-        # Total forecast = fab end + painting days
-        forecast_end = fab_forecast + timedelta(days=int(paint_days + 0.5))
-        result[dk] = {'actual_pct': round(actual_pct, 1), 'forecast_end': str(forecast_end), 'fab_forecast': str(fab_forecast), 'paint_days': round(paint_days, 1), 'surface_m2': round(diam_surface, 1), 'daily_rate': round(actual_pct / days_elapsed, 2) if days_elapsed > 0 else 0, 'started': started}
-    # Overall forecast: use per-diameter MAX (each diameter forecasted with fab + paint)
-    # This gives the most accurate picture since painting time varies by diameter
-    overall_forecast = None
-    for dk, info in result.items():
-        fc_date = parse_date(info['forecast_end'])
-        if fc_date and info.get('started', False):
-            if overall_forecast is None or fc_date > overall_forecast:
-                overall_forecast = fc_date
-    total_surface = sum(info.get('surface_m2', 0) for info in result.values())
-    total_paint_days = (total_surface * 0.98) / paint_rate_m2_per_day if paint_rate_m2_per_day > 0 and total_surface > 0 else 0
-    return {'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None, 'today': str(today), 'total_surface_m2': round(total_surface, 1), 'total_paint_days': round(total_paint_days, 1), 'paint_rate_m2_day': round(paint_rate_m2_per_day, 1)}
+            fab_days = 999; fab_fc = today + timedelta(days=999)
+        # Paint forecast: starts AFTER fab
+        if remaining_m2 <= 0:
+            paint_days = 0; paint_fc = fab_fc
+        elif paint_cap > 0:
+            paint_days = remaining_m2 / paint_cap
+            paint_start = max(fab_fc, today)
+            paint_fc = paint_start + timedelta(days=max(1, int(paint_days + 0.5)))
+        else:
+            paint_days = 999; paint_fc = fab_fc + timedelta(days=999)
+        forecast_end = paint_fc
+        result[dk] = {
+            'fab_pct': round(fab_pct, 1), 'paint_pct': round(paint_pct, 1),
+            'actual_pct': round((fab_pct + paint_pct) / 2, 1),  # simplified
+            'fab_forecast': str(fab_fc), 'paint_forecast': str(paint_fc),
+            'forecast_end': str(forecast_end),
+            'fab_days': round(fab_days, 1), 'paint_days': round(paint_days, 1),
+            'remaining_raf': round(remaining_raf, 0), 'remaining_m2': round(remaining_m2, 1),
+            'total_raf': round(total_raf, 0), 'total_m2': round(total_m2, 1),
+            'spool_count': len(diam_infos), 'started': started,
+        }
+        if started and (overall_forecast is None or forecast_end > overall_forecast):
+            overall_forecast = forecast_end
+    return {
+        'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None,
+        'today': str(today), 'welding_capability': weld_cap, 'painting_capability': paint_cap,
+    }
 
 def past_rt_count(project):
     """Count spools that have passed RT hold point (step 8)."""
@@ -399,30 +485,24 @@ def daily_production_rate(project):
 
 def generate_report_data(project):
     """Build full report data for a project."""
+    settings = get_project_settings(project)
+    bulk = bulk_spool_progress(project, settings)
     st = project_stats(project)
-    sched = schedule_status(project)
+    sched = schedule_status(project, bulk)
+    forecast = forecast_production(project, bulk)
     today = date.today().strftime('%Y-%m-%d')
     today_act = daily_activity(project, today)
-    spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
-    # Count steps completed today
     steps_today = len([a for a in today_act if a.get('action') == 'completed'])
-    # Spools completed (100%)
-    completed_spools = []
-    for s in spools:
-        p = spool_progress(project, s['spool_id'])
-        if p >= 100: completed_spools.append(s['spool_id'])
-    settings = get_project_settings(project)
-    forecast = forecast_production(project)
+    released_today = len([a for a in today_act if a.get('action') == 'completed' and a.get('step_number') == 15])
     rt_count = past_rt_count(project)
     prod_rate = daily_production_rate(project)
-    spool_pcts = {s['spool_id']: spool_progress(project, s['spool_id']) for s in spools}
+    spool_pcts = {sid: info['pct'] for sid, info in bulk.items()}
     step_names = {s[0]: s[1] for s in PRODUCTION_STEPS}
-    # Released today count
-    released_today = len([a for a in today_act if a.get('action') == 'completed' and a.get('step_number') == 15])
+    completed_spools = [sid for sid, info in bulk.items() if info['pct'] >= 100]
     return {
         'project': project, 'date': today, 'stats': st, 'schedule': sched,
         'today_activity': today_act, 'steps_completed_today': steps_today,
-        'completed_spools': completed_spools, 'total_spools': len(spools),
+        'completed_spools': completed_spools, 'total_spools': len(bulk),
         'settings': settings, 'forecast': forecast, 'past_rt': rt_count,
         'production_rate': prod_rate, 'spool_progress': spool_pcts,
         'step_names': step_names, 'released_today': released_today,
@@ -455,14 +535,16 @@ def project_page(project):
 @app.route('/api/project/<project>/dashboard')
 @login_required
 def api_project_dashboard(project):
+    settings = get_project_settings(project)
+    bulk = bulk_spool_progress(project, settings)
     st = project_stats(project)
     act = db_fetchall("SELECT * FROM activity_log WHERE project=? ORDER BY timestamp DESC LIMIT 20", (project,))
     st['recent_activity'] = fix_timestamps(act)
-    st['settings'] = get_project_settings(project)
-    st['forecast'] = forecast_production(project)
+    st['settings'] = settings
+    st['forecast'] = forecast_production(project, bulk)
     st['past_rt'] = past_rt_count(project)
     st['production_rate'] = daily_production_rate(project)
-    st['schedule_data'] = schedule_status(project)
+    st['schedule_data'] = schedule_status(project, bulk)
     return jsonify(st)
 
 @app.route('/api/project/<project>/spools')
@@ -588,6 +670,20 @@ def api_bulk_surface(project):
     db_commit()
     return jsonify({'ok': True, 'updated': count})
 
+@app.route('/api/project/<project>/joints', methods=['POST'])
+def api_bulk_joints(project):
+    """Bulk update joint_count and raf_inches. Expects JSON: {spool_id: {joint_count, raf_inches}, ...}"""
+    data = request.get_json()
+    if not data: return jsonify({'error': 'No JSON'}), 400
+    count = 0
+    for spool_id, vals in data.items():
+        jc = vals.get('joint_count', 0) if isinstance(vals, dict) else int(vals)
+        ri = vals.get('raf_inches', 0) if isinstance(vals, dict) else 0
+        db_execute("UPDATE spools SET joint_count=?, raf_inches=? WHERE project=? AND spool_id=?", (jc, ri, project, spool_id))
+        count += 1
+    db_commit()
+    return jsonify({'ok': True, 'updated': count})
+
 @app.route('/api/project/<project>/spool/<spool_id>/drawing', methods=['POST'])
 def api_upload_drawing(project, spool_id):
     """Upload a PDF drawing for a spool."""
@@ -655,6 +751,10 @@ def api_migrate():
             except: get_db().rollback(); results.append("actual_weight_kg exists")
             try: db_execute("ALTER TABLE spools ADD COLUMN surface_m2 REAL DEFAULT 0"); results.append("added surface_m2")
             except: get_db().rollback(); results.append("surface_m2 exists")
+            try: db_execute("ALTER TABLE spools ADD COLUMN joint_count INTEGER DEFAULT 0"); results.append("added joint_count")
+            except: get_db().rollback(); results.append("joint_count exists")
+            try: db_execute("ALTER TABLE spools ADD COLUMN raf_inches REAL DEFAULT 0"); results.append("added raf_inches")
+            except: get_db().rollback(); results.append("raf_inches exists")
             try:
                 cur = get_db().cursor()
                 cur.execute("CREATE TABLE IF NOT EXISTS drawings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BYTEA NOT NULL, UNIQUE(project, spool_id))")

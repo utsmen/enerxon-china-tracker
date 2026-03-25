@@ -1634,7 +1634,6 @@ async function load(){
           const inExp = expFabStart<=w.end && expFabEnd>=w.start;
           const isSaved = hasExpediting && inStd && !inExp;
           const isToday = w.current;
-          const isForecast = dmStarted && dmFcEnd && overallP<100 && dmFcEnd>=w.start && dmFcEnd<=w.end;
           let content = '';
           if(inExp){
             content = `<div class="g-bar g-exp-fab"></div>`;
@@ -1643,13 +1642,12 @@ async function load(){
           } else if(isSaved){
             content = `<div class="g-bar g-saved"></div>`;
           }
-          if(isForecast) content += `<div class="g-bar g-forecast g-fc-fab"></div>`;
           if(isToday && !inExp && !isSaved) content += `<div class="g-today-line"></div>`;
           html += `<td>${content}</td>`;
         });
         html += `</tr>`;
 
-        // PAINT ROW
+        // PAINT ROW — forecast shown here (total forecast = after painting)
         html += `<tr><td class="g-label" style="font-size:9px;color:#666">Paint</td>`;
         const isLast = dmIdx===lastDiamIdx;
         weeks.forEach(w => {
@@ -1659,6 +1657,7 @@ async function load(){
           const inExpFab = expFabStart<=w.end && expFabEnd>=w.start;
           const isSaved = hasExpediting && (inStd || inStdFab) && !inExp && !inExpFab;
           const isToday = w.current;
+          const isForecastPaint = dmStarted && dmFcEnd && overallP<100 && dmFcEnd>=w.start && dmFcEnd<=w.end;
           let content = '';
           if(inExp){
             content = `<div class="g-bar g-exp-paint"></div>`;
@@ -1667,6 +1666,7 @@ async function load(){
           } else if(isSaved){
             content = `<div class="g-bar g-saved"></div>`;
           }
+          if(isForecastPaint) content += `<div class="g-bar g-forecast" style="border-color:#ED7D31"></div>`;
           if(isToday && !inExp && !isSaved) content += `<div class="g-today-line"></div>`;
           if(isToday && isLast) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11">TODAY</div>`;
           html += `<td>${content}</td>`;

@@ -1645,7 +1645,7 @@ async function load(){
           // Show fab% on current week if not already shown on a bar
           if(isToday && !inExp){
             content += `<div class="g-today-line"></div>`;
-            if(fabP > 0 && fabP < 100) content += `<div class="g-pct" style="color:#4472C4;font-size:8px">${fabP}%</div>`;
+            if(fabP > 0 && fabP < 100) content += `<div class="g-pct" style="color:#fff;background:#4472C4;padding:1px 4px;border-radius:3px;font-size:8px">${fabP}%</div>`;
           }
           html += `<td>${content}</td>`;
         });
@@ -1674,7 +1674,7 @@ async function load(){
           // Show paint% on current week if not already shown on a bar
           if(isToday && !inExp){
             content += `<div class="g-today-line"></div>`;
-            if(paintP > 0 && paintP < 100) content += `<div class="g-pct" style="color:#ED7D31;font-size:8px">${paintP}%</div>`;
+            if(paintP > 0 && paintP < 100) content += `<div class="g-pct" style="color:#fff;background:#ED7D31;padding:1px 4px;border-radius:3px;font-size:8px">${paintP}%</div>`;
           }
           if(isToday && isLast) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11">TODAY</div>`;
           html += `<td>${content}</td>`;

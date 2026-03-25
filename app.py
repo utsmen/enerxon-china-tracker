@@ -1638,11 +1638,15 @@ async function load(){
           if(inExp){
             content = `<div class="g-bar g-exp-fab"></div>`;
             if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${fabP}%</div>`;
-            else if(fabP > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
+            else if(fabP >= 100 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
           } else if(isSaved){
             content = `<div class="g-bar g-saved"></div>`;
           }
-          if(isToday && !inExp && !isSaved) content += `<div class="g-today-line"></div>`;
+          // Show fab% on current week if not already shown on a bar
+          if(isToday && !inExp){
+            content += `<div class="g-today-line"></div>`;
+            if(fabP > 0 && fabP < 100) content += `<div class="g-pct" style="color:#4472C4;font-size:8px">${fabP}%</div>`;
+          }
           html += `<td>${content}</td>`;
         });
         html += `</tr>`;
@@ -1662,12 +1666,16 @@ async function load(){
           if(inExp){
             content = `<div class="g-bar g-exp-paint"></div>`;
             if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${paintP}%</div>`;
-            else if(paintP > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
+            else if(paintP >= 100 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
           } else if(isSaved){
             content = `<div class="g-bar g-saved"></div>`;
           }
           if(isForecastPaint) content += `<div class="g-bar g-forecast" style="border-color:#ED7D31"></div>`;
-          if(isToday && !inExp && !isSaved) content += `<div class="g-today-line"></div>`;
+          // Show paint% on current week if not already shown on a bar
+          if(isToday && !inExp){
+            content += `<div class="g-today-line"></div>`;
+            if(paintP > 0 && paintP < 100) content += `<div class="g-pct" style="color:#ED7D31;font-size:8px">${paintP}%</div>`;
+          }
           if(isToday && isLast) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11">TODAY</div>`;
           html += `<td>${content}</td>`;
         });

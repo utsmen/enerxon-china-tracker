@@ -346,14 +346,16 @@ def forecast_production(project):
         else:
             forecast_end = paint_end
         result[dk] = {'actual_pct': round(actual_pct, 1), 'forecast_end': str(forecast_end), 'daily_rate': round(actual_pct / days_elapsed, 2) if days_elapsed > 0 else 0, 'started': started}
-    # Overall forecast uses combined production rate (accounts for resource sharing)
+    # Overall forecast: use overall % rate (works for any project, no per-diameter tweaking)
+    # overall_pct% done in N days → days_to_100 = (100 - overall_pct) / daily_pct_rate
+    # This naturally accounts for resource sharing as workers move between lines
     overall_forecast = None
-    if earliest_start and total_weighted_done > 0:
+    if earliest_start and total_weighted_done > 0 and total_weighted_work > 0:
+        overall_pct = total_weighted_done / total_weighted_work * 100
         overall_days_elapsed = max(1, (today - earliest_start).days)
-        overall_daily_rate = total_weighted_done / overall_days_elapsed  # weighted progress points per day
-        remaining = total_weighted_work - total_weighted_done
-        if overall_daily_rate > 0:
-            days_remaining = remaining / overall_daily_rate
+        daily_pct_rate = overall_pct / overall_days_elapsed
+        if daily_pct_rate > 0:
+            days_remaining = (100 - overall_pct) / daily_pct_rate
             overall_forecast = today + timedelta(days=int(days_remaining + 0.5))
     return {'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None, 'today': str(today)}
 
@@ -1462,12 +1464,12 @@ async function load(){
           html += `<td class="g-label" style="font-size:9px;color:#666">${ph.phase}</td>`;
           weeks.forEach(w => {
             const inStandard = ps<=w.end && pe>=w.start;
-            const inExpedited = expStartDate<=w.end && expEndDate>=w.start;
+            // Expedited bar: only if week starts ON or BEFORE commitEnd AND within scaled schedule
+            const inExpedited = inStandard && w.start<=commitEnd && expStartDate<=w.end && expEndDate>=w.start;
             const isSaved = inStandard && !inExpedited;
             const isToday = w.current;
             const isLastPaintRow = dmIdx===lastDiamIdx && idx===1;
-            // Forecast: show on fab row, on the week containing overall forecast end
-            const isForecast = idx===0 && overallFcEnd && ap<100 && ap>0 && overallFcEnd>=w.start && overallFcEnd<=w.end;
+            const isForecast = idx===0 && overallFcEnd && overallFcEnd>=w.start && overallFcEnd<=w.end;
             let content = '';
             if(inExpedited){
               content = `<div class="g-bar ${ph.expCls}"></div>`;

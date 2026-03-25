@@ -292,16 +292,18 @@ def get_project_settings(project):
     """Get project settings with defaults."""
     rows = db_fetchall("SELECT key, value FROM project_settings WHERE project=?", (project,))
     settings = {r['key']: r['value'] for r in rows}
-    defaults = {'committed_weeks_saved':'5', 'committed_days_saved':'0', 'sea_transit_days':'45', 'standard_weeks':'9'}
+    defaults = {'committed_weeks_saved':'5', 'committed_days_saved':'0', 'sea_transit_days':'45', 'standard_weeks':'9', 'paint_rate_m2_week':'800'}
     for k,v in defaults.items():
         if k not in settings: settings[k] = v
     return settings
 
 def forecast_production(project):
-    """Calculate forecast end date per diameter and overall, based on actual production rate."""
+    """Calculate forecast end date per diameter and overall, based on actual production rate + painting surface."""
     from datetime import timedelta
     sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
     if not sched: return None
+    settings = get_project_settings(project)
+    paint_rate_m2_per_day = float(settings.get('paint_rate_m2_week', '800')) / 7  # m²/day
     spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
     today = date.today()
     by_diam = {}
@@ -337,27 +339,31 @@ def forecast_production(project):
         if earliest_start is None or fab_start < earliest_start:
             earliest_start = fab_start
         days_elapsed = max(1, (today - fab_start).days)
+        # Calculate painting days from surface area
+        diam_surface = sum(float(s.get('surface_m2') or 0) for s in diam_spools)
+        paint_days = (diam_surface * 0.98) / paint_rate_m2_per_day if paint_rate_m2_per_day > 0 and diam_surface > 0 else 0
         if actual_pct >= 100:
-            forecast_end = today
+            fab_forecast = today
         elif actual_pct > 0:
             daily_rate = actual_pct / days_elapsed
             days_to_100 = (100 - actual_pct) / daily_rate
-            forecast_end = today + timedelta(days=int(days_to_100 + 0.5))
+            fab_forecast = today + timedelta(days=int(days_to_100 + 0.5))
         else:
-            forecast_end = paint_end
-        result[dk] = {'actual_pct': round(actual_pct, 1), 'forecast_end': str(forecast_end), 'daily_rate': round(actual_pct / days_elapsed, 2) if days_elapsed > 0 else 0, 'started': started}
-    # Overall forecast: use overall % rate (works for any project, no per-diameter tweaking)
-    # overall_pct% done in N days → days_to_100 = (100 - overall_pct) / daily_pct_rate
-    # This naturally accounts for resource sharing as workers move between lines
+            fab_forecast = paint_end
+        # Total forecast = fab end + painting days
+        forecast_end = fab_forecast + timedelta(days=int(paint_days + 0.5))
+        result[dk] = {'actual_pct': round(actual_pct, 1), 'forecast_end': str(forecast_end), 'fab_forecast': str(fab_forecast), 'paint_days': round(paint_days, 1), 'surface_m2': round(diam_surface, 1), 'daily_rate': round(actual_pct / days_elapsed, 2) if days_elapsed > 0 else 0, 'started': started}
+    # Overall forecast: use per-diameter MAX (each diameter forecasted with fab + paint)
+    # This gives the most accurate picture since painting time varies by diameter
     overall_forecast = None
-    if earliest_start and total_weighted_done > 0 and total_weighted_work > 0:
-        overall_pct = total_weighted_done / total_weighted_work * 100
-        overall_days_elapsed = max(1, (today - earliest_start).days)
-        daily_pct_rate = overall_pct / overall_days_elapsed
-        if daily_pct_rate > 0:
-            days_remaining = (100 - overall_pct) / daily_pct_rate
-            overall_forecast = today + timedelta(days=int(days_remaining + 0.5))
-    return {'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None, 'today': str(today)}
+    for dk, info in result.items():
+        fc_date = parse_date(info['forecast_end'])
+        if fc_date and info.get('started', False):
+            if overall_forecast is None or fc_date > overall_forecast:
+                overall_forecast = fc_date
+    total_surface = sum(info.get('surface_m2', 0) for info in result.values())
+    total_paint_days = (total_surface * 0.98) / paint_rate_m2_per_day if paint_rate_m2_per_day > 0 and total_surface > 0 else 0
+    return {'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None, 'today': str(today), 'total_surface_m2': round(total_surface, 1), 'total_paint_days': round(total_paint_days, 1), 'paint_rate_m2_day': round(paint_rate_m2_per_day, 1)}
 
 def past_rt_count(project):
     """Count spools that have passed RT hold point (step 8)."""
@@ -569,6 +575,18 @@ def api_update_weight(project, spool_id):
     db_commit()
     return jsonify({'ok': True, 'weight_kg': weight})
 
+@app.route('/api/project/<project>/surface', methods=['POST'])
+def api_bulk_surface(project):
+    """Bulk update surface_m2 for spools. Expects JSON: {spool_id: surface_m2, ...}"""
+    data = request.get_json()
+    if not data: return jsonify({'error': 'No JSON'}), 400
+    count = 0
+    for spool_id, surface in data.items():
+        db_execute("UPDATE spools SET surface_m2=? WHERE project=? AND spool_id=?", (float(surface), project, spool_id))
+        count += 1
+    db_commit()
+    return jsonify({'ok': True, 'updated': count})
+
 @app.route('/api/project/<project>/spool/<spool_id>/drawing', methods=['POST'])
 def api_upload_drawing(project, spool_id):
     """Upload a PDF drawing for a spool."""
@@ -634,6 +652,8 @@ def api_migrate():
             except: get_db().rollback(); results.append("has_branches exists")
             try: db_execute("ALTER TABLE spools ADD COLUMN actual_weight_kg REAL DEFAULT 0"); results.append("added actual_weight_kg")
             except: get_db().rollback(); results.append("actual_weight_kg exists")
+            try: db_execute("ALTER TABLE spools ADD COLUMN surface_m2 REAL DEFAULT 0"); results.append("added surface_m2")
+            except: get_db().rollback(); results.append("surface_m2 exists")
             try:
                 cur = get_db().cursor()
                 cur.execute("CREATE TABLE IF NOT EXISTS drawings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BYTEA NOT NULL, UNIQUE(project, spool_id))")

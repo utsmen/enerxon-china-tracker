@@ -386,7 +386,8 @@ def get_project_settings(project):
     return settings
 
 def forecast_production(project, bulk=None):
-    """Forecast per diameter using capabilities: welding inches/day + painting m²/day."""
+    """Forecast per diameter using total remaining hours / actual throughput rate.
+    Capabilities (inches/day, m²/day) used for target comparison, not forecasting."""
     from datetime import timedelta
     sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
     if not sched: return None
@@ -395,6 +396,13 @@ def forecast_production(project, bulk=None):
     paint_cap = float(settings.get('painting_capability_m2d', '91'))
     if not bulk: bulk = bulk_spool_progress(project, settings)
     today = date.today()
+    # Find production start (earliest schedule date)
+    prod_start = None
+    for sc in sched:
+        sd = parse_date(sc['planned_start'])
+        if sd and (prod_start is None or sd < prod_start): prod_start = sd
+    if not prod_start: prod_start = today
+    days_elapsed = max(1, (today - prod_start).days)
     # Group by diameter
     by_diam = {}
     for sid, info in bulk.items():
@@ -402,54 +410,62 @@ def forecast_production(project, bulk=None):
         d = s['main_diameter'] or '?'
         if d not in by_diam: by_diam[d] = []
         by_diam[d].append(info)
+    # Calculate actual rates from completed work
+    total_done_hrs_all = sum(i['done'] for i in bulk.values())
+    total_hrs_all = sum(i['total'] for i in bulk.values())
+    # Welding: sum RAF of completed spools (step 6 done)
+    welded_raf_total = sum(i['raf_inches'] for i in bulk.values() if i['fab_pct'] >= 100 or i.get('spool', {}).get('raf_inches', 0) == 0)
+    actual_weld_ipd = round(welded_raf_total / days_elapsed, 1) if days_elapsed > 0 else 0
+    # Painting: sum surface of completed spools (step 12 done)
+    painted_m2_total = sum(i['surface_m2'] * 0.98 for i in bulk.values() if i['paint_pct'] >= 100)
+    actual_paint_m2d = round(painted_m2_total / days_elapsed, 1) if days_elapsed > 0 else 0
     result = {}
     overall_forecast = None
     for diam in DIAMETER_ORDER:
         dk = f'{diam}"'
         diam_infos = by_diam.get(dk, by_diam.get(f'{diam}"', []))
         if not diam_infos: continue
-        # Remaining RAF (spools without step 6 completed)
-        remaining_raf = sum(i['raf_inches'] for i in diam_infos if i['fab_pct'] < 100)
-        total_raf = sum(i['raf_inches'] for i in diam_infos)
-        # Remaining surface (spools without step 12 completed)
-        remaining_m2 = sum(i['surface_m2'] * 0.98 for i in diam_infos if i['paint_pct'] < 100)
-        total_m2 = sum(i['surface_m2'] for i in diam_infos)
-        # Fab forecast
+        # Hours-based progress
+        total_hrs = sum(i['total'] for i in diam_infos)
+        done_hrs = sum(i['done'] for i in diam_infos)
+        remaining_hrs = total_hrs - done_hrs
         fab_pct = sum(i['fab_pct'] for i in diam_infos) / len(diam_infos)
         paint_pct = sum(i['paint_pct'] for i in diam_infos) / len(diam_infos)
-        started = fab_pct > 0
-        if remaining_raf <= 0:
-            fab_fc = today; fab_days = 0
-        elif weld_cap > 0:
-            fab_days = remaining_raf / weld_cap
-            fab_fc = today + timedelta(days=max(1, int(fab_days + 0.5)))
+        overall_pct = done_hrs / total_hrs * 100 if total_hrs > 0 else 0
+        started = done_hrs > 0
+        # Remaining RAF and surface for target comparison
+        remaining_raf = sum(i['raf_inches'] for i in diam_infos if i['fab_pct'] < 100)
+        remaining_m2 = sum(i['surface_m2'] * 0.98 for i in diam_infos if i['paint_pct'] < 100)
+        total_raf = sum(i['raf_inches'] for i in diam_infos)
+        total_m2 = sum(i['surface_m2'] for i in diam_infos)
+        # Forecast: total remaining hours / actual rate (hours/day)
+        if done_hrs > 0:
+            actual_rate = done_hrs / days_elapsed  # hours completed per day for this diameter
+            forecast_days = remaining_hrs / actual_rate if actual_rate > 0 else 999
+            forecast_end = today + timedelta(days=max(1, int(forecast_days + 0.5)))
+        elif started:
+            forecast_end = today + timedelta(days=30)  # rough estimate
         else:
-            fab_days = 999; fab_fc = today + timedelta(days=999)
-        # Paint forecast: starts AFTER fab
-        if remaining_m2 <= 0:
-            paint_days = 0; paint_fc = fab_fc
-        elif paint_cap > 0:
-            paint_days = remaining_m2 / paint_cap
-            paint_start = max(fab_fc, today)
-            paint_fc = paint_start + timedelta(days=max(1, int(paint_days + 0.5)))
-        else:
-            paint_days = 999; paint_fc = fab_fc + timedelta(days=999)
-        forecast_end = paint_fc
+            forecast_end = None  # not started — no forecast
         result[dk] = {
             'fab_pct': round(fab_pct, 1), 'paint_pct': round(paint_pct, 1),
-            'actual_pct': round((fab_pct + paint_pct) / 2, 1),  # simplified
-            'fab_forecast': str(fab_fc), 'paint_forecast': str(paint_fc),
-            'forecast_end': str(forecast_end),
-            'fab_days': round(fab_days, 1), 'paint_days': round(paint_days, 1),
+            'overall_pct': round(overall_pct, 1),
+            'forecast_end': str(forecast_end) if forecast_end else None,
+            'forecast_days': round(forecast_days, 1) if done_hrs > 0 else None,
+            'total_hrs': round(total_hrs, 1), 'done_hrs': round(done_hrs, 1),
+            'remaining_hrs': round(remaining_hrs, 1),
             'remaining_raf': round(remaining_raf, 0), 'remaining_m2': round(remaining_m2, 1),
             'total_raf': round(total_raf, 0), 'total_m2': round(total_m2, 1),
             'spool_count': len(diam_infos), 'started': started,
         }
-        if started and (overall_forecast is None or forecast_end > overall_forecast):
+        if started and forecast_end and (overall_forecast is None or forecast_end > overall_forecast):
             overall_forecast = forecast_end
     return {
         'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None,
-        'today': str(today), 'welding_capability': weld_cap, 'painting_capability': paint_cap,
+        'today': str(today),
+        'welding_capability': weld_cap, 'painting_capability': paint_cap,
+        'actual_weld_ipd': actual_weld_ipd, 'actual_paint_m2d': actual_paint_m2d,
+        'days_elapsed': days_elapsed,
     }
 
 def past_rt_count(project):

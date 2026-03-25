@@ -341,7 +341,8 @@ def forecast_production(project):
         days_elapsed = max(1, (today - fab_start).days)
         # Calculate painting days from surface area
         diam_surface = sum(float(s.get('surface_m2') or 0) for s in diam_spools)
-        paint_days = (diam_surface * 0.98) / paint_rate_m2_per_day if paint_rate_m2_per_day > 0 and diam_surface > 0 else 0
+        paint_days_raw = (diam_surface * 0.98) / paint_rate_m2_per_day if paint_rate_m2_per_day > 0 and diam_surface > 0 else 0
+        paint_days = max(1, paint_days_raw) if diam_surface > 0 else 0  # minimum 1 day if any surface
         if actual_pct >= 100:
             fab_forecast = today
         elif actual_pct > 0:

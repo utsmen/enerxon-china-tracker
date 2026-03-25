@@ -626,6 +626,12 @@ def api_migrate():
                 get_db().commit()
                 results.append("created schedule table")
             except: get_db().rollback(); results.append("schedule table exists")
+            try:
+                cur = get_db().cursor()
+                cur.execute("CREATE TABLE IF NOT EXISTS project_settings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key))")
+                get_db().commit()
+                results.append("created project_settings table")
+            except: get_db().rollback(); results.append("project_settings table exists")
         else:
             try:
                 db_execute("CREATE TABLE IF NOT EXISTS drawings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BLOB NOT NULL, UNIQUE(project, spool_id))")
@@ -633,6 +639,10 @@ def api_migrate():
             except: pass
             try:
                 db_execute("CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start TEXT NOT NULL, planned_end TEXT NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type))")
+                db_commit()
+            except: pass
+            try:
+                db_execute("CREATE TABLE IF NOT EXISTS project_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key))")
                 db_commit()
             except: pass
         # NOTE: Data clearing removed for safety. Use /api/project/<id>/spool/<id>/delete for individual cleanup.

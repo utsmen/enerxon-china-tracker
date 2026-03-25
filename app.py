@@ -140,6 +140,7 @@ def init_db():
             CREATE INDEX idx_progress_ps ON progress(project, spool_id);
             CREATE INDEX idx_activity_ps ON activity_log(project, spool_id);
             CREATE TABLE IF NOT EXISTS schedule (id SERIAL PRIMARY KEY, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start DATE NOT NULL, planned_end DATE NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type));
+            CREATE TABLE IF NOT EXISTS project_settings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key));
         """); c.close()
     else:
         import sqlite3
@@ -149,6 +150,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS progress (id INTEGER PRIMARY KEY AUTOINCREMENT, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER NOT NULL, completed INTEGER DEFAULT 0, completed_by TEXT DEFAULT '', completed_at TEXT, remarks TEXT DEFAULT '', UNIQUE(project, spool_id, step_number));
             CREATE TABLE IF NOT EXISTS activity_log (id INTEGER PRIMARY KEY AUTOINCREMENT, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER, action TEXT NOT NULL, operator TEXT DEFAULT '', timestamp TEXT DEFAULT (datetime('now')), details TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start TEXT NOT NULL, planned_end TEXT NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type));
+            CREATE TABLE IF NOT EXISTS project_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key));
         """); c.close()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -286,6 +288,88 @@ def daily_activity(project, day=None):
         rows = db_fetchall("SELECT * FROM activity_log WHERE project=? AND timestamp LIKE ? ORDER BY timestamp DESC", (project, f"{day}%"))
     return fix_timestamps(rows)
 
+def get_project_settings(project):
+    """Get project settings with defaults."""
+    rows = db_fetchall("SELECT key, value FROM project_settings WHERE project=?", (project,))
+    settings = {r['key']: r['value'] for r in rows}
+    defaults = {'committed_weeks_saved':'5', 'committed_days_saved':'0', 'sea_transit_days':'45', 'standard_weeks':'9'}
+    for k,v in defaults.items():
+        if k not in settings: settings[k] = v
+    return settings
+
+def forecast_production(project):
+    """Calculate forecast end date per diameter and overall, based on actual production rate."""
+    from datetime import timedelta
+    sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
+    if not sched: return None
+    spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
+    today = date.today()
+    by_diam = {}
+    for s in spools:
+        d = s['main_diameter'] or '?'
+        if d not in by_diam: by_diam[d] = []
+        by_diam[d].append(s)
+    sched_map = {}
+    for sc in sched:
+        d = sc['diameter']
+        if d not in sched_map: sched_map[d] = {}
+        sched_map[d][sc['task_type']] = {'start': parse_date(sc['planned_start']), 'end': parse_date(sc['planned_end'])}
+    result = {}
+    overall_forecast = None
+    for diam in DIAMETER_ORDER:
+        dk = f'{diam}"'
+        sm = sched_map.get(dk, sched_map.get(diam, {}))
+        fab = sm.get('fabrication', {})
+        paint = sm.get('painting', {})
+        fab_start = fab.get('start')
+        if not fab_start: continue
+        paint_end = paint.get('end') or fab.get('end')
+        diam_spools = by_diam.get(dk, by_diam.get(f'{diam}"', []))
+        if not diam_spools: continue
+        actual_sum = sum(spool_progress(project, s['spool_id']) for s in diam_spools)
+        actual_pct = actual_sum / len(diam_spools)
+        days_elapsed = max(1, (today - fab_start).days)
+        if actual_pct >= 100:
+            forecast_end = today
+        elif actual_pct > 0:
+            daily_rate = actual_pct / days_elapsed
+            days_to_100 = (100 - actual_pct) / daily_rate
+            forecast_end = today + timedelta(days=int(days_to_100 + 0.5))
+        else:
+            forecast_end = paint_end
+        result[dk] = {'actual_pct': round(actual_pct, 1), 'forecast_end': str(forecast_end), 'daily_rate': round(actual_pct / days_elapsed, 2) if days_elapsed > 0 else 0}
+        if overall_forecast is None or forecast_end > overall_forecast:
+            overall_forecast = forecast_end
+    return {'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None, 'today': str(today)}
+
+def past_rt_count(project):
+    """Count spools that have passed RT hold point (step 8)."""
+    row = db_fetchone("SELECT COUNT(*) as cnt FROM progress WHERE project=? AND step_number=8 AND completed=1", (project,))
+    return row['cnt'] if row else 0
+
+def daily_production_rate(project):
+    """Calculate 7-day average production rate and today's steps."""
+    from datetime import timedelta
+    today = date.today()
+    week_ago = today - timedelta(days=7)
+    two_weeks_ago = today - timedelta(days=14)
+    # This week's completed steps
+    if USE_PG:
+        this_week = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date AND timestamp::date <= ?::date", (project, str(week_ago), str(today)))
+        last_week = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date AND timestamp::date < ?::date", (project, str(two_weeks_ago), str(week_ago)))
+        today_steps = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date = ?::date", (project, str(today)))
+    else:
+        this_week = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ? AND timestamp <= ?", (project, str(week_ago), str(today) + ' 23:59:59'))
+        last_week = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ? AND timestamp < ?", (project, str(two_weeks_ago), str(week_ago)))
+        today_steps = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp LIKE ?", (project, str(today) + '%'))
+    this_week_cnt = this_week[0]['cnt'] if this_week else 0
+    last_week_cnt = last_week[0]['cnt'] if last_week else 0
+    today_cnt = today_steps[0]['cnt'] if today_steps else 0
+    avg_7day = round(this_week_cnt / 7, 1)
+    avg_prev = round(last_week_cnt / 7, 1)
+    trend = round(avg_7day - avg_prev, 1)
+    return {'avg_7day': avg_7day, 'avg_prev_week': avg_prev, 'trend': trend, 'today_steps': today_cnt}
+
 def generate_report_data(project):
     """Build full report data for a project."""
     st = project_stats(project)
@@ -300,10 +384,21 @@ def generate_report_data(project):
     for s in spools:
         p = spool_progress(project, s['spool_id'])
         if p >= 100: completed_spools.append(s['spool_id'])
+    settings = get_project_settings(project)
+    forecast = forecast_production(project)
+    rt_count = past_rt_count(project)
+    prod_rate = daily_production_rate(project)
+    spool_pcts = {s['spool_id']: spool_progress(project, s['spool_id']) for s in spools}
+    step_names = {s[0]: s[1] for s in PRODUCTION_STEPS}
+    # Released today count
+    released_today = len([a for a in today_act if a.get('action') == 'completed' and a.get('step_number') == 15])
     return {
         'project': project, 'date': today, 'stats': st, 'schedule': sched,
         'today_activity': today_act, 'steps_completed_today': steps_today,
         'completed_spools': completed_spools, 'total_spools': len(spools),
+        'settings': settings, 'forecast': forecast, 'past_rt': rt_count,
+        'production_rate': prod_rate, 'spool_progress': spool_pcts,
+        'step_names': step_names, 'released_today': released_today,
     }
 
 # ── API: Projects ─────────────────────────────────────────────────────────────
@@ -336,6 +431,11 @@ def api_project_dashboard(project):
     st = project_stats(project)
     act = db_fetchall("SELECT * FROM activity_log WHERE project=? ORDER BY timestamp DESC LIMIT 20", (project,))
     st['recent_activity'] = fix_timestamps(act)
+    st['settings'] = get_project_settings(project)
+    st['forecast'] = forecast_production(project)
+    st['past_rt'] = past_rt_count(project)
+    st['production_rate'] = daily_production_rate(project)
+    st['schedule_data'] = schedule_status(project)
     return jsonify(st)
 
 @app.route('/api/project/<project>/spools')
@@ -630,6 +730,20 @@ def api_get_schedule(project):
     rows = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
     return jsonify(fix_timestamps(rows))
 
+@app.route('/api/project/<project>/settings', methods=['GET','POST'])
+def api_project_settings(project):
+    if request.method == 'GET':
+        return jsonify(get_project_settings(project))
+    data = request.get_json()
+    if not data: return jsonify({'error':'No JSON'}), 400
+    for k, v in data.items():
+        if USE_PG:
+            db_execute("INSERT INTO project_settings (project,key,value) VALUES (%s,%s,%s) ON CONFLICT (project,key) DO UPDATE SET value=EXCLUDED.value", (project, k, str(v)))
+        else:
+            db_execute("INSERT INTO project_settings (project,key,value) VALUES (?,?,?) ON CONFLICT(project,key) DO UPDATE SET value=excluded.value", (project, k, str(v)))
+    db_commit()
+    return jsonify({'ok': True, 'settings': get_project_settings(project)})
+
 @app.route('/api/project/<project>/report')
 @login_required
 def api_report_data(project):
@@ -822,17 +936,38 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
 .spool-row .info{flex:1;min-width:0}.spool-row .name{font-weight:600;font-size:14px}.spool-row .meta{font-size:11px;color:#888}
 .spool-row .pct{font-size:18px;font-weight:700;min-width:55px;text-align:right}
 .spool-row .bar{width:80px;min-width:80px}
-.diam-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
-.diam-card{background:#fff;border-radius:8px;padding:12px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.diam-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px}
+.diam-card{background:#fff;border-radius:8px;padding:12px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.05);position:relative;border-left:3px solid #e8e8e8}
 .diam-card .d{font-size:20px;font-weight:700;color:#2F5496}.diam-card .p{font-size:13px;margin-top:4px}
+.diam-card.d-ahead{border-left-color:#27ae60}.diam-card.d-ontrack{border-left-color:#4472C4}
+.diam-card.d-atrisk{border-left-color:#f39c12}.diam-card.d-behind{border-left-color:#e74c3c}.diam-card.d-pending{border-left-color:#ccc}
+.pace-badge{position:absolute;top:4px;right:4px;font-size:7px;font-weight:700;padding:2px 5px;border-radius:6px;text-transform:uppercase}
+.pb-ahead{background:#E2EFDA;color:#548235}.pb-ontrack{background:#D6E4F0;color:#2F5496}
+.pb-atrisk{background:#FFF2CC;color:#BF8F00}.pb-behind{background:#FFC7CE;color:#c00}.pb-pending{background:#f0f0f0;color:#999}
+.target-banner{background:#fff;border-radius:8px;padding:12px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05);margin:0 16px 8px;display:flex;align-items:center;gap:0;flex-wrap:wrap;border-left:5px solid #27ae60}
+.target-banner.tb-behind{border-left-color:#e74c3c}.target-banner.tb-atrisk{border-left-color:#f39c12}
+.tb-section{display:flex;flex-direction:column;align-items:center;padding:0 14px}
+.tb-section:not(:last-child){border-right:1px solid #eee}
+.tb-label{font-size:8px;color:#888;text-transform:uppercase;letter-spacing:.3px}.tb-value{font-size:18px;font-weight:700;margin:1px 0}.tb-sub{font-size:9px;color:#999}
+.status-pill{padding:4px 12px;border-radius:16px;font-size:11px;font-weight:700;color:#fff}
+.sp-ahead{background:#27ae60}.sp-behind{background:#e74c3c}.sp-ontrack{background:#4472C4}
+.rate-strip{background:#fff;border-radius:8px;padding:10px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05);margin:0 16px 8px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.rs-title{font-size:11px;font-weight:600;color:#2F5496;white-space:nowrap}
+.rs-item{display:flex;align-items:center;gap:4px;padding:0 10px;border-right:1px solid #eee}
+.rs-item:last-of-type{border-right:none}.rs-val{font-size:16px;font-weight:700}.rs-lbl{font-size:9px;color:#888}
+.rs-badge{margin-left:auto;padding:3px 10px;border-radius:12px;font-size:10px;font-weight:600}
+.rs-good{background:#E2EFDA;color:#548235}.rs-bad{background:#FFC7CE;color:#c00}
+.bottleneck{background:#fff;border-radius:8px;padding:10px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05);margin:0 16px 8px;border-left:4px solid #e74c3c}
 .activity-item{font-size:12px;padding:6px 0;border-bottom:1px solid #f0f0f0;color:#666}
-@media(max-width:600px){.spool-row .bar{display:none}}
+@media(max-width:600px){.spool-row .bar{display:none}.target-banner{flex-direction:column;gap:8px;align-items:flex-start}.tb-section{border-right:none!important;flex-direction:row;justify-content:space-between;width:100%;padding:4px 0}}
 </style></head><body>
 <div class="header">
   <a class="back" href="/">← All Projects / 所有项目</a>
   <div style="display:flex;align-items:center;gap:12px;margin-top:6px"><img src="data:image/png;base64,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" style="height:32px;filter:brightness(10)" alt="ENERXON"><div><h1 style="margin:0">{{ project }}</h1><div class="sub" style="margin:0">Production Progress / 生产进度</div></div></div>
 </div>
 <div class="stats-grid" id="stats"></div>
+<div id="target-banner"></div>
+<div id="rate-strip"></div>
 <div class="section"><h2>By Diameter / 按管径</h2><div class="diam-grid" id="diam"></div></div>
 <div class="toolbar">
   <input type="text" id="q" placeholder="Search spool / 搜索管段..." oninput="filter()">
@@ -850,17 +985,113 @@ const P='{{project}}'; let all=[];
 async function load(){
   const[dr,sr]=await Promise.all([fetch(`/api/project/${P}/dashboard`),fetch(`/api/project/${P}/spools`)]);
   const st=await dr.json(); all=await sr.json();
+  // Stats cards with RT milestone
+  const rtCount = st.past_rt || 0;
   document.getElementById('stats').innerHTML=`
     <div class="stat-card"><div class="value">${st.total}</div><div class="label">Total / 总数</div></div>
     <div class="stat-card"><div class="value pct-blue">${st.overall_pct}%</div><div class="label">Progress / 进度</div>
       <div class="pbar-bg" style="margin-top:8px"><div class="pbar-fill" style="width:${st.overall_pct}%;background:#2F5496"></div></div></div>
-    <div class="stat-card"><div class="value pct-green">${st.completed}</div><div class="label">Done / 完成</div></div>
+    <div class="stat-card"><div class="value pct-green">${st.completed}</div><div class="label">Done (100%) / 完成</div>
+      ${rtCount?`<div style="margin-top:4px;padding-top:4px;border-top:1px solid #f0f0f0"><span style="font-size:16px;font-weight:700;color:#4472C4">${rtCount}</span><span style="font-size:9px;color:#888"> past RT / 已过RT</span></div>`:''}</div>
     <div class="stat-card"><div class="value pct-yellow">${st.in_progress}</div><div class="label">WIP / 进行中</div></div>
     <div class="stat-card"><div class="value pct-red">${st.not_started}</div><div class="label">Pending / 待开始</div></div>`;
+
+  // Expediting Target Banner
+  const sett = st.settings || {};
+  const fc = st.forecast || {};
+  const pr = st.production_rate || {};
+  const schd = st.schedule_data;
+  const stdWeeks = parseInt(sett.standard_weeks||'9');
+  const wksSaved = parseInt(sett.committed_weeks_saved||'5');
+  const daysSaved = parseInt(sett.committed_days_saved||'0');
+  const totalSaved = wksSaved * 7 + daysSaved;
+  // Find production start from schedule
+  let prodStart = null;
+  if(schd && schd.diameters && schd.diameters.length){
+    const starts = schd.diameters.map(d=>d.fab_start).filter(x=>x).sort();
+    if(starts.length) prodStart = starts[0];
+  }
+  if(prodStart){
+    const psDate = new Date(prodStart);
+    const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
+    const commitEnd = new Date(stdEnd.getTime() - totalSaved*86400000);
+    const today = new Date(); today.setHours(0,0,0,0);
+    const daysToTarget = Math.ceil((commitEnd - today) / 86400000);
+    const fcEnd = fc.overall_forecast_end ? new Date(fc.overall_forecast_end) : commitEnd;
+    const fcSaved = Math.ceil((stdEnd - fcEnd) / 86400000);
+    const diffDays = Math.ceil((commitEnd - fcEnd) / 86400000);
+    const statusCls = diffDays >= 0 ? '' : (diffDays >= -5 ? 'tb-atrisk' : 'tb-behind');
+    const pillCls = diffDays >= 0 ? 'sp-ahead' : (diffDays >= -5 ? 'sp-ontrack' : 'sp-behind');
+    const pillText = diffDays >= 0 ? `▲ ${diffDays} DAYS AHEAD / 提前${diffDays}天` : `▼ ${Math.abs(diffDays)} DAYS BEHIND / 落后${Math.abs(diffDays)}天`;
+    const fmt = d => d.toLocaleDateString('en',{day:'2-digit',month:'short'});
+    document.getElementById('target-banner').innerHTML=`<div class="target-banner ${statusCls}">
+      <div class="tb-section"><div class="tb-label">Expediting Target / 加急目标</div><div class="tb-value" style="color:#4472C4">${fmt(commitEnd)}</div><div class="tb-sub">Committed / 承诺完工</div></div>
+      <div class="tb-section"><div class="tb-label">Forecast End / 预测完工</div><div class="tb-value" style="color:#27ae60">${fmt(fcEnd)}</div><div class="tb-sub">Based on rate / 基于进度</div></div>
+      <div class="tb-section"><div class="tb-label">Days to Target / 距目标</div><div class="tb-value" style="color:#2F5496">${daysToTarget}</div><div class="tb-sub">days left / 剩余天数</div></div>
+      <div class="tb-section"><div class="tb-label">Expediting Saved / 加急节省</div><div class="tb-value" style="color:#4472C4">${totalSaved}<span style="font-size:10px;font-weight:400"> days</span></div><div class="tb-sub">vs standard / 较标准</div></div>
+      <div class="tb-section"><div class="tb-label">Forecast Saved / 预测节省</div><div class="tb-value" style="color:#27ae60">${fcSaved}<span style="font-size:10px;font-weight:400"> days</span></div><div class="tb-sub">predicted / 预测</div></div>
+      <div class="tb-section" style="border-right:none;margin-left:auto"><div class="status-pill ${pillCls}">${pillText}</div><div style="font-size:8px;color:#888;margin-top:2px">vs commitment / 较承诺</div></div>
+    </div>`;
+    // Daily Production Rate + Bottleneck
+    const avgRate = pr.avg_7day || 0;
+    const trend = pr.trend || 0;
+    const todaySteps = pr.today_steps || 0;
+    const remaining = st.total - st.completed;
+    const targetRate = daysToTarget > 0 ? (remaining / daysToTarget).toFixed(1) : '—';
+    const aboveTarget = avgRate >= parseFloat(targetRate);
+    const trendArrow = trend >= 0 ? `<span style="color:#27ae60;font-size:10px;font-weight:600">▲${trend}</span>` : `<span style="color:#e74c3c;font-size:10px;font-weight:600">▼${Math.abs(trend)}</span>`;
+    // Find bottleneck (diameter with most remaining work relative to time)
+    let bottleneck = null;
+    if(schd && schd.diameters){
+      let worstRatio = 999;
+      schd.diameters.forEach(dm => {
+        if(dm.actual_pct >= 100) return;
+        const ratio = dm.actual_pct / Math.max(dm.expected_pct, 1);
+        if(ratio < worstRatio){ worstRatio = ratio; bottleneck = dm; }
+      });
+    }
+    let rateHtml = `<div class="rate-strip">
+      <div class="rs-title">📊 Daily Rate / 每日生产率</div>
+      <div class="rs-item"><div><div class="rs-lbl">Target / 目标</div><div class="rs-val" style="color:#2F5496">${targetRate}</div></div><div class="rs-lbl">spools/day<br>每日需完成</div></div>
+      <div class="rs-item"><div><div class="rs-lbl">7-day avg / 7天均值</div><div style="display:flex;align-items:baseline;gap:3px"><div class="rs-val" style="color:${aboveTarget?'#27ae60':'#e74c3c'}">${avgRate}</div>${trendArrow}</div></div><div class="rs-lbl">spools/day<br>较上周</div></div>
+      <div class="rs-item" style="border-right:none"><div><div class="rs-lbl">Today / 今日步骤</div><div class="rs-val" style="color:#4472C4">${todaySteps}</div></div><div class="rs-lbl">steps<br>今日完成</div></div>
+      <div class="rs-badge ${aboveTarget?'rs-good':'rs-bad'}">${aboveTarget?'✓ Above target / 超过目标':'⚠ Below target / 低于目标'}</div>
+    </div>`;
+    if(bottleneck && bottleneck.actual_pct < 100){
+      const fcDiam = fc.diameters ? fc.diameters[bottleneck.diameter] : null;
+      const fcEndDiam = fcDiam ? fcDiam.forecast_end : '—';
+      const neededRate = fcDiam ? ((100 - bottleneck.actual_pct) / Math.max(daysToTarget, 1) * bottleneck.spool_count / 100).toFixed(1) : '—';
+      rateHtml += `<div class="bottleneck">
+        <div style="font-size:9px;color:#888;text-transform:uppercase">Critical Path / 关键路径</div>
+        <div style="display:flex;align-items:baseline;gap:5px;margin:2px 0"><span style="font-size:20px;font-weight:700;color:#e74c3c">${bottleneck.diameter}</span><span style="font-size:11px;color:#888">${bottleneck.spool_count} spools · slowest / 最慢</span></div>
+        <div style="font-size:10px;color:#666">Need / 需要 <strong>${neededRate} spools/day</strong> · ${bottleneck.actual_pct}% done · Forecast / 预测: ${fcEndDiam}</div>
+      </div>`;
+    }
+    document.getElementById('rate-strip').innerHTML = rateHtml;
+  }
+
+  // Diameter cards with pace status
   const ds=Object.entries(st.by_diameter).sort((a,b)=>(parseInt(b[0])||0)-(parseInt(a[0])||0));
-  document.getElementById('diam').innerHTML=ds.map(([d,v])=>`<div class="diam-card"><div class="d">${d}</div><div class="p">${v.total} spools</div>
-    <div class="pbar-bg" style="margin-top:6px"><div class="pbar-fill" style="width:${v.avg_pct}%;background:${v.avg_pct>=100?'#27ae60':'#2F5496'}"></div></div>
-    <div style="font-size:12px;margin-top:4px;font-weight:600">${v.avg_pct}%</div></div>`).join('');
+  document.getElementById('diam').innerHTML=ds.map(([d,v])=>{
+    let cls='d-pending',badge='PENDING / 待开始',badgeCls='pb-pending',paceText='',barColor='#ccc';
+    if(schd && schd.diameters){
+      const dm = schd.diameters.find(x=>x.diameter===d);
+      if(dm){
+        const diff = dm.actual_pct - dm.expected_pct;
+        if(dm.status==='not_started'){cls='d-pending';badge='PENDING / 待开始';badgeCls='pb-pending';barColor='#ccc';}
+        else if(diff >= 5){cls='d-ahead';badge='AHEAD / 超前';badgeCls='pb-ahead';barColor='#27ae60';paceText=`+${Math.round(diff)}% ahead / 超前`;}
+        else if(diff >= -5){cls='d-ontrack';badge='ON TRACK / 达标';badgeCls='pb-ontrack';barColor='#4472C4';paceText=`${diff>=0?'+':''}${Math.round(diff)}% on pace / 达标`;}
+        else if(diff >= -15){cls='d-atrisk';badge='AT RISK / 有风险';badgeCls='pb-atrisk';barColor='#f39c12';paceText=`${Math.round(diff)}% behind / 落后`;}
+        else{cls='d-behind';badge='BEHIND / 落后';badgeCls='pb-behind';barColor='#e74c3c';paceText=`${Math.round(diff)}% behind / 落后`;}
+        if(dm.expected_pct===0 && dm.actual_pct>0){cls='d-ahead';badge='AHEAD / 超前';badgeCls='pb-ahead';barColor='#27ae60';paceText='Started early / 提前开始';}
+      } else if(v.avg_pct > 0){cls='d-ontrack';badge='WIP';badgeCls='pb-ontrack';barColor='#4472C4';}
+    } else if(v.avg_pct > 0){cls='d-ontrack';barColor='#4472C4';}
+    else if(v.avg_pct >= 100){cls='d-ahead';barColor='#27ae60';}
+    return `<div class="diam-card ${cls}"><div class="pace-badge ${badgeCls}">${badge}</div><div class="d">${d}</div><div class="p">${v.total} spools</div>
+      <div class="pbar-bg" style="margin-top:6px"><div class="pbar-fill" style="width:${v.avg_pct}%;background:${barColor}"></div></div>
+      <div style="font-size:12px;margin-top:4px;font-weight:600;color:${barColor}">${v.avg_pct}%</div>
+      ${paceText?`<div style="font-size:9px;color:#888;margin-top:2px">${paceText}</div>`:''}</div>`;
+  }).join('');
   render(all);
   // Populate diameter dropdown
   const diamsSet = [...new Set(all.map(s=>s.spool.main_diameter||'?'))].sort((a,b)=>(parseInt(b)||0)-(parseInt(a)||0));
@@ -1017,19 +1248,60 @@ REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vi
 .diam-row .d-status{min-width:90px;text-align:center}
 .gantt-mini{margin-top:12px;overflow-x:auto}
 .gantt-table{border-collapse:collapse;width:100%;min-width:600px}
-.gantt-table th{background:#2F5496;color:#fff;padding:4px;font-size:9px;text-align:center;position:sticky;top:0}
-.gantt-table td{padding:3px 1px;border:1px solid #e8e8e8;height:20px;font-size:10px}
-.gantt-table .g-label{white-space:nowrap;padding:3px 6px;font-weight:600;font-size:11px}
-.g-fab{background:#4472C4}.g-paint{background:#70AD47}.g-today{border-left:2px solid #e74c3c;border-right:2px solid #e74c3c}
+.gantt-table th{background:#2F5496;color:#fff;padding:6px 4px;font-size:9px;text-align:center;position:sticky;top:0}
+.gantt-table th.wk-current{background:#1B3A6B}
+.gantt-table td{padding:0;border:1px solid #e8e8e8;height:26px;font-size:10px;position:relative;min-width:65px}
+.gantt-table .g-label{white-space:nowrap;padding:3px 6px;font-weight:600;font-size:11px;background:#fafafa;position:sticky;left:0;z-index:2}
+.wk-dates{font-size:7px;color:rgba(255,255,255,.6);font-weight:400;display:block}
+.g-bar{position:absolute;top:2px;bottom:2px;left:1px;right:1px;border-radius:3px}
+.g-std{opacity:.2}.g-std-fab{background:#4472C4}.g-std-paint{background:#ED7D31}
+.g-exp-fab{background:#4472C4;z-index:1}.g-exp-paint{background:#ED7D31;z-index:1}
+.g-saved{background:#E2EFDA;border:1px solid #A9D18E;z-index:1;display:flex;align-items:center;justify-content:center}
+.g-saved::after{content:"✓";font-size:9px;color:#548235;font-weight:700}
+.g-forecast{border:2px dashed;z-index:2}.g-fc-fab{border-color:#4472C4}.g-fc-paint{border-color:#ED7D31}
+.g-today-line{position:absolute;top:0;bottom:0;width:3px;background:#e74c3c;z-index:10;left:30%}
+.g-pct{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:9px;font-weight:700;color:#fff;z-index:5}
+.mini-prog{width:100%;height:4px;background:#e8e8e8;border-radius:2px;margin-top:2px}
+.mini-prog-fill{height:100%;border-radius:2px;background:#4472C4}
 .act-item{padding:8px 12px;border-bottom:1px solid #f0f2f5;display:flex;gap:10px;align-items:center;font-size:13px}
 .act-item .time{color:#888;font-size:11px;min-width:55px}.act-item .spool{font-weight:600;color:#2F5496;min-width:70px}
 .act-item .detail{flex:1;color:#555}
-.legend{display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;font-size:12px}
+.legend{display:flex;gap:12px;margin-top:10px;flex-wrap:wrap;font-size:10px;color:#666}
 .legend span{display:flex;align-items:center;gap:4px}
-.legend .box{width:14px;height:14px;border-radius:3px;display:inline-block}
+.legend .box{width:14px;height:10px;border-radius:2px;display:inline-block}
 .expected-bar{background:#e8e8e8;border-radius:6px;height:8px;position:relative;overflow:visible;margin-top:4px}
 .expected-fill{position:absolute;left:0;top:0;height:100%;border-radius:6px;opacity:0.3;background:#2F5496}
 .actual-fill{position:absolute;left:0;top:0;height:100%;border-radius:6px}
+.commit-panel{background:#fff;border-radius:10px;padding:14px 18px;margin:12px 16px;box-shadow:0 2px 8px rgba(0,0,0,.08);display:flex;align-items:center;gap:16px;flex-wrap:wrap;border-left:4px solid #2F5496}
+.commit-panel h4{font-size:12px;color:#2F5496;margin:0;white-space:nowrap}
+.cp-item{text-align:center;padding:0 12px;border-right:1px solid #eee}.cp-item:last-child{border-right:none}
+.cp-label{font-size:8px;color:#888;text-transform:uppercase}.cp-val{font-size:16px;font-weight:700}
+.results-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 16px}
+.res-card{background:#fff;border-radius:10px;padding:14px;box-shadow:0 1px 4px rgba(0,0,0,.06);text-align:center}
+.res-card h5{font-size:9px;color:#888;text-transform:uppercase;margin:0 0 4px}
+.res-card .rv{font-size:24px;font-weight:700}.res-card .rs{font-size:10px;color:#999;margin-top:2px}
+.transit-strip{background:#fff;border-radius:10px;padding:12px 18px;margin:10px 16px;box-shadow:0 1px 4px rgba(0,0,0,.06);display:flex;align-items:center;gap:16px;flex-wrap:wrap;border-left:4px solid #003366}
+.sa-card{border:1px solid #f0f0f0;border-radius:8px;margin-bottom:6px;overflow:hidden}
+.sa-header{display:flex;align-items:center;padding:8px 12px;gap:10px;cursor:pointer;user-select:none}
+.sa-header:hover{background:#FAFBFD}
+.sa-spool{font-weight:700;color:#2F5496;font-size:12px;min-width:65px}
+.sa-dia{font-size:9px;color:#888;background:#f0f2f5;padding:1px 6px;border-radius:8px}
+.sa-prog{width:60px;height:5px;background:#e8e8e8;border-radius:3px;overflow:hidden}
+.sa-prog-fill{height:100%;border-radius:3px}
+.sa-range{flex:1;font-size:11px;color:#555}.sa-range strong{color:#2F5496}
+.sa-by{font-size:10px;color:#888}.sa-time{font-size:9px;color:#aaa;min-width:40px;text-align:right}
+.sa-expand{font-size:9px;color:#ccc;transition:transform .2s}
+.sa-card.open .sa-expand{transform:rotate(90deg)}
+.sa-milestone{font-size:9px;font-weight:700;padding:2px 7px;border-radius:8px}
+.sa-ms-rt{background:#EDE7F6;color:#5E35B1}.sa-ms-done{background:#E8F5E9;color:#2E7D32}
+.sa-detail{display:none;border-top:1px solid #f5f5f5;background:#FAFBFD}
+.sa-card.open .sa-detail{display:block}
+.sa-drow{display:flex;align-items:center;padding:5px 12px 5px 36px;gap:8px;font-size:11px;border-bottom:1px solid #f5f5f5}
+.sa-drow:last-child{border-bottom:none}
+.act-summary{display:flex;background:#F8F9FB;border-radius:8px;padding:8px 0;margin-bottom:12px;flex-wrap:wrap}
+.as-item{flex:1;text-align:center;padding:4px 12px;min-width:80px}
+.as-item:not(:last-child){border-right:1px solid #e8e8e8}
+.as-val{font-size:18px;font-weight:700}.as-lbl{font-size:9px;color:#888}
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:12px 0}
 .sum-card{text-align:center;padding:12px;border-radius:8px;background:#f8f9fa}
 .sum-card .v{font-size:24px;font-weight:700}.sum-card .l{font-size:11px;color:#888;margin-top:2px}
@@ -1054,96 +1326,203 @@ async function load(){
   const d = await r.json();
   document.getElementById('rpt-date').textContent = d.date;
   let html = '';
-  // Overall status
-  const st = d.stats;
-  const sch = d.schedule;
+  const st = d.stats, sch = d.schedule, sett = d.settings||{}, fc = d.forecast||{}, pr = d.production_rate||{};
   const overallStatus = sch ? sch.overall_status : 'not_started';
+  const stdWeeks = parseInt(sett.standard_weeks||'9');
+  const wksSaved = parseInt(sett.committed_weeks_saved||'5');
+  const daysSaved = parseInt(sett.committed_days_saved||'0');
+  const totalSaved = wksSaved*7+daysSaved;
+  const transitDays = parseInt(sett.sea_transit_days||'45');
+  const fmt = dt => dt.toLocaleDateString('en',{day:'2-digit',month:'short',year:'numeric'});
+  const fmtShort = dt => dt.toLocaleDateString('en',{day:'2-digit',month:'short'});
+
+  // Overall status card
   html += `<div class="report-card">
     <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
       <div><h3 style="margin:0">Overall Status / 总体状态</h3>
         <div class="status-badge status-${overallStatus}" style="margin-top:8px">${STATUS_LABELS[overallStatus]||overallStatus}</div></div>
-      <div style="flex:1;min-width:200px">
-        <div class="summary-grid">
-          <div class="sum-card"><div class="v" style="color:#2F5496">${st.overall_pct}%</div><div class="l">Progress / 进度</div></div>
-          <div class="sum-card"><div class="v">${st.total}</div><div class="l">Total / 总数</div></div>
-          <div class="sum-card"><div class="v" style="color:#27ae60">${st.completed}</div><div class="l">Done / 完成</div></div>
-          <div class="sum-card"><div class="v" style="color:#f39c12">${st.in_progress}</div><div class="l">WIP / 进行中</div></div>
-          <div class="sum-card"><div class="v" style="color:#e74c3c">${st.not_started}</div><div class="l">Pending / 待开始</div></div>
-        </div>
-      </div>
-    </div>
-  </div>`;
+      <div style="flex:1;min-width:200px"><div class="summary-grid">
+        <div class="sum-card"><div class="v" style="color:#2F5496">${st.overall_pct}%</div><div class="l">Progress / 进度</div></div>
+        <div class="sum-card"><div class="v">${st.total}</div><div class="l">Total / 总数</div></div>
+        <div class="sum-card"><div class="v" style="color:#27ae60">${st.completed}</div><div class="l">Done / 完成</div>${d.past_rt?`<div style="font-size:11px;color:#4472C4;margin-top:2px"><strong>${d.past_rt}</strong> past RT / 已过RT</div>`:''}</div>
+        <div class="sum-card"><div class="v" style="color:#f39c12">${st.in_progress}</div><div class="l">WIP / 进行中</div></div>
+        <div class="sum-card"><div class="v" style="color:#e74c3c">${st.not_started}</div><div class="l">Pending / 待开始</div></div>
+      </div></div>
+    </div></div>`;
+
   // Schedule status per diameter
   if(sch && sch.diameters && sch.diameters.length){
     html += `<div class="report-card"><h3>Schedule Status by Diameter / 按管径计划状态</h3><div class="diam-status">`;
     sch.diameters.forEach(dm => {
       const color = STATUS_COLORS[dm.status] || '#95a5a6';
-      const barMax = Math.max(dm.expected_pct, dm.actual_pct, 1);
       html += `<div class="diam-row" style="border-left:4px solid ${color}">
         <div class="d-name">${dm.diameter}</div>
         <div class="d-info">
           <div style="font-size:12px;color:#888">${dm.spool_count} spools · Expected / 预期: ${dm.expected_pct}% · Actual / 实际: <strong>${dm.actual_pct}%</strong> (${dm.diff>=0?'+':''}${dm.diff}%)</div>
-          <div class="expected-bar" style="margin-top:6px">
-            <div class="expected-fill" style="width:${dm.expected_pct}%"></div>
-            <div class="actual-fill" style="width:${dm.actual_pct}%;background:${color}"></div>
-          </div>
-          <div style="font-size:10px;color:#aaa;margin-top:2px">Fab: ${dm.fab_start} → ${dm.fab_end} · Paint → ${dm.paint_end || 'N/A'}</div>
+          <div class="expected-bar" style="margin-top:6px"><div class="expected-fill" style="width:${dm.expected_pct}%"></div><div class="actual-fill" style="width:${dm.actual_pct}%;background:${color}"></div></div>
+          <div style="font-size:10px;color:#aaa;margin-top:2px">Fab: ${dm.fab_start} → ${dm.fab_end} · Paint → ${dm.paint_end||'N/A'}</div>
         </div>
         <div class="d-status"><span class="status-badge status-${dm.status}" style="font-size:11px;padding:4px 10px">${STATUS_LABELS[dm.status]||dm.status}</span></div>
       </div>`;
     });
     html += `</div></div>`;
-    // Mini Gantt
-    html += `<div class="report-card"><h3>Gantt Overview / 甘特图概览</h3>
-      <div class="legend">
-        <span><span class="box" style="background:#4472C4"></span> Fabrication / 制作</span>
-        <span><span class="box" style="background:#70AD47"></span> Painting / 涂装</span>
-        <span><span class="box" style="background:#e74c3c;width:3px"></span> Today / 今天</span>
-      </div>
-      <div class="gantt-mini"><table class="gantt-table"><thead><tr><th style="min-width:70px">Diameter</th><th style="min-width:50px">Phase</th>`;
-    // Calculate weeks
-    const allStarts = sch.diameters.map(d=>d.fab_start).filter(x=>x);
-    const allEnds = sch.diameters.map(d=>d.paint_end||d.fab_end).filter(x=>x);
-    const gmin = new Date(Math.min(...allStarts.map(s=>new Date(s)))); const gmax = new Date(Math.max(...allEnds.map(s=>new Date(s))));
-    gmin.setDate(gmin.getDate() - gmin.getDay() + 1); // Monday
-    const weeks = []; let cur = new Date(gmin);
-    while(cur <= new Date(gmax.getTime()+7*86400000)){weeks.push(new Date(cur)); cur.setDate(cur.getDate()+7);}
-    const today = new Date(); today.setHours(0,0,0,0);
-    weeks.forEach(w => { html += `<th>${w.toLocaleDateString('en',{day:'2-digit',month:'short'})}</th>`; });
-    html += `</tr></thead><tbody>`;
-    sch.diameters.forEach(dm => {
-      [{phase:'Fab',start:dm.fab_start,end:dm.fab_end,cls:'g-fab'},{phase:'Paint',start:dm.paint_start,end:dm.paint_end,cls:'g-paint'}].forEach(ph => {
-        if(!ph.start||!ph.end) return;
-        const ps = new Date(ph.start), pe = new Date(ph.end);
-        html += `<tr><td class="g-label">${dm.diameter}</td><td class="g-label">${ph.phase}</td>`;
-        weeks.forEach(w => {
-          const we = new Date(w.getTime()+6*86400000);
-          let cls = '';
-          if(ps<=we && pe>=w) cls = ph.cls;
-          let todayCls = (today>=w && today<=we) ? ' g-today' : '';
-          html += `<td class="${cls}${todayCls}"></td>`;
+
+    // Commitment panel
+    let prodStart = null;
+    const starts = sch.diameters.map(x=>x.fab_start).filter(x=>x).sort();
+    if(starts.length) prodStart = starts[0];
+    if(prodStart){
+      const psDate = new Date(prodStart);
+      const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
+      const commitEnd = new Date(stdEnd.getTime() - totalSaved*86400000);
+      const fcEnd = fc.overall_forecast_end ? new Date(fc.overall_forecast_end) : commitEnd;
+      const fcSaved = Math.ceil((stdEnd - fcEnd) / 86400000);
+      const diffDays = Math.ceil((commitEnd - fcEnd) / 86400000);
+      html += `<div class="commit-panel"><h4>⚡ Expediting Commitment / 加急承诺</h4>
+        <div class="cp-item"><div class="cp-label">Start / 开始</div><div class="cp-val" style="color:#2F5496">${fmtShort(psDate)}</div></div>
+        <div class="cp-item"><div class="cp-label">Weeks saved / 节省周数</div><div class="cp-val" style="color:#2F5496">${wksSaved}</div></div>
+        <div class="cp-item"><div class="cp-label">Days saved / 节省天数</div><div class="cp-val" style="color:#2F5496">${daysSaved}</div></div>
+        <div class="cp-item" style="border-right:none"><div class="cp-label">Forecast vs Committed / 预测较承诺</div><div class="cp-val" style="color:${diffDays>=0?'#27ae60':'#e74c3c'}">${diffDays>=0?diffDays+' days ahead / 提前':Math.abs(diffDays)+' days behind / 落后'}</div></div>
+      </div>`;
+
+      // Production Gantt — 9 weeks from production start
+      html += `<div class="report-card"><h3>Production Gantt / 生产甘特图</h3>
+        <div class="gantt-mini"><table class="gantt-table"><thead><tr>
+        <th style="min-width:70px;background:#404040">Diameter</th><th style="min-width:45px;background:#404040">Phase</th>`;
+      const today = new Date(); today.setHours(0,0,0,0);
+      const weeks = [];
+      for(let i=0;i<stdWeeks;i++){
+        const ws = new Date(psDate.getTime()+i*7*86400000);
+        const we = new Date(ws.getTime()+6*86400000);
+        const isCurrent = today>=ws && today<=we;
+        weeks.push({start:ws,end:we,num:i+1,current:isCurrent});
+        html += `<th${isCurrent?' class="wk-current"':''}>W${i+1}<br><span class="wk-dates">${fmtShort(ws)} → ${fmtShort(we)}</span></th>`;
+      }
+      html += `</tr></thead><tbody>`;
+
+      sch.diameters.forEach(dm => {
+        const ap = dm.actual_pct;
+        [{phase:'Fab',start:dm.fab_start,end:dm.fab_end,stdCls:'g-std-fab',expCls:'g-exp-fab'},{phase:'Paint',start:dm.paint_start,end:dm.paint_end,stdCls:'g-std-paint',expCls:'g-exp-paint'}].forEach((ph,idx) => {
+          if(!ph.start||!ph.end) return;
+          const ps=new Date(ph.start), pe=new Date(ph.end);
+          // Expedited end = standard end shifted by saved weeks
+          const stdPe = new Date(pe.getTime()+totalSaved*86400000);
+          html += `<tr>`;
+          if(idx===0) html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${ap}%"></div></div></td>`;
+          html += `<td class="g-label" style="font-size:9px;color:#666">${ph.phase}</td>`;
+          weeks.forEach(w => {
+            const inStd = ps<=w.end && stdPe>=w.start;
+            const inExp = ps<=w.end && pe>=w.start;
+            const isSaved = inStd && !inExp;
+            const isToday = w.current;
+            let content = '';
+            if(isSaved) content = `<div class="g-bar g-saved"></div>`;
+            else if(inExp) content = `<div class="g-bar g-std ${ph.stdCls}"></div><div class="g-bar ${ph.expCls}"></div>`;
+            else if(inStd) content = `<div class="g-bar g-std ${ph.stdCls}"></div>`;
+            if(isToday && inExp) content += `<div class="g-today-line"></div><div class="g-pct">${ap}%</div>`;
+            else if(isToday) content += `<div class="g-today-line"></div>`;
+            html += `<td>${content}</td>`;
+          });
+          html += `</tr>`;
         });
-        html += `</tr>`;
+        html += `<tr><td colspan="${stdWeeks+2}" style="height:2px;background:#f0f2f5;border:none"></td></tr>`;
       });
-    });
-    html += `</tbody></table></div></div>`;
+      html += `</tbody></table></div>
+        <div class="legend">
+          <span><span class="box" style="background:#4472C4"></span> Fabrication (Expedited) / 制作(加急)</span>
+          <span><span class="box" style="background:#ED7D31"></span> Painting (Expedited) / 涂装(加急)</span>
+          <span><span class="box" style="opacity:.2;background:#4472C4"></span> Standard (${stdWeeks} wks) / 标准</span>
+          <span><span class="box" style="background:#E2EFDA;border:1px solid #A9D18E"></span> Saved / 节省 ✓</span>
+          <span><span class="box" style="background:#e74c3c;width:3px"></span> Today / 今天</span>
+        </div></div>`;
+
+      // Results cards
+      html += `<div class="results-grid">
+        <div class="res-card" style="border-top:3px solid #2F5496"><h5>Overall Progress / 总进度</h5><div class="rv" style="color:#2F5496">${st.overall_pct}%</div><div class="rs">${st.total} spools · ${st.in_progress} WIP</div></div>
+        <div class="res-card" style="border-top:3px solid #4472C4"><h5>Production End / 生产完工</h5>
+          <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin:4px 0">
+            <span style="font-size:14px;color:#888;text-decoration:line-through">${fmtShort(stdEnd)}</span><span style="color:#888">→</span>
+            <span style="font-size:18px;font-weight:700;color:#4472C4">${fmtShort(commitEnd)}</span>
+          </div><div class="rs">Standard → Committed / 标准→承诺</div></div>
+        <div class="res-card" style="border-top:3px solid #4472C4"><h5>Expediting Commitment / 加急承诺</h5><div class="rv" style="color:#4472C4">${totalSaved} <span style="font-size:12px;font-weight:400">days</span></div><div class="rs">saved with expediting / 加急节省</div></div>
+        <div class="res-card" style="border-top:3px solid #27ae60"><h5>Production Forecast / 生产预测</h5><div class="rv" style="color:#27ae60">${fcSaved} <span style="font-size:12px;font-weight:400">days</span></div><div class="rs">${diffDays>=0?diffDays+' days ahead / 提前':'behind / 落后'} · ends ${fmtShort(fcEnd)}</div></div>
+        <div class="res-card" style="border-top:3px solid #2F5496"><h5>Actual End / 实际完工</h5><div class="rv" style="color:#2F5496">${st.completed>=st.total?fmtShort(new Date()):'—'}</div><div class="rs">${st.completed>=st.total?'Production complete / 生产完成':'In progress / 进行中'}</div></div>
+      </div>`;
+
+      // Transit info strip
+      const commitArrival = new Date(commitEnd.getTime()+transitDays*86400000);
+      const fcArrival = new Date(fcEnd.getTime()+transitDays*86400000);
+      html += `<div class="transit-strip">
+        <div style="display:flex;align-items:center;gap:6px"><span style="font-size:18px">🚢</span><div><div style="font-size:10px;color:#888;text-transform:uppercase">Sea Transit / 海运</div><div style="font-size:14px;font-weight:700;color:#003366">~${transitDays} days</div></div></div>
+        <div style="width:1px;height:28px;background:#e0e0e0"></div>
+        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Expected Arrival Chile / 预计到达</div><div style="font-size:14px;font-weight:700;color:#003366">${fmt(commitArrival)}</div><div style="font-size:9px;color:#999">Based on committed end / 基于承诺</div></div>
+        <div style="width:1px;height:28px;background:#e0e0e0"></div>
+        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Forecast Arrival / 预测到达</div><div style="font-size:14px;font-weight:700;color:#27ae60">${fmt(fcArrival)}</div><div style="font-size:9px;color:#999">Based on forecast / 基于预测</div></div>
+      </div>`;
+    }
   } else {
     html += `<div class="report-card"><h3>Schedule Status / 计划状态</h3>
-      <p style="color:#888;padding:20px 0">No schedule configured. Use the API to set up a production schedule:<br>
-      <code>POST /api/project/${P}/schedule</code> with <code>{"fab_start":"YYYY-MM-DD"}</code></p></div>`;
+      <p style="color:#888;padding:20px 0">No schedule configured.<br><code>POST /api/project/${P}/schedule</code></p></div>`;
   }
-  // Today's activity
-  html += `<div class="report-card"><h3>Today's Activity / 今日动态 (${d.steps_completed_today} steps completed)</h3>`;
-  if(d.today_activity && d.today_activity.length){
-    d.today_activity.forEach(a => {
-      const ts = (a.timestamp||'').substring(11,19);
-      const icon = a.action==='completed' ? '✅' : a.action==='unchecked' ? '↩️' : '📝';
-      html += `<div class="act-item"><span class="time">${ts}</span><span class="spool">${a.spool_id}</span><span>${icon}</span><span class="detail">${a.details||a.action}</span></div>`;
+
+  // Today's activity — grouped by spool
+  const completed = (d.today_activity||[]).filter(a=>a.action==='completed');
+  const stepNames = d.step_names||{};
+  const spoolPcts = d.spool_progress||{};
+  const releasedToday = d.released_today||0;
+  const groups = {};
+  completed.forEach(a => { if(!groups[a.spool_id]) groups[a.spool_id]=[]; groups[a.spool_id].push(a); });
+  const spoolKeys = Object.keys(groups);
+  const uniqueSpools = spoolKeys.length;
+
+  html += `<div class="report-card"><h3>Today's Activity / 今日动态 <span style="font-weight:400;color:#888;font-size:12px">(${d.steps_completed_today} steps / 步骤)</span></h3>`;
+  html += `<div class="act-summary">
+    <div class="as-item"><div class="as-val" style="color:#2F5496">${d.steps_completed_today}</div><div class="as-lbl">Steps / 步骤</div></div>
+    <div class="as-item"><div class="as-val" style="color:#4472C4">${uniqueSpools}</div><div class="as-lbl">Spools progressed / 管段推进</div></div>
+    <div class="as-item"><div class="as-val" style="color:#27ae60">${releasedToday}</div><div class="as-lbl">Released today / 今日放行</div></div>
+    <div class="as-item"><div class="as-val" style="color:#5E35B1">${d.past_rt||0}</div><div class="as-lbl">Past RT / 通过RT</div></div>
+  </div>`;
+
+  if(spoolKeys.length){
+    const showLimit = 15;
+    spoolKeys.forEach((sid,idx) => {
+      const items = groups[sid];
+      const pct = spoolPcts[sid]||0;
+      const firstStep = items[items.length-1];
+      const lastStep = items[0];
+      const firstName = stepNames[firstStep.step_number]||`Step ${firstStep.step_number}`;
+      const lastName = stepNames[lastStep.step_number]||`Step ${lastStep.step_number}`;
+      const rangeText = items.length===1 ? firstName : `${firstName} → ${lastName}`;
+      const ts = (lastStep.timestamp||'').substring(11,16);
+      const op = items[0].operator||'';
+      const hasRT = items.some(a=>a.step_number===8);
+      const hasRelease = items.some(a=>a.step_number===15);
+      const barColor = pct>=100?'#27ae60':pct>60?'#4472C4':pct>0?'#f39c12':'#ccc';
+      const hidden = idx>=showLimit ? ' style="display:none" data-extra' : '';
+      html += `<div class="sa-card"${hidden} onclick="this.classList.toggle('open')">
+        <div class="sa-header">
+          <div class="sa-spool">${sid}</div>
+          <div class="sa-prog"><div class="sa-prog-fill" style="width:${pct}%;background:${barColor}"></div></div>
+          <div class="sa-range"><strong>${items.length} step${items.length>1?'s':''}</strong> · ${rangeText}</div>
+          ${hasRT?'<div class="sa-milestone sa-ms-rt">★ RT HOLD POINT</div>':''}
+          ${hasRelease?'<div class="sa-milestone sa-ms-done">🏁 RELEASED / 放行</div>':''}
+          <div class="sa-by">${op}</div><div class="sa-time">${ts}</div><div class="sa-expand">▸</div>
+        </div>
+        <div class="sa-detail">${items.map(a=>{
+          const sn=stepNames[a.step_number]||`Step ${a.step_number}`;
+          const t=(a.timestamp||'').substring(11,19);
+          const icon=a.step_number===15?'🏁':a.step_number===8?'⭐':'✅';
+          return `<div class="sa-drow"><span style="color:#aaa;font-size:10px;min-width:50px">${t}</span><span>${icon}</span><span style="flex:1;color:#555">${sn}</span><span style="color:#888;font-size:10px">${a.operator||''}</span></div>`;
+        }).join('')}</div></div>`;
     });
+    if(spoolKeys.length > showLimit){
+      html += `<div style="text-align:center;padding:10px;color:#4472C4;font-size:12px;font-weight:600;cursor:pointer" onclick="document.querySelectorAll('[data-extra]').forEach(e=>e.style.display='');this.style.display='none'">Show all ${spoolKeys.length} spools / 显示全部 ▾</div>`;
+    }
   } else {
     html += `<div style="text-align:center;padding:20px;color:#aaa">No activity today yet / 今天暂无动态</div>`;
   }
   html += `</div>`;
+
   document.getElementById('rpt-content').innerHTML = html;
 }
 load();

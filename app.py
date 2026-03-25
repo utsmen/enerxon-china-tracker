@@ -1456,58 +1456,92 @@ async function load(){
       }
       html += `</tr></thead><tbody>`;
 
-      // LOGIC:
-      // DB schedule = STANDARD 9-week plan.
-      // Expedited = standard compressed by ratio (expeditedWeeks/standardWeeks).
-      // Each diameter's expedited start/end = scale standard dates by this ratio.
-      // Blue/orange = expedited bars (compressed into first 4 weeks).
-      // Green ✓ = standard bars AFTER expedited ends (the improvement).
-      // Forecast = overall forecast dashed border (accounts for resource sharing).
+      // GANTT LOGIC:
+      // DB schedule = STANDARD 9-week plan (fab + paint dates per diameter).
+      // Expedited fab = scale standard fab dates by ratio (4/9), capped at commitEnd.
+      // Expedited paint = starts AFTER expedited fab ends, duration from surface_m2 formula.
+      // Saved = standard bar present but no expedited bar (the improvement).
+      // Forecast = per-diameter dashed border on fab row.
+      // % shown once per diameter on the current week.
       const ratio = (stdWeeks - wksSaved) / stdWeeks;  // 4/9
-      const overallFcEnd = d.forecast && d.forecast.overall_forecast_end ? new Date(d.forecast.overall_forecast_end) : null;
+      const fcDiameters = d.forecast ? d.forecast.diameters : {};
       let lastDiamIdx = sch.diameters.length - 1;
+      const DAY = 86400000;
+
       sch.diameters.forEach((dm, dmIdx) => {
         const ap = dm.actual_pct;
+        const fabPs = new Date(dm.fab_start), fabPe = new Date(dm.fab_end);
+        const paintPs = new Date(dm.paint_start), paintPe = new Date(dm.paint_end);
 
-        [{phase:'Fab',start:dm.fab_start,end:dm.fab_end,expCls:'g-exp-fab'},
-         {phase:'Paint',start:dm.paint_start,end:dm.paint_end,expCls:'g-exp-paint'}].forEach((ph,idx) => {
-          if(!ph.start||!ph.end) return;
-          const ps=new Date(ph.start), pe=new Date(ph.end);
-          // Calculate expedited dates by scaling standard position, capped at commitEnd
-          const stdStartMs = ps.getTime() - psDate.getTime();
-          const stdEndMs = pe.getTime() - psDate.getTime();
-          const expStartDate = new Date(Math.min(psDate.getTime() + stdStartMs * ratio, commitEnd.getTime()));
-          const expEndDate = new Date(Math.min(psDate.getTime() + stdEndMs * ratio, commitEnd.getTime()));
+        // Expedited FAB: scale standard fab position by ratio, cap at commitEnd
+        const fabStartMs = fabPs.getTime() - psDate.getTime();
+        const fabEndMs = fabPe.getTime() - psDate.getTime();
+        const expFabStart = new Date(Math.min(psDate.getTime() + fabStartMs * ratio, commitEnd.getTime()));
+        const expFabEnd = new Date(Math.min(psDate.getTime() + fabEndMs * ratio, commitEnd.getTime()));
 
-          html += `<tr>`;
-          if(idx===0) html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${ap}%"></div></div></td>`;
-          html += `<td class="g-label" style="font-size:9px;color:#666">${ph.phase}</td>`;
-          weeks.forEach(w => {
-            const inStandard = ps<=w.end && pe>=w.start;
-            // Expedited: independent of standard position (scaled dates may be earlier)
-            const inExpedited = w.start<=commitEnd && expStartDate<=w.end && expEndDate>=w.start;
-            // Saved: standard bar exists but no expedited bar in this week
-            const isSaved = inStandard && !inExpedited;
-            const isToday = w.current;
-            const isLastPaintRow = dmIdx===lastDiamIdx && idx===1;
-            // Forecast: only on first diameter's fab row (shows once as column marker)
-            const isForecast = dmIdx===0 && idx===0 && overallFcEnd && overallFcEnd>=w.start && overallFcEnd<=w.end;
-            let content = '';
-            if(inExpedited){
-              content = `<div class="g-bar ${ph.expCls}"></div>`;
-              if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${ap}%</div>`;
-              else if(ap > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
-            } else if(isSaved){
-              content = `<div class="g-bar g-saved"></div>`;
-              if(isToday) content += `<div class="g-today-line"></div>`;
-            }
-            if(isForecast) content += `<div class="g-bar g-forecast g-fc-fab"></div>`;
-            if(isToday && !inExpedited && !isSaved) content += `<div class="g-today-line"></div>`;
-            if(isToday && isLastPaintRow && !content.includes('g-pct')) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11;white-space:nowrap">TODAY</div>`;
-            html += `<td>${content}</td>`;
-          });
-          html += `</tr>`;
+        // Expedited PAINT: starts day after expedited fab ends, duration from paint_days
+        const dmFc = fcDiameters[dm.diameter] || {};
+        const paintDays = dmFc.paint_days || 0;
+        const expPaintStart = new Date(expFabEnd.getTime() + DAY);
+        const expPaintEnd = new Date(Math.min(expPaintStart.getTime() + Math.max(paintDays - 1, 0) * DAY, commitEnd.getTime()));
+
+        // Per-diameter forecast
+        const dmFcEnd = dmFc.forecast_end ? new Date(dmFc.forecast_end) : null;
+        const dmStarted = dmFc.started !== false;
+
+        // Determine if % already shown for this diameter (show once on current active bar)
+        let pctShown = false;
+
+        // FAB ROW
+        html += `<tr>`;
+        html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${ap}%"></div></div></td>`;
+        html += `<td class="g-label" style="font-size:9px;color:#666">Fab</td>`;
+        weeks.forEach(w => {
+          const inStdFab = fabPs<=w.end && fabPe>=w.start;
+          const inExpFab = expFabStart<=w.end && expFabEnd>=w.start && w.start<=commitEnd;
+          const inStdPaint = paintPs<=w.end && paintPe>=w.start;
+          const isSaved = (inStdFab || inStdPaint) && !inExpFab;
+          const isToday = w.current;
+          const isForecast = dmStarted && dmFcEnd && ap<100 && dmFcEnd>=w.start && dmFcEnd<=w.end;
+          let content = '';
+          if(inExpFab){
+            content = `<div class="g-bar g-exp-fab"></div>`;
+            if(isToday && !pctShown){ content += `<div class="g-today-line"></div><div class="g-pct">${ap}%</div>`; pctShown=true; }
+            else if(ap > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
+          } else if(isSaved){
+            content = `<div class="g-bar g-saved"></div>`;
+          }
+          if(isForecast) content += `<div class="g-bar g-forecast g-fc-fab"></div>`;
+          if(isToday && !inExpFab && !isSaved) content += `<div class="g-today-line"></div>`;
+          html += `<td>${content}</td>`;
         });
+        html += `</tr>`;
+
+        // PAINT ROW
+        html += `<tr>`;
+        html += `<td class="g-label" style="font-size:9px;color:#666">Paint</td>`;
+        const isLastPaint = dmIdx===lastDiamIdx;
+        weeks.forEach(w => {
+          const inStdPaint = paintPs<=w.end && paintPe>=w.start;
+          const inExpPaint = paintDays > 0 && expPaintStart<=w.end && expPaintEnd>=w.start && w.start<=commitEnd;
+          const inStdFab = fabPs<=w.end && fabPe>=w.start;
+          // Saved on paint row: standard paint/fab bar exists but no expedited paint bar AND not in expedited fab
+          const inExpFab = expFabStart<=w.end && expFabEnd>=w.start && w.start<=commitEnd;
+          const isSaved = (inStdPaint || inStdFab) && !inExpPaint && !inExpFab;
+          const isToday = w.current;
+          let content = '';
+          if(inExpPaint){
+            content = `<div class="g-bar g-exp-paint"></div>`;
+            if(isToday && !pctShown){ content += `<div class="g-today-line"></div><div class="g-pct">${ap}%</div>`; pctShown=true; }
+            else if(ap > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
+          } else if(isSaved){
+            content = `<div class="g-bar g-saved"></div>`;
+          }
+          if(isToday && !inExpPaint && !isSaved) content += `<div class="g-today-line"></div>`;
+          if(isToday && isLastPaint && !content.includes('g-pct')) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11;white-space:nowrap">TODAY</div>`;
+          html += `<td>${content}</td>`;
+        });
+        html += `</tr>`;
         html += `<tr><td colspan="${stdWeeks+2}" style="height:2px;background:#f0f2f5;border:none"></td></tr>`;
       });
       html += `</tbody></table></div>

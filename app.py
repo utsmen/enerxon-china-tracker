@@ -181,17 +181,22 @@ def spool_hours(spool_row, completed_steps, settings):
     if has_br and BRANCH_STEP in completed_steps: fab_done += 2
     if WELDING_STEP in completed_steps: fab_done += weld_hrs
 
-    # Paint hours
-    surface_hrs = (surface * 0.98 / paint_cap * 8) if paint_cap > 0 and surface > 0 else 0
-    paint_fixed = len(PAINT_FIXED_STEPS_2H) * 2 + 3  # steps 10,13,14 @2h + step 15 @3h
-    paint_total = paint_fixed + surface_hrs
-
-    paint_done = 0
-    for step in PAINT_FIXED_STEPS_2H:
-        if step in completed_steps: paint_done += 2
-    if PACKING_STEP in completed_steps: paint_done += 3
-    if 11 in completed_steps: paint_done += surface_hrs / 2
-    if 12 in completed_steps: paint_done += surface_hrs / 2
+    # Paint hours (only if spool has surface — no painting for welding-only spools)
+    has_painting = surface > 0
+    if has_painting:
+        surface_hrs = (surface * 0.98 / paint_cap * 8) if paint_cap > 0 else 0
+        paint_fixed = len(PAINT_FIXED_STEPS_2H) * 2 + 3  # steps 10,13,14 @2h + step 15 @3h
+        paint_total = paint_fixed + surface_hrs
+        paint_done = 0
+        for step in PAINT_FIXED_STEPS_2H:
+            if step in completed_steps: paint_done += 2
+        if PACKING_STEP in completed_steps: paint_done += 3
+        if 11 in completed_steps: paint_done += surface_hrs / 2
+        if 12 in completed_steps: paint_done += surface_hrs / 2
+    else:
+        surface_hrs = 0
+        paint_total = 0
+        paint_done = 0
 
     total = fab_total + paint_total
     done = fab_done + paint_done

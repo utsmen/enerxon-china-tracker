@@ -1502,12 +1502,13 @@ async function load(){
   const d = await r.json();
   document.getElementById('rpt-date').textContent = d.date;
   let html = '';
-  const st = d.stats, sch = d.schedule, sett = d.settings||{}, fc = d.forecast||{}, pr = d.production_rate||{};
+  const st = d.stats, sch = d.schedule, sett = d.settings||{}, fc = d.forecast||{};
   const overallStatus = sch ? sch.overall_status : 'not_started';
   const stdWeeks = parseInt(sett.standard_weeks||'9');
-  const wksSaved = parseInt(sett.committed_weeks_saved||'5');
+  const wksSaved = parseInt(sett.committed_weeks_saved||'0');
   const daysSaved = parseInt(sett.committed_days_saved||'0');
   const totalSaved = wksSaved*7+daysSaved;
+  const hasExpediting = totalSaved > 0;
   const transitDays = parseInt(sett.sea_transit_days||'45');
   const fmt = dt => dt.toLocaleDateString('en',{day:'2-digit',month:'short',year:'numeric'});
   const fmtShort = dt => dt.toLocaleDateString('en',{day:'2-digit',month:'short'});
@@ -1526,50 +1527,60 @@ async function load(){
       </div></div>
     </div></div>`;
 
-  // Schedule status per diameter
+  // Schedule status per diameter with fab% and paint%
   if(sch && sch.diameters && sch.diameters.length){
     html += `<div class="report-card"><h3>Schedule Status by Diameter / 按管径计划状态</h3><div class="diam-status">`;
+    const fcDiams = fc.diameters || {};
     sch.diameters.forEach(dm => {
       const color = STATUS_COLORS[dm.status] || '#95a5a6';
+      const fdi = fcDiams[dm.diameter] || {};
+      const fabP = dm.fab_pct||fdi.fab_pct||0, paintP = dm.paint_pct||fdi.paint_pct||0;
       html += `<div class="diam-row" style="border-left:4px solid ${color}">
         <div class="d-name">${dm.diameter}</div>
         <div class="d-info">
-          <div style="font-size:12px;color:#888">${dm.spool_count} spools · Expected / 预期: ${dm.expected_pct}% · Actual / 实际: <strong>${dm.actual_pct}%</strong> (${dm.diff>=0?'+':''}${dm.diff}%)</div>
-          <div class="expected-bar" style="margin-top:6px"><div class="expected-fill" style="width:${dm.expected_pct}%"></div><div class="actual-fill" style="width:${dm.actual_pct}%;background:${color}"></div></div>
-          <div style="font-size:10px;color:#aaa;margin-top:2px">Fab: ${dm.fab_start} → ${dm.fab_end} · Paint → ${dm.paint_end||'N/A'}</div>
+          <div style="font-size:12px;color:#888">${dm.spool_count} spools · Fab / 制作: <strong>${fabP}%</strong> · Paint / 涂装: <strong>${paintP}%</strong> · Overall / 总: <strong>${dm.actual_pct}%</strong></div>
+          <div style="display:flex;gap:4px;margin-top:6px">
+            <div style="flex:1"><div style="font-size:8px;color:#aaa">Fab</div><div class="expected-bar"><div class="actual-fill" style="width:${fabP}%;background:#4472C4;border-radius:6px"></div></div></div>
+            <div style="flex:1"><div style="font-size:8px;color:#aaa">Paint</div><div class="expected-bar"><div class="actual-fill" style="width:${paintP}%;background:#ED7D31;border-radius:6px"></div></div></div>
+          </div>
+          <div style="font-size:10px;color:#aaa;margin-top:2px">${fdi.remaining_raf?'RAF: '+fdi.remaining_raf+' in':''} ${fdi.remaining_m2?'· Surface: '+fdi.remaining_m2+' m²':''}</div>
         </div>
         <div class="d-status"><span class="status-badge status-${dm.status}" style="font-size:11px;padding:4px 10px">${STATUS_LABELS[dm.status]||dm.status}</span></div>
       </div>`;
     });
     html += `</div></div>`;
 
-    // Commitment panel
+    // Production dates
     let prodStart = null;
     const starts = sch.diameters.map(x=>x.fab_start).filter(x=>x).sort();
     if(starts.length) prodStart = starts[0];
     if(prodStart){
       const psDate = new Date(prodStart);
       const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
-      const commitEnd = new Date(stdEnd.getTime() - totalSaved*86400000);
-      const fcEnd = fc.overall_forecast_end ? new Date(fc.overall_forecast_end) : commitEnd;
-      const fcSaved = Math.ceil((stdEnd - fcEnd) / 86400000);
-      const diffDays = Math.ceil((commitEnd - fcEnd) / 86400000);
-      html += `<div class="commit-panel"><h4>⚡ Expediting Commitment / 加急承诺</h4>
-        <div class="cp-item"><div class="cp-label">Start / 开始</div><div class="cp-val" style="color:#2F5496">${fmtShort(psDate)}</div></div>
-        <div class="cp-item"><div class="cp-label">Standard End / 标准完工</div><div class="cp-val" style="color:#888;text-decoration:line-through">${fmtShort(stdEnd)}</div></div>
-        <div class="cp-item"><div class="cp-label">Weeks saved / 节省周数</div><div class="cp-val" style="color:#2F5496">${wksSaved}</div></div>
-        <div class="cp-item"><div class="cp-label">Days saved / 节省天数</div><div class="cp-val" style="color:#2F5496">${daysSaved}</div></div>
-        <div class="cp-item"><div class="cp-label">Committed End / 承诺完工</div><div class="cp-val" style="color:#4472C4">${fmtShort(commitEnd)}</div></div>
-        <div class="cp-item" style="border-right:none"><div class="cp-label">Forecast vs Committed / 预测较承诺</div><div class="cp-val" style="color:${diffDays>=0?'#27ae60':'#e74c3c'}">${diffDays>=0?diffDays+' days ahead / 提前':Math.abs(diffDays)+' days behind / 落后'}</div></div>
-      </div>`;
+      const commitEnd = hasExpediting ? new Date(stdEnd.getTime() - totalSaved*86400000) : stdEnd;
+      const fcEnd = fc.overall_forecast_end ? new Date(fc.overall_forecast_end) : null;
+      const today = new Date(); today.setHours(0,0,0,0);
 
-      // Production Gantt — 9 weeks from production start
+      // Commitment panel (only if expediting)
+      if(hasExpediting){
+        const diffDays = fcEnd ? Math.ceil((commitEnd - fcEnd) / 86400000) : 0;
+        html += `<div class="commit-panel"><h4>⚡ Expediting Commitment / 加急承诺</h4>
+          <div class="cp-item"><div class="cp-label">Start / 开始</div><div class="cp-val" style="color:#2F5496">${fmtShort(psDate)}</div></div>
+          <div class="cp-item"><div class="cp-label">Standard End / 标准完工</div><div class="cp-val" style="color:#888;text-decoration:line-through">${fmtShort(stdEnd)}</div></div>
+          <div class="cp-item"><div class="cp-label">Committed End / 承诺完工</div><div class="cp-val" style="color:#4472C4">${fmtShort(commitEnd)}</div></div>
+          <div class="cp-item"><div class="cp-label">Saved / 节省</div><div class="cp-val" style="color:#4472C4">${totalSaved}d</div></div>
+          <div class="cp-item" style="border-right:none"><div class="cp-label">Forecast / 预测</div><div class="cp-val" style="color:${diffDays>=0?'#27ae60':'#e74c3c'}">${fcEnd?fmtShort(fcEnd):'—'} ${diffDays>=0?'✓':'✗'}</div></div>
+        </div>`;
+      }
+
+      // ═══ PRODUCTION GANTT (rewritten from scratch) ═══
+      // Weeks from production start
+      const numWeeks = hasExpediting ? stdWeeks : Math.max(stdWeeks, Math.ceil(((fcEnd||stdEnd).getTime() - psDate.getTime()) / 86400000 / 7) + 1);
       html += `<div class="report-card"><h3>Production Gantt / 生产甘特图</h3>
         <div class="gantt-mini"><table class="gantt-table"><thead><tr>
         <th style="min-width:70px;background:#404040">Diameter</th><th style="min-width:45px;background:#404040">Phase</th>`;
-      const today = new Date(); today.setHours(0,0,0,0);
       const weeks = [];
-      for(let i=0;i<stdWeeks;i++){
+      for(let i=0;i<numWeeks;i++){
         const ws = new Date(psDate.getTime()+i*7*86400000);
         const we = new Date(ws.getTime()+6*86400000);
         const isCurrent = today>=ws && today<=we;
@@ -1578,125 +1589,132 @@ async function load(){
       }
       html += `</tr></thead><tbody>`;
 
-      // GANTT LOGIC:
-      // DB schedule = STANDARD 9-week plan (fab + paint dates per diameter).
-      // Expedited fab = scale standard fab dates by ratio (4/9), capped at commitEnd.
-      // Expedited paint = starts AFTER expedited fab ends, duration from surface_m2 formula.
-      // Saved = standard bar present but no expedited bar (the improvement).
-      // Forecast = per-diameter dashed border on fab row.
-      // % shown once per diameter on the current week.
-      const ratio = (stdWeeks - wksSaved) / stdWeeks;  // 4/9
-      const fcDiameters = d.forecast ? d.forecast.diameters : {};
-      let lastDiamIdx = sch.diameters.length - 1;
+      // Gantt logic:
+      // Standard schedule = from DB (fab/paint dates per diameter)
+      // If expediting ON: bars scaled by ratio, saved weeks shown
+      // If expediting OFF: bars show standard schedule directly
+      // Forecast: per-diameter dashed border
+      // Progress: fab% in blue cells, paint% in orange cells
+      const ratio = hasExpediting ? (stdWeeks - wksSaved) / stdWeeks : 1;
+      const lastDiamIdx = sch.diameters.length - 1;
       const DAY = 86400000;
 
       sch.diameters.forEach((dm, dmIdx) => {
-        const ap = dm.actual_pct;
+        const fdi = fcDiams[dm.diameter] || {};
+        const fabP = fdi.fab_pct||0, paintP = fdi.paint_pct||0, overallP = fdi.overall_pct||0;
+        const dmFcEnd = fdi.forecast_end ? new Date(fdi.forecast_end) : null;
+        const dmStarted = fdi.started;
         const fabPs = new Date(dm.fab_start), fabPe = new Date(dm.fab_end);
         const paintPs = new Date(dm.paint_start), paintPe = new Date(dm.paint_end);
 
-        // Expedited FAB: scale standard fab position by ratio, cap at commitEnd
-        const fabStartMs = fabPs.getTime() - psDate.getTime();
-        const fabEndMs = fabPe.getTime() - psDate.getTime();
-        const expFabStart = new Date(Math.min(psDate.getTime() + fabStartMs * ratio, commitEnd.getTime()));
-        const expFabEnd = new Date(Math.min(psDate.getTime() + fabEndMs * ratio, commitEnd.getTime()));
-
-        // Expedited PAINT: starts day after expedited fab ends, duration from paint_days
-        const dmFc = fcDiameters[dm.diameter] || {};
-        const paintDays = dmFc.paint_days || 0;
-        const expPaintStart = new Date(expFabEnd.getTime() + DAY);
-        const expPaintEnd = new Date(Math.min(expPaintStart.getTime() + Math.max(paintDays - 1, 0) * DAY, commitEnd.getTime()));
-
-        // Per-diameter forecast
-        const dmFcEnd = dmFc.forecast_end ? new Date(dmFc.forecast_end) : null;
-        const dmStarted = dmFc.started !== false;
-
-        // Determine if % already shown for this diameter (show once on current active bar)
-        let pctShown = false;
+        // Calculate bar positions
+        let expFabStart, expFabEnd, expPaintStart, expPaintEnd;
+        if(hasExpediting){
+          // Scale fab position by ratio, cap at commitEnd
+          expFabStart = new Date(Math.min(psDate.getTime() + (fabPs-psDate)*ratio, commitEnd.getTime()));
+          expFabEnd = new Date(Math.min(psDate.getTime() + (fabPe-psDate)*ratio, commitEnd.getTime()));
+          // Paint: starts after fab, scale duration, cap at commitEnd
+          expPaintStart = new Date(Math.min(psDate.getTime() + (paintPs-psDate)*ratio, commitEnd.getTime()));
+          expPaintEnd = new Date(Math.min(psDate.getTime() + (paintPe-psDate)*ratio, commitEnd.getTime()));
+          // Ensure paint starts after fab
+          if(expPaintStart < expFabEnd) expPaintStart = new Date(expFabEnd.getTime() + DAY);
+          if(expPaintEnd < expPaintStart) expPaintEnd = expPaintStart;
+        } else {
+          // No expediting — use standard dates
+          expFabStart = fabPs; expFabEnd = fabPe;
+          expPaintStart = paintPs; expPaintEnd = paintPe;
+        }
 
         // FAB ROW
         html += `<tr>`;
-        html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${ap}%"></div></div></td>`;
+        html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${overallP}%"></div></div></td>`;
         html += `<td class="g-label" style="font-size:9px;color:#666">Fab</td>`;
         weeks.forEach(w => {
-          const inStdFab = fabPs<=w.end && fabPe>=w.start;
-          const inExpFab = expFabStart<=w.end && expFabEnd>=w.start && w.start<=commitEnd;
-          const inStdPaint = paintPs<=w.end && paintPe>=w.start;
-          const isSaved = (inStdFab || inStdPaint) && !inExpFab;
+          const inStd = fabPs<=w.end && fabPe>=w.start;
+          const inExp = expFabStart<=w.end && expFabEnd>=w.start;
+          const isSaved = hasExpediting && inStd && !inExp;
           const isToday = w.current;
-          const isForecast = dmStarted && dmFcEnd && ap<100 && dmFcEnd>=w.start && dmFcEnd<=w.end;
+          const isForecast = dmStarted && dmFcEnd && overallP<100 && dmFcEnd>=w.start && dmFcEnd<=w.end;
           let content = '';
-          if(inExpFab){
+          if(inExp){
             content = `<div class="g-bar g-exp-fab"></div>`;
-            if(isToday && !pctShown){ content += `<div class="g-today-line"></div><div class="g-pct">${ap}%</div>`; pctShown=true; }
-            else if(ap > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
+            if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${fabP}%</div>`;
+            else if(fabP > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
           } else if(isSaved){
             content = `<div class="g-bar g-saved"></div>`;
           }
           if(isForecast) content += `<div class="g-bar g-forecast g-fc-fab"></div>`;
-          if(isToday && !inExpFab && !isSaved) content += `<div class="g-today-line"></div>`;
+          if(isToday && !inExp && !isSaved) content += `<div class="g-today-line"></div>`;
           html += `<td>${content}</td>`;
         });
         html += `</tr>`;
 
         // PAINT ROW
-        html += `<tr>`;
-        html += `<td class="g-label" style="font-size:9px;color:#666">Paint</td>`;
-        const isLastPaint = dmIdx===lastDiamIdx;
+        html += `<tr><td class="g-label" style="font-size:9px;color:#666">Paint</td>`;
+        const isLast = dmIdx===lastDiamIdx;
         weeks.forEach(w => {
-          const inStdPaint = paintPs<=w.end && paintPe>=w.start;
-          const inExpPaint = paintDays > 0 && expPaintStart<=w.end && expPaintEnd>=w.start && w.start<=commitEnd;
+          const inStd = paintPs<=w.end && paintPe>=w.start;
+          const inExp = expPaintStart<=w.end && expPaintEnd>=w.start;
           const inStdFab = fabPs<=w.end && fabPe>=w.start;
-          // Saved on paint row: standard paint/fab bar exists but no expedited paint bar AND not in expedited fab
-          const inExpFab = expFabStart<=w.end && expFabEnd>=w.start && w.start<=commitEnd;
-          const isSaved = (inStdPaint || inStdFab) && !inExpPaint && !inExpFab;
+          const inExpFab = expFabStart<=w.end && expFabEnd>=w.start;
+          const isSaved = hasExpediting && (inStd || inStdFab) && !inExp && !inExpFab;
           const isToday = w.current;
           let content = '';
-          if(inExpPaint){
+          if(inExp){
             content = `<div class="g-bar g-exp-paint"></div>`;
-            if(isToday && !pctShown){ content += `<div class="g-today-line"></div><div class="g-pct">${ap}%</div>`; pctShown=true; }
-            else if(ap > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
+            if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${paintP}%</div>`;
+            else if(paintP > 0 && w.end < today) content += `<div class="g-pct" style="color:#fff">✓</div>`;
           } else if(isSaved){
             content = `<div class="g-bar g-saved"></div>`;
           }
-          if(isToday && !inExpPaint && !isSaved) content += `<div class="g-today-line"></div>`;
-          if(isToday && isLastPaint && !content.includes('g-pct')) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11;white-space:nowrap">TODAY</div>`;
+          if(isToday && !inExp && !isSaved) content += `<div class="g-today-line"></div>`;
+          if(isToday && isLast) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11">TODAY</div>`;
           html += `<td>${content}</td>`;
         });
         html += `</tr>`;
-        html += `<tr><td colspan="${stdWeeks+2}" style="height:2px;background:#f0f2f5;border:none"></td></tr>`;
+        html += `<tr><td colspan="${numWeeks+2}" style="height:2px;background:#f0f2f5;border:none"></td></tr>`;
       });
+
       html += `</tbody></table></div>
         <div class="legend">
-          <span><span class="box" style="background:#4472C4"></span> Fabrication (Expedited) / 制作(加急)</span>
-          <span><span class="box" style="background:#ED7D31"></span> Painting (Expedited) / 涂装(加急)</span>
-          <span><span class="box" style="opacity:.2;background:#4472C4"></span> Standard (${stdWeeks} wks) / 标准</span>
-          <span><span class="box" style="background:#E2EFDA;border:1px solid #A9D18E"></span> Saved / 节省 ✓</span>
+          <span><span class="box" style="background:#4472C4"></span> Fabrication / 制作</span>
+          <span><span class="box" style="background:#ED7D31"></span> Painting / 涂装</span>
+          ${hasExpediting?'<span><span class="box" style="background:#E2EFDA;border:1px solid #A9D18E"></span> Saved / 节省 ✓</span>':''}
+          <span><span class="box" style="border:2px dashed #4472C4;width:12px;height:8px;display:inline-block;border-radius:2px"></span> Forecast / 预测</span>
           <span><span class="box" style="background:#e74c3c;width:3px"></span> Today / 今天</span>
+        </div></div>`;
+
+      // Rate comparison
+      const actualWeld = fc.actual_weld_ipd||0, actualPaint = fc.actual_paint_m2d||0;
+      const weldCap = fc.welding_capability||0, paintCap = fc.painting_capability||0;
+      html += `<div class="report-card"><h3>Production Rate / 生产率</h3>
+        <div style="display:flex;gap:20px;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <div style="font-size:12px;color:#888;margin-bottom:4px">Welding / 焊接 (linear inches/day)</div>
+            <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:24px;font-weight:700;color:${actualWeld>=weldCap?'#27ae60':'#e74c3c'}">${actualWeld}</span><span style="color:#888;font-size:12px">/ ${weldCap} target</span></div>
+            <div class="expected-bar" style="margin-top:4px"><div class="actual-fill" style="width:${Math.min(actualWeld/Math.max(weldCap,1)*100,100)}%;background:${actualWeld>=weldCap?'#27ae60':'#e74c3c'}"></div></div>
+          </div>
+          <div style="flex:1;min-width:200px">
+            <div style="font-size:12px;color:#888;margin-bottom:4px">Painting / 涂装 (m²/day)</div>
+            <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:24px;font-weight:700;color:${actualPaint>=paintCap?'#27ae60':'#e74c3c'}">${actualPaint}</span><span style="color:#888;font-size:12px">/ ${paintCap} target</span></div>
+            <div class="expected-bar" style="margin-top:4px"><div class="actual-fill" style="width:${Math.min(actualPaint/Math.max(paintCap,1)*100,100)}%;background:${actualPaint>=paintCap?'#27ae60':'#e74c3c'}"></div></div>
+          </div>
         </div></div>`;
 
       // Results cards
       html += `<div class="results-grid">
-        <div class="res-card" style="border-top:3px solid #2F5496"><h5>Overall Progress / 总进度</h5><div class="rv" style="color:#2F5496">${st.overall_pct}%</div><div class="rs">${st.total} spools · ${st.in_progress} WIP</div></div>
-        <div class="res-card" style="border-top:3px solid #4472C4"><h5>Production End / 生产完工</h5>
-          <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin:4px 0">
-            <span style="font-size:14px;color:#888;text-decoration:line-through">${fmtShort(stdEnd)}</span><span style="color:#888">→</span>
-            <span style="font-size:18px;font-weight:700;color:#4472C4">${fmtShort(commitEnd)}</span>
-          </div><div class="rs">Standard → Committed / 标准→承诺</div></div>
-        <div class="res-card" style="border-top:3px solid #4472C4"><h5>Expediting Commitment / 加急承诺</h5><div class="rv" style="color:#4472C4">${totalSaved} <span style="font-size:12px;font-weight:400">days</span></div><div class="rs">saved with expediting / 加急节省</div></div>
-        <div class="res-card" style="border-top:3px solid #27ae60"><h5>Production Forecast / 生产预测</h5><div class="rv" style="color:#27ae60">${fcSaved} <span style="font-size:12px;font-weight:400">days</span></div><div class="rs">${diffDays>=0?diffDays+' days ahead / 提前':'behind / 落后'} · ends ${fmtShort(fcEnd)}</div></div>
-        <div class="res-card" style="border-top:3px solid #2F5496"><h5>Actual End / 实际完工</h5><div class="rv" style="color:#2F5496">${st.completed>=st.total?fmtShort(new Date()):'—'}</div><div class="rs">${st.completed>=st.total?'Production complete / 生产完成':'In progress / 进行中'}</div></div>
+        <div class="res-card" style="border-top:3px solid #2F5496"><h5>Overall / 总进度</h5><div class="rv" style="color:#2F5496">${st.overall_pct}%</div><div class="rs">${st.total} spools · ${st.in_progress} WIP</div></div>
+        <div class="res-card" style="border-top:3px solid #4472C4"><h5>Forecast End / 预测完工</h5><div class="rv" style="color:#4472C4">${fcEnd?fmtShort(fcEnd):'—'}</div><div class="rs">${fcEnd&&hasExpediting?(Math.ceil((commitEnd-fcEnd)/86400000)>=0?'✓ Ahead / 提前':'✗ Behind / 落后'):'Based on actual rate / 基于实际进度'}</div></div>
+        ${hasExpediting?`<div class="res-card" style="border-top:3px solid #27ae60"><h5>Expediting / 加急节省</h5><div class="rv" style="color:#27ae60">${totalSaved}<span style="font-size:12px"> days</span></div><div class="rs">${wksSaved} weeks saved / 节省周数</div></div>`:''}
+        <div class="res-card" style="border-top:3px solid #2F5496"><h5>Actual End / 实际完工</h5><div class="rv" style="color:#2F5496">${st.completed>=st.total?fmtShort(new Date()):'—'}</div><div class="rs">${st.completed>=st.total?'Complete / 完成':'In progress / 进行中'}</div></div>
       </div>`;
 
-      // Transit info strip
-      const commitArrival = new Date(commitEnd.getTime()+transitDays*86400000);
-      const fcArrival = new Date(fcEnd.getTime()+transitDays*86400000);
+      // Transit strip
+      const arrivalDate = fcEnd ? new Date(fcEnd.getTime()+transitDays*86400000) : null;
       html += `<div class="transit-strip">
         <div style="display:flex;align-items:center;gap:6px"><span style="font-size:18px">🚢</span><div><div style="font-size:10px;color:#888;text-transform:uppercase">Sea Transit / 海运</div><div style="font-size:14px;font-weight:700;color:#003366">~${transitDays} days</div></div></div>
         <div style="width:1px;height:28px;background:#e0e0e0"></div>
-        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Expected Arrival Chile / 预计到达</div><div style="font-size:14px;font-weight:700;color:#003366">${fmt(commitArrival)}</div><div style="font-size:9px;color:#999">Based on committed end / 基于承诺</div></div>
-        <div style="width:1px;height:28px;background:#e0e0e0"></div>
-        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Forecast Arrival / 预测到达</div><div style="font-size:14px;font-weight:700;color:#27ae60">${fmt(fcArrival)}</div><div style="font-size:9px;color:#999">Based on forecast / 基于预测</div></div>
+        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Forecast Arrival / 预测到达</div><div style="font-size:14px;font-weight:700;color:#003366">${arrivalDate?fmt(arrivalDate):'—'}</div></div>
       </div>`;
     }
   } else {
@@ -1704,22 +1722,20 @@ async function load(){
       <p style="color:#888;padding:20px 0">No schedule configured.<br><code>POST /api/project/${P}/schedule</code></p></div>`;
   }
 
-  // Today's activity — grouped by spool
+  // ═══ TODAY'S ACTIVITY — grouped by spool ═══
   const completed = (d.today_activity||[]).filter(a=>a.action==='completed');
   const stepNames = d.step_names||{};
   const spoolPcts = d.spool_progress||{};
-  const releasedToday = d.released_today||0;
   const groups = {};
   completed.forEach(a => { if(!groups[a.spool_id]) groups[a.spool_id]=[]; groups[a.spool_id].push(a); });
   const spoolKeys = Object.keys(groups);
-  const uniqueSpools = spoolKeys.length;
 
-  html += `<div class="report-card"><h3>Today's Activity / 今日动态 <span style="font-weight:400;color:#888;font-size:12px">(${d.steps_completed_today} steps / 步骤)</span></h3>`;
+  html += `<div class="report-card"><h3>Today's Activity / 今日动态 <span style="font-weight:400;color:#888;font-size:12px">(${d.steps_completed_today} steps)</span></h3>`;
   html += `<div class="act-summary">
     <div class="as-item"><div class="as-val" style="color:#2F5496">${d.steps_completed_today}</div><div class="as-lbl">Steps / 步骤</div></div>
-    <div class="as-item"><div class="as-val" style="color:#4472C4">${uniqueSpools}</div><div class="as-lbl">Spools progressed / 管段推进</div></div>
-    <div class="as-item"><div class="as-val" style="color:#27ae60">${releasedToday}</div><div class="as-lbl">Released today / 今日放行</div></div>
-    <div class="as-item"><div class="as-val" style="color:#5E35B1">${d.past_rt||0}</div><div class="as-lbl">Past RT / 通过RT</div></div>
+    <div class="as-item"><div class="as-val" style="color:#4472C4">${spoolKeys.length}</div><div class="as-lbl">Spools / 管段</div></div>
+    <div class="as-item"><div class="as-val" style="color:#27ae60">${d.released_today||0}</div><div class="as-lbl">Released / 放行</div></div>
+    <div class="as-item"><div class="as-val" style="color:#5E35B1">${d.past_rt||0}</div><div class="as-lbl">Past RT / 过RT</div></div>
   </div>`;
 
   if(spoolKeys.length){
@@ -1727,13 +1743,9 @@ async function load(){
     spoolKeys.forEach((sid,idx) => {
       const items = groups[sid];
       const pct = spoolPcts[sid]||0;
-      const firstStep = items[items.length-1];
-      const lastStep = items[0];
-      const firstName = stepNames[firstStep.step_number]||`Step ${firstStep.step_number}`;
-      const lastName = stepNames[lastStep.step_number]||`Step ${lastStep.step_number}`;
-      const rangeText = items.length===1 ? firstName : `${firstName} → ${lastName}`;
-      const ts = (lastStep.timestamp||'').substring(11,16);
-      const op = items[0].operator||'';
+      const first = items[items.length-1], last = items[0];
+      const range = items.length===1 ? (stepNames[first.step_number]||'Step '+first.step_number) : (stepNames[first.step_number]||'Step '+first.step_number)+' → '+(stepNames[last.step_number]||'Step '+last.step_number);
+      const ts = (last.timestamp||'').substring(11,16);
       const hasRT = items.some(a=>a.step_number===8);
       const hasRelease = items.some(a=>a.step_number===15);
       const barColor = pct>=100?'#27ae60':pct>60?'#4472C4':pct>0?'#f39c12':'#ccc';
@@ -1742,26 +1754,23 @@ async function load(){
         <div class="sa-header">
           <div class="sa-spool">${sid}</div>
           <div class="sa-prog"><div class="sa-prog-fill" style="width:${pct}%;background:${barColor}"></div></div>
-          <div class="sa-range"><strong>${items.length} step${items.length>1?'s':''}</strong> · ${rangeText}</div>
-          ${hasRT?'<div class="sa-milestone sa-ms-rt">★ RT HOLD POINT</div>':''}
-          ${hasRelease?'<div class="sa-milestone sa-ms-done">🏁 RELEASED / 放行</div>':''}
-          <div class="sa-by">${op}</div><div class="sa-time">${ts}</div><div class="sa-expand">▸</div>
+          <div class="sa-range"><strong>${items.length}</strong> · ${range}</div>
+          ${hasRT?'<div class="sa-milestone sa-ms-rt">★ RT</div>':''}
+          ${hasRelease?'<div class="sa-milestone sa-ms-done">🏁 RELEASED</div>':''}
+          <div class="sa-by">${last.operator||''}</div><div class="sa-time">${ts}</div><div class="sa-expand">▸</div>
         </div>
         <div class="sa-detail">${items.map(a=>{
-          const sn=stepNames[a.step_number]||`Step ${a.step_number}`;
+          const sn=stepNames[a.step_number]||'Step '+a.step_number;
           const t=(a.timestamp||'').substring(11,19);
           const icon=a.step_number===15?'🏁':a.step_number===8?'⭐':'✅';
           return `<div class="sa-drow"><span style="color:#aaa;font-size:10px;min-width:50px">${t}</span><span>${icon}</span><span style="flex:1;color:#555">${sn}</span><span style="color:#888;font-size:10px">${a.operator||''}</span></div>`;
         }).join('')}</div></div>`;
     });
-    if(spoolKeys.length > showLimit){
-      html += `<div style="text-align:center;padding:10px;color:#4472C4;font-size:12px;font-weight:600;cursor:pointer" onclick="document.querySelectorAll('[data-extra]').forEach(e=>e.style.display='');this.style.display='none'">Show all ${spoolKeys.length} spools / 显示全部 ▾</div>`;
-    }
+    if(spoolKeys.length>showLimit) html += `<div style="text-align:center;padding:10px;color:#4472C4;font-size:12px;font-weight:600;cursor:pointer" onclick="document.querySelectorAll('[data-extra]').forEach(e=>e.style.display='');this.style.display='none'">Show all ${spoolKeys.length} spools / 显示全部 ▾</div>`;
   } else {
-    html += `<div style="text-align:center;padding:20px;color:#aaa">No activity today yet / 今天暂无动态</div>`;
+    html += `<div style="text-align:center;padding:20px;color:#aaa">No activity today / 今天暂无动态</div>`;
   }
   html += `</div>`;
-
   document.getElementById('rpt-content').innerHTML = html;
 }
 load();

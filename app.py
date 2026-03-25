@@ -1041,9 +1041,8 @@ async function load(){
   }
   if(prodStart){
     const psDate = new Date(prodStart);
-    const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 + 6*86400000);
-    const expeditedWeeks = stdWeeks - wksSaved;
-    const commitEnd = new Date(psDate.getTime() + expeditedWeeks*7*86400000 + 6*86400000 - daysSaved*86400000);
+    const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
+    const commitEnd = new Date(stdEnd.getTime() - totalSaved*86400000);
     const today = new Date(); today.setHours(0,0,0,0);
     const daysToTarget = Math.ceil((commitEnd - today) / 86400000);
     const fcEnd = fc.overall_forecast_end ? new Date(fc.overall_forecast_end) : commitEnd;

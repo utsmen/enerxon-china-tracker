@@ -1451,11 +1451,11 @@ async function load(){
          {phase:'Paint',start:dm.paint_start,end:dm.paint_end,expCls:'g-exp-paint'}].forEach((ph,idx) => {
           if(!ph.start||!ph.end) return;
           const ps=new Date(ph.start), pe=new Date(ph.end);
-          // Calculate expedited dates by scaling standard position
+          // Calculate expedited dates by scaling standard position, capped at commitEnd
           const stdStartMs = ps.getTime() - psDate.getTime();
           const stdEndMs = pe.getTime() - psDate.getTime();
-          const expStartDate = new Date(psDate.getTime() + stdStartMs * ratio);
-          const expEndDate = new Date(psDate.getTime() + stdEndMs * ratio);
+          const expStartDate = new Date(Math.min(psDate.getTime() + stdStartMs * ratio, commitEnd.getTime()));
+          const expEndDate = new Date(Math.min(psDate.getTime() + stdEndMs * ratio, commitEnd.getTime()));
 
           html += `<tr>`;
           if(idx===0) html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${ap}%"></div></div></td>`;

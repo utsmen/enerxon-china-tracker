@@ -329,6 +329,7 @@ def forecast_production(project):
         actual_sum = sum(spool_progress(project, s['spool_id']) for s in diam_spools)
         actual_pct = actual_sum / len(diam_spools)
         days_elapsed = max(1, (today - fab_start).days)
+        started = actual_pct > 0
         if actual_pct >= 100:
             forecast_end = today
         elif actual_pct > 0:
@@ -336,9 +337,10 @@ def forecast_production(project):
             days_to_100 = (100 - actual_pct) / daily_rate
             forecast_end = today + timedelta(days=int(days_to_100 + 0.5))
         else:
-            forecast_end = paint_end
-        result[dk] = {'actual_pct': round(actual_pct, 1), 'forecast_end': str(forecast_end), 'daily_rate': round(actual_pct / days_elapsed, 2) if days_elapsed > 0 else 0}
-        if overall_forecast is None or forecast_end > overall_forecast:
+            forecast_end = paint_end  # Not started — use planned end
+        result[dk] = {'actual_pct': round(actual_pct, 1), 'forecast_end': str(forecast_end), 'daily_rate': round(actual_pct / days_elapsed, 2) if days_elapsed > 0 else 0, 'started': started}
+        # Only include started diameters in overall forecast (unstarted use their planned dates)
+        if started and (overall_forecast is None or forecast_end > overall_forecast):
             overall_forecast = forecast_end
     return {'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None, 'today': str(today)}
 
@@ -348,27 +350,30 @@ def past_rt_count(project):
     return row['cnt'] if row else 0
 
 def daily_production_rate(project):
-    """Calculate 7-day average production rate and today's steps."""
+    """Calculate 7-day average production rate (spool-equivalent) and today's steps."""
     from datetime import timedelta
     today = date.today()
     week_ago = today - timedelta(days=7)
     two_weeks_ago = today - timedelta(days=14)
-    # This week's completed steps
+    # Count unique spools that had step completions in each period
     if USE_PG:
-        this_week = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date AND timestamp::date <= ?::date", (project, str(week_ago), str(today)))
-        last_week = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date AND timestamp::date < ?::date", (project, str(two_weeks_ago), str(week_ago)))
+        this_week_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date AND timestamp::date <= ?::date", (project, str(week_ago), str(today)))
+        last_week_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date AND timestamp::date < ?::date", (project, str(two_weeks_ago), str(week_ago)))
         today_steps = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date = ?::date", (project, str(today)))
+        today_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date = ?::date", (project, str(today)))
     else:
-        this_week = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ? AND timestamp <= ?", (project, str(week_ago), str(today) + ' 23:59:59'))
-        last_week = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ? AND timestamp < ?", (project, str(two_weeks_ago), str(week_ago)))
+        this_week_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ? AND timestamp <= ?", (project, str(week_ago), str(today) + ' 23:59:59'))
+        last_week_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ? AND timestamp < ?", (project, str(two_weeks_ago), str(week_ago)))
         today_steps = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp LIKE ?", (project, str(today) + '%'))
-    this_week_cnt = this_week[0]['cnt'] if this_week else 0
-    last_week_cnt = last_week[0]['cnt'] if last_week else 0
+        today_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp LIKE ?", (project, str(today) + '%'))
+    this_wk = this_week_spools[0]['cnt'] if this_week_spools else 0
+    last_wk = last_week_spools[0]['cnt'] if last_week_spools else 0
     today_cnt = today_steps[0]['cnt'] if today_steps else 0
-    avg_7day = round(this_week_cnt / 7, 1)
-    avg_prev = round(last_week_cnt / 7, 1)
+    today_sp = today_spools[0]['cnt'] if today_spools else 0
+    avg_7day = round(this_wk / 7, 1)
+    avg_prev = round(last_wk / 7, 1)
     trend = round(avg_7day - avg_prev, 1)
-    return {'avg_7day': avg_7day, 'avg_prev_week': avg_prev, 'trend': trend, 'today_steps': today_cnt}
+    return {'avg_7day': avg_7day, 'avg_prev_week': avg_prev, 'trend': trend, 'today_steps': today_cnt, 'today_spools': today_sp}
 
 def generate_report_data(project):
     """Build full report data for a project."""
@@ -1042,7 +1047,7 @@ async function load(){
       <div class="tb-section"><div class="tb-label">Forecast Saved / 预测节省</div><div class="tb-value" style="color:#27ae60">${fcSaved}<span style="font-size:10px;font-weight:400"> days</span></div><div class="tb-sub">predicted / 预测</div></div>
       <div class="tb-section" style="border-right:none;margin-left:auto"><div class="status-pill ${pillCls}">${pillText}</div><div style="font-size:8px;color:#888;margin-top:2px">vs commitment / 较承诺</div></div>
     </div>`;
-    // Daily Production Rate + Bottleneck
+    // Daily Production Rate + Bottleneck (side by side)
     const avgRate = pr.avg_7day || 0;
     const trend = pr.trend || 0;
     const todaySteps = pr.today_steps || 0;
@@ -1050,34 +1055,38 @@ async function load(){
     const targetRate = daysToTarget > 0 ? (remaining / daysToTarget).toFixed(1) : '—';
     const aboveTarget = avgRate >= parseFloat(targetRate);
     const trendArrow = trend >= 0 ? `<span style="color:#27ae60;font-size:10px;font-weight:600">▲${trend}</span>` : `<span style="color:#e74c3c;font-size:10px;font-weight:600">▼${Math.abs(trend)}</span>`;
-    // Find bottleneck (diameter with most remaining work relative to time)
+    // Find bottleneck
     let bottleneck = null;
     if(schd && schd.diameters){
       let worstRatio = 999;
       schd.diameters.forEach(dm => {
-        if(dm.actual_pct >= 100) return;
+        if(dm.actual_pct >= 100 || dm.status === 'not_started') return;
         const ratio = dm.actual_pct / Math.max(dm.expected_pct, 1);
         if(ratio < worstRatio){ worstRatio = ratio; bottleneck = dm; }
       });
     }
-    let rateHtml = `<div class="rate-strip">
-      <div class="rs-title">📊 Daily Rate / 每日生产率</div>
-      <div class="rs-item"><div><div class="rs-lbl">Target / 目标</div><div class="rs-val" style="color:#2F5496">${targetRate}</div></div><div class="rs-lbl">spools/day<br>每日需完成</div></div>
-      <div class="rs-item"><div><div class="rs-lbl">7-day avg / 7天均值</div><div style="display:flex;align-items:baseline;gap:3px"><div class="rs-val" style="color:${aboveTarget?'#27ae60':'#e74c3c'}">${avgRate}</div>${trendArrow}</div></div><div class="rs-lbl">spools/day<br>较上周</div></div>
-      <div class="rs-item" style="border-right:none"><div><div class="rs-lbl">Today / 今日步骤</div><div class="rs-val" style="color:#4472C4">${todaySteps}</div></div><div class="rs-lbl">steps<br>今日完成</div></div>
-      <div class="rs-badge ${aboveTarget?'rs-good':'rs-bad'}">${aboveTarget?'✓ Above target / 超过目标':'⚠ Below target / 低于目标'}</div>
-    </div>`;
+    let bnHtml = '';
     if(bottleneck && bottleneck.actual_pct < 100){
       const fcDiam = fc.diameters ? fc.diameters[bottleneck.diameter] : null;
       const fcEndDiam = fcDiam ? fcDiam.forecast_end : '—';
-      const neededRate = fcDiam ? ((100 - bottleneck.actual_pct) / Math.max(daysToTarget, 1) * bottleneck.spool_count / 100).toFixed(1) : '—';
-      rateHtml += `<div class="bottleneck">
-        <div style="font-size:9px;color:#888;text-transform:uppercase">Critical Path / 关键路径</div>
+      const neededRate = daysToTarget > 0 ? ((100 - bottleneck.actual_pct) / 100 * bottleneck.spool_count / daysToTarget).toFixed(1) : '—';
+      bnHtml = `<div style="background:#fff;border-radius:8px;padding:10px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05);min-width:240px;border-left:4px solid #e74c3c;display:flex;flex-direction:column;justify-content:center">
+        <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.3px">Critical Path / 关键路径</div>
         <div style="display:flex;align-items:baseline;gap:5px;margin:2px 0"><span style="font-size:20px;font-weight:700;color:#e74c3c">${bottleneck.diameter}</span><span style="font-size:11px;color:#888">${bottleneck.spool_count} spools · slowest / 最慢</span></div>
-        <div style="font-size:10px;color:#666">Need / 需要 <strong>${neededRate} spools/day</strong> · ${bottleneck.actual_pct}% done · Forecast / 预测: ${fcEndDiam}</div>
+        <div style="font-size:10px;color:#666">Need / 需要 <strong>${neededRate} spools/day / 每日</strong> to hit target / 达到目标</div>
+        <div style="font-size:9px;color:#999;margin-top:2px">${bottleneck.actual_pct}% done · Forecast / 预测: ${fcEndDiam}</div>
       </div>`;
     }
-    document.getElementById('rate-strip').innerHTML = rateHtml;
+    document.getElementById('rate-strip').innerHTML = `<div style="display:flex;gap:10px;margin:0 16px 8px;flex-wrap:wrap">
+      <div class="rate-strip" style="flex:1;min-width:400px;margin:0">
+        <div class="rs-title">📊 Daily Rate / 每日生产率</div>
+        <div class="rs-item"><div><div class="rs-lbl">Target / 目标</div><div class="rs-val" style="color:#2F5496">${targetRate}</div></div><div class="rs-lbl">spools/day<br>每日需完成</div></div>
+        <div class="rs-item"><div><div class="rs-lbl">7-day avg / 7天均值</div><div style="display:flex;align-items:baseline;gap:3px"><div class="rs-val" style="color:${aboveTarget?'#27ae60':'#e74c3c'}">${avgRate}</div>${trendArrow}</div></div><div class="rs-lbl">spools/day<br>较上周</div></div>
+        <div class="rs-item" style="border-right:none"><div><div class="rs-lbl">Steps today / 今日步骤</div><div class="rs-val" style="color:#4472C4">${todaySteps}</div></div><div class="rs-lbl">completed<br>今日完成</div></div>
+        <div class="rs-badge ${aboveTarget?'rs-good':'rs-bad'}">${aboveTarget?'✓ Above target / 超过目标':'⚠ Below target / 低于目标'}</div>
+      </div>
+      ${bnHtml}
+    </div>`;
   }
 
   // Diameter cards with pace status
@@ -1390,8 +1399,10 @@ async function load(){
       const diffDays = Math.ceil((commitEnd - fcEnd) / 86400000);
       html += `<div class="commit-panel"><h4>⚡ Expediting Commitment / 加急承诺</h4>
         <div class="cp-item"><div class="cp-label">Start / 开始</div><div class="cp-val" style="color:#2F5496">${fmtShort(psDate)}</div></div>
+        <div class="cp-item"><div class="cp-label">Standard End / 标准完工</div><div class="cp-val" style="color:#888;text-decoration:line-through">${fmtShort(stdEnd)}</div></div>
         <div class="cp-item"><div class="cp-label">Weeks saved / 节省周数</div><div class="cp-val" style="color:#2F5496">${wksSaved}</div></div>
         <div class="cp-item"><div class="cp-label">Days saved / 节省天数</div><div class="cp-val" style="color:#2F5496">${daysSaved}</div></div>
+        <div class="cp-item"><div class="cp-label">Committed End / 承诺完工</div><div class="cp-val" style="color:#4472C4">${fmtShort(commitEnd)}</div></div>
         <div class="cp-item" style="border-right:none"><div class="cp-label">Forecast vs Committed / 预测较承诺</div><div class="cp-val" style="color:${diffDays>=0?'#27ae60':'#e74c3c'}">${diffDays>=0?diffDays+' days ahead / 提前':Math.abs(diffDays)+' days behind / 落后'}</div></div>
       </div>`;
 
@@ -1410,26 +1421,34 @@ async function load(){
       }
       html += `</tr></thead><tbody>`;
 
-      sch.diameters.forEach(dm => {
+      // Standard schedule = each diameter's dates shifted forward by totalSaved days
+      // (The current schedule IS the expedited one. Standard = expedited + saved time)
+      let lastDiamIdx = sch.diameters.length - 1;
+      sch.diameters.forEach((dm, dmIdx) => {
         const ap = dm.actual_pct;
-        [{phase:'Fab',start:dm.fab_start,end:dm.fab_end,stdCls:'g-std-fab',expCls:'g-exp-fab'},{phase:'Paint',start:dm.paint_start,end:dm.paint_end,stdCls:'g-std-paint',expCls:'g-exp-paint'}].forEach((ph,idx) => {
+        [{phase:'Fab',start:dm.fab_start,end:dm.fab_end,stdCls:'g-std-fab',expCls:'g-exp-fab'},
+         {phase:'Paint',start:dm.paint_start,end:dm.paint_end,stdCls:'g-std-paint',expCls:'g-exp-paint'}].forEach((ph,idx) => {
           if(!ph.start||!ph.end) return;
           const ps=new Date(ph.start), pe=new Date(ph.end);
-          // Expedited end = standard end shifted by saved weeks
+          // Standard = expedited dates shifted forward by saved time
+          const stdPs = new Date(ps.getTime()+totalSaved*86400000);
           const stdPe = new Date(pe.getTime()+totalSaved*86400000);
           html += `<tr>`;
           if(idx===0) html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${ap}%"></div></div></td>`;
           html += `<td class="g-label" style="font-size:9px;color:#666">${ph.phase}</td>`;
           weeks.forEach(w => {
-            const inStd = ps<=w.end && stdPe>=w.start;
+            const inStd = stdPs<=w.end && stdPe>=w.start;
             const inExp = ps<=w.end && pe>=w.start;
             const isSaved = inStd && !inExp;
             const isToday = w.current;
+            const isLastPaintRow = dmIdx===lastDiamIdx && idx===1;
             let content = '';
             if(isSaved) content = `<div class="g-bar g-saved"></div>`;
-            else if(inExp) content = `<div class="g-bar g-std ${ph.stdCls}"></div><div class="g-bar ${ph.expCls}"></div>`;
+            else if(inExp && inStd) content = `<div class="g-bar g-std ${ph.stdCls}"></div><div class="g-bar ${ph.expCls}"></div>`;
+            else if(inExp) content = `<div class="g-bar ${ph.expCls}"></div>`;
             else if(inStd) content = `<div class="g-bar g-std ${ph.stdCls}"></div>`;
             if(isToday && inExp) content += `<div class="g-today-line"></div><div class="g-pct">${ap}%</div>`;
+            else if(isToday && isLastPaintRow) content += `<div class="g-today-line"></div><div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11;white-space:nowrap">TODAY</div>`;
             else if(isToday) content += `<div class="g-today-line"></div>`;
             html += `<td>${content}</td>`;
           });

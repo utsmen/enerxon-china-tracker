@@ -315,7 +315,10 @@ def forecast_production(project):
         if d not in sched_map: sched_map[d] = {}
         sched_map[d][sc['task_type']] = {'start': parse_date(sc['planned_start']), 'end': parse_date(sc['planned_end'])}
     result = {}
-    overall_forecast = None
+    # Calculate overall weighted progress for resource-sharing forecast
+    total_weighted_work = 0  # sum of (spool_count * 100) for all diameters
+    total_weighted_done = 0  # sum of (spool_count * actual_pct) for all started diameters
+    earliest_start = None
     for diam in DIAMETER_ORDER:
         dk = f'{diam}"'
         sm = sched_map.get(dk, sched_map.get(diam, {}))
@@ -328,8 +331,12 @@ def forecast_production(project):
         if not diam_spools: continue
         actual_sum = sum(spool_progress(project, s['spool_id']) for s in diam_spools)
         actual_pct = actual_sum / len(diam_spools)
-        days_elapsed = max(1, (today - fab_start).days)
         started = actual_pct > 0
+        total_weighted_work += len(diam_spools) * 100
+        total_weighted_done += actual_sum
+        if earliest_start is None or fab_start < earliest_start:
+            earliest_start = fab_start
+        days_elapsed = max(1, (today - fab_start).days)
         if actual_pct >= 100:
             forecast_end = today
         elif actual_pct > 0:
@@ -337,11 +344,17 @@ def forecast_production(project):
             days_to_100 = (100 - actual_pct) / daily_rate
             forecast_end = today + timedelta(days=int(days_to_100 + 0.5))
         else:
-            forecast_end = paint_end  # Not started — use planned end
+            forecast_end = paint_end
         result[dk] = {'actual_pct': round(actual_pct, 1), 'forecast_end': str(forecast_end), 'daily_rate': round(actual_pct / days_elapsed, 2) if days_elapsed > 0 else 0, 'started': started}
-        # Only include started diameters in overall forecast (unstarted use their planned dates)
-        if started and (overall_forecast is None or forecast_end > overall_forecast):
-            overall_forecast = forecast_end
+    # Overall forecast uses combined production rate (accounts for resource sharing)
+    overall_forecast = None
+    if earliest_start and total_weighted_done > 0:
+        overall_days_elapsed = max(1, (today - earliest_start).days)
+        overall_daily_rate = total_weighted_done / overall_days_elapsed  # weighted progress points per day
+        remaining = total_weighted_work - total_weighted_done
+        if overall_daily_rate > 0:
+            days_remaining = remaining / overall_daily_rate
+            overall_forecast = today + timedelta(days=int(days_remaining + 0.5))
     return {'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None, 'today': str(today)}
 
 def past_rt_count(project):
@@ -1028,8 +1041,9 @@ async function load(){
   }
   if(prodStart){
     const psDate = new Date(prodStart);
-    const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
-    const commitEnd = new Date(stdEnd.getTime() - totalSaved*86400000);
+    const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 + 6*86400000);
+    const expeditedWeeks = stdWeeks - wksSaved;
+    const commitEnd = new Date(psDate.getTime() + expeditedWeeks*7*86400000 + 6*86400000 - daysSaved*86400000);
     const today = new Date(); today.setHours(0,0,0,0);
     const daysToTarget = Math.ceil((commitEnd - today) / 86400000);
     const fcEnd = fc.overall_forecast_end ? new Date(fc.overall_forecast_end) : commitEnd;

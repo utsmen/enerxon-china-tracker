@@ -1311,6 +1311,360 @@ def api_report_download(project):
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False); wb.save(tmp.name)
     return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{today.strftime('%Y%m%d')}.xlsx")
 
+@app.route('/api/project/<project>/report/pdf')
+@login_required
+def api_report_pdf(project):
+    """Download a professional PDF production report matching the HTML report UI."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import mm, cm
+    from reportlab.lib.colors import HexColor, white, black
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from datetime import timedelta
+    import tempfile
+    rpt = generate_report_data(project)
+    st = rpt['stats']; sched = rpt.get('schedule'); sett = rpt.get('settings', {})
+    fc_data = rpt.get('forecast', {}) or {}
+    fc_diams = fc_data.get('diameters', {}) if fc_data else {}
+    std_weeks = int(sett.get('standard_weeks', '9'))
+    wks_saved = int(sett.get('committed_weeks_saved', '0'))
+    days_saved = int(sett.get('committed_days_saved', '0'))
+    total_saved = wks_saved * 7 + days_saved
+    has_expediting = total_saved > 0
+    transit_days = int(sett.get('sea_transit_days', '45'))
+    today = date.today()
+    # Colors
+    BLUE = HexColor('#2F5496'); DBLUE = HexColor('#1a3a6e'); LBLUE = HexColor('#D9E2F3')
+    FAB = HexColor('#4472C4'); PAINT = HexColor('#ED7D31'); SAVED = HexColor('#E2EFDA')
+    GREEN = HexColor('#27ae60'); RED = HexColor('#e74c3c'); ORANGE = HexColor('#f39c12')
+    GREY = HexColor('#888888'); LGREY = HexColor('#F2F2F2'); DARK = HexColor('#404040')
+    FORECAST = HexColor('#FFC000'); GFILL = HexColor('#C6EFCE'); OFILL = HexColor('#FCE4D6'); RFILL = HexColor('#FFC7CE')
+    SHIP = HexColor('#002060')
+    styles = getSampleStyleSheet()
+    title_s = ParagraphStyle('title_s', parent=styles['Normal'], fontSize=16, textColor=BLUE, fontName='Helvetica-Bold', spaceAfter=2*mm)
+    section_s = ParagraphStyle('section_s', parent=styles['Normal'], fontSize=12, textColor=BLUE, fontName='Helvetica-Bold', spaceBefore=6*mm, spaceAfter=3*mm)
+    normal_s = ParagraphStyle('normal_s', parent=styles['Normal'], fontSize=9, fontName='Helvetica')
+    small_s = ParagraphStyle('small_s', parent=styles['Normal'], fontSize=7, fontName='Helvetica')
+    center_s = ParagraphStyle('center_s', parent=styles['Normal'], fontSize=8, fontName='Helvetica', alignment=TA_CENTER)
+    bold_s = ParagraphStyle('bold_s', parent=styles['Normal'], fontSize=9, fontName='Helvetica-Bold')
+    white_s = ParagraphStyle('white_s', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold', textColor=white, alignment=TA_CENTER)
+    white_sm = ParagraphStyle('white_sm', parent=styles['Normal'], fontSize=6, fontName='Helvetica-Bold', textColor=white, alignment=TA_CENTER)
+    tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
+    doc = SimpleDocTemplate(tmp.name, pagesize=landscape(A4), leftMargin=12*mm, rightMargin=12*mm, topMargin=10*mm, bottomMargin=10*mm)
+    elems = []
+    # ── Title ──
+    elems.append(Paragraph(f"ENERXON — Production Report / 生产报告", title_s))
+    elems.append(Paragraph(f"Project: <b>{project}</b> &nbsp; | &nbsp; Date: <b>{rpt['date']}</b> &nbsp; | &nbsp; Overall: <font color='#2F5496'><b>{st['overall_pct']}%</b></font>", normal_s))
+    elems.append(Paragraph(f"Total: {st['total']} spools | Done: {st['completed']} | In Progress: {st['in_progress']} | Pending: {st['not_started']}", normal_s))
+    elems.append(Spacer(1, 4*mm))
+    # ── Schedule Status Table ──
+    if sched and sched.get('diameters'):
+        elems.append(Paragraph("SCHEDULE STATUS BY DIAMETER / 按管径计划状态", section_s))
+        status_map = {'on_time': ('ON TIME ✓', GFILL), 'at_risk': ('AT RISK ⚠', OFILL), 'delayed': ('DELAYED ✗', RFILL), 'not_started': ('NOT STARTED', LGREY)}
+        hdr = ['Diameter','Spools','Fab %','Paint %','Overall %','Diff','Status','Fab Start','Fab End','Paint End','Forecast']
+        tdata = [[Paragraph(f"<b><font color='white'>{h}</font></b>", center_s) for h in hdr]]
+        tcolors = [(BLUE,) * len(hdr)]  # header row bg
+        for d in sched['diameters']:
+            dk = d['diameter']; fcd = fc_diams.get(dk, {})
+            diff_val = d['diff']
+            diff_s = f"+{diff_val}d" if diff_val > 0 else f"{diff_val}d" if diff_val < 0 else "0d"
+            diff_color = '#27ae60' if diff_val > 0 else '#e74c3c' if diff_val < 0 else '#333'
+            sl, sc = status_map.get(d['status'], ('?', LGREY))
+            tdata.append([
+                dk, str(d['spool_count']), f"{d.get('fab_pct',0)}", f"{d.get('paint_pct',0)}",
+                f"{d['actual_pct']}", Paragraph(f"<font color='{diff_color}'><b>{diff_s}</b></font>", center_s),
+                sl, d['fab_start'], d['fab_end'], d.get('paint_end',''), fcd.get('forecast_end','')
+            ])
+            tcolors.append(sc)
+        col_w = [18*mm, 14*mm, 16*mm, 16*mm, 18*mm, 16*mm, 22*mm, 22*mm, 22*mm, 22*mm, 22*mm]
+        t = Table(tdata, colWidths=col_w, repeatRows=1)
+        tstyle = [
+            ('BACKGROUND', (0,0), (-1,0), BLUE), ('TEXTCOLOR', (0,0), (-1,0), white),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,0), 7),
+            ('FONTNAME', (0,1), (-1,-1), 'Helvetica'), ('FONTSIZE', (0,1), (-1,-1), 8),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('GRID', (0,0), (-1,-1), 0.5, HexColor('#C0C0C0')),
+            ('FONTNAME', (0,1), (0,-1), 'Helvetica-Bold'),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [white, LGREY]),
+            ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+        ]
+        # Color the status column per row
+        for i, d in enumerate(sched['diameters'], 1):
+            _, sc = status_map.get(d['status'], ('?', LGREY))
+            tstyle.append(('BACKGROUND', (6, i), (6, i), sc))
+            if d.get('fab_pct', 0) >= 100:
+                tstyle.append(('BACKGROUND', (2, i), (2, i), GFILL))
+            if d.get('paint_pct', 0) >= 100:
+                tstyle.append(('BACKGROUND', (3, i), (3, i), GFILL))
+        t.setStyle(TableStyle(tstyle))
+        elems.append(t)
+        elems.append(Spacer(1, 3*mm))
+        # ── Expediting Commitment Panel ──
+        prod_start = None
+        starts_list = [d['fab_start'] for d in sched['diameters'] if d['fab_start']]
+        if starts_list: prod_start = date.fromisoformat(min(starts_list))
+        std_end = prod_start + timedelta(days=std_weeks * 7 - 1) if prod_start else None
+        commit_end = std_end - timedelta(days=total_saved) if std_end and has_expediting else std_end
+        fc_overall = fc_data.get('overall_forecast_end')
+        fc_end_d = date.fromisoformat(fc_overall) if fc_overall else None
+        if has_expediting and prod_start and commit_end:
+            fc_diff_c = (commit_end - fc_end_d).days if fc_end_d else 0
+            elems.append(Paragraph("⚡ EXPEDITING COMMITMENT / 加急承诺", section_s))
+            cdata = [
+                ['Start', str(prod_start), 'Standard End', str(std_end), 'Committed End', str(commit_end), 'Saved', f"{total_saved}d ({wks_saved}wk)", 'Forecast', f"{fc_end_d or '—'} {'✓' if fc_diff_c >= 0 else '✗'}"],
+            ]
+            ct = Table(cdata, colWidths=[22*mm, 24*mm, 26*mm, 24*mm, 28*mm, 24*mm, 16*mm, 24*mm, 20*mm, 28*mm])
+            ct_style = [
+                ('BACKGROUND', (0,0), (-1,0), LBLUE), ('FONTSIZE', (0,0), (-1,0), 7),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica'), ('ALIGN', (0,0), (-1,0), 'CENTER'),
+                ('FONTNAME', (1,0), (1,0), 'Helvetica-Bold'), ('TEXTCOLOR', (1,0), (1,0), BLUE),
+                ('FONTNAME', (3,0), (3,0), 'Helvetica'), ('TEXTCOLOR', (3,0), (3,0), GREY),
+                ('FONTNAME', (5,0), (5,0), 'Helvetica-Bold'), ('TEXTCOLOR', (5,0), (5,0), FAB),
+                ('FONTNAME', (7,0), (7,0), 'Helvetica-Bold'), ('TEXTCOLOR', (7,0), (7,0), FAB),
+                ('FONTNAME', (9,0), (9,0), 'Helvetica-Bold'), ('TEXTCOLOR', (9,0), (9,0), GREEN if fc_diff_c >= 0 else RED),
+                ('GRID', (0,0), (-1,-1), 0.5, HexColor('#C0C0C0')),
+                ('TOPPADDING', (0,0), (-1,-1), 3), ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+            ]
+            ct.setStyle(TableStyle(ct_style))
+            elems.append(ct)
+            elems.append(Spacer(1, 3*mm))
+        # ── Production Gantt ──
+        if prod_start:
+            elems.append(Paragraph("PRODUCTION GANTT / 生产甘特图", section_s))
+            ratio = (std_weeks - wks_saved) / std_weeks if has_expediting else 1.0
+            num_weeks = std_weeks if has_expediting else max(std_weeks, (((fc_end_d or std_end or prod_start + timedelta(days=62)) - prod_start).days // 7) + 2)
+            weeks = []
+            for i in range(num_weeks):
+                ws_d = prod_start + timedelta(days=i * 7); we_d = ws_d + timedelta(days=6)
+                weeks.append((ws_d, we_d))
+            # Build Gantt table: Diameter | Phase | % | W1 | W2 | ... | Wn
+            wk_w = max(10*mm, (260*mm - 36*mm) / num_weeks)  # auto-fit
+            gcols = [20*mm, 12*mm, 10*mm] + [wk_w] * num_weeks
+            # Header row
+            ghdr = [Paragraph("<b><font color='white'>Diam.</font></b>", white_s),
+                    Paragraph("<b><font color='white'>Phase</font></b>", white_s),
+                    Paragraph("<b><font color='white'>%</font></b>", white_s)]
+            today_wk_idx = None
+            for i, (ws_d, we_d) in enumerate(weeks):
+                if ws_d <= today <= we_d: today_wk_idx = i
+                ghdr.append(Paragraph(f"<font color='white'>W{i+1}<br/>{ws_d.strftime('%d/%m')}</font>", white_sm))
+            gdata = [ghdr]; gstyle_cmds = [
+                ('BACKGROUND', (0,0), (-1,0), DARK), ('TEXTCOLOR', (0,0), (-1,0), white),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('GRID', (0,0), (-1,-1), 0.5, HexColor('#E0E0E0')),
+                ('TOPPADDING', (0,0), (-1,-1), 1), ('BOTTOMPADDING', (0,0), (-1,-1), 1),
+                ('LEFTPADDING', (0,0), (-1,-1), 1), ('RIGHTPADDING', (0,0), (-1,-1), 1),
+            ]
+            if today_wk_idx is not None:
+                tc = 3 + today_wk_idx
+                gstyle_cmds.append(('BACKGROUND', (tc, 0), (tc, 0), HexColor('#C00000')))
+            grow = 1
+            for d in sched['diameters']:
+                dk = d['diameter']; fcd = fc_diams.get(dk, {})
+                fab_pct = fcd.get('fab_pct', 0) or 0; paint_pct = fcd.get('paint_pct', 0) or 0
+                overall_pct = fcd.get('overall_pct', 0) or 0; dm_started = fcd.get('started', False)
+                dm_fc_str = fcd.get('forecast_end', ''); dm_fc = date.fromisoformat(dm_fc_str) if dm_fc_str else None
+                fab_ps = date.fromisoformat(d['fab_start']); fab_pe = date.fromisoformat(d['fab_end'])
+                pp_s = d.get('paint_start',''); pp_e = d.get('paint_end','')
+                paint_ps = date.fromisoformat(pp_s) if pp_s else None; paint_pe = date.fromisoformat(pp_e) if pp_e else None
+                if has_expediting and commit_end:
+                    ef_s = prod_start + timedelta(days=(fab_ps - prod_start).days * ratio)
+                    ef_e = prod_start + timedelta(days=(fab_pe - prod_start).days * ratio)
+                    if ef_e > commit_end: ef_e = commit_end
+                    if paint_ps and paint_pe:
+                        ep_s = prod_start + timedelta(days=(paint_ps - prod_start).days * ratio)
+                        ep_e = prod_start + timedelta(days=(paint_pe - prod_start).days * ratio)
+                        if ep_s < ef_e: ep_s = ef_e
+                        if ep_e < ep_s: ep_e = ep_s
+                        if ep_e > commit_end: ep_e = commit_end
+                    else: ep_s = ep_e = None
+                else:
+                    ef_s = fab_ps; ef_e = fab_pe; ep_s = paint_ps; ep_e = paint_pe
+                # FAB ROW
+                pct_txt = '✓' if fab_pct >= 100 else (f'{fab_pct:.0f}%' if fab_pct > 0 else '-')
+                fab_row = [dk, 'Fab', pct_txt]
+                for i, (ws_d, we_d) in enumerate(weeks):
+                    in_exp = ef_s <= we_d and ef_e >= ws_d
+                    in_std = fab_ps <= we_d and fab_pe >= ws_d
+                    is_saved = has_expediting and in_std and not in_exp
+                    is_today = today_wk_idx is not None and i == today_wk_idx
+                    txt = ''
+                    if in_exp and is_today and 0 < fab_pct < 100: txt = f'{fab_pct:.0f}%'
+                    elif in_exp and fab_pct >= 100: txt = '✓'
+                    elif is_saved: txt = '✓'
+                    fab_row.append(txt)
+                gdata.append(fab_row)
+                gstyle_cmds.append(('FONTNAME', (0, grow), (0, grow), 'Helvetica-Bold'))
+                gstyle_cmds.append(('TEXTCOLOR', (0, grow), (0, grow), BLUE))
+                for i, (ws_d, we_d) in enumerate(weeks):
+                    col = 3 + i
+                    in_exp = ef_s <= we_d and ef_e >= ws_d
+                    in_std = fab_ps <= we_d and fab_pe >= ws_d
+                    is_saved = has_expediting and in_std and not in_exp
+                    if in_exp:
+                        gstyle_cmds.append(('BACKGROUND', (col, grow), (col, grow), FAB))
+                        gstyle_cmds.append(('TEXTCOLOR', (col, grow), (col, grow), white))
+                    elif is_saved:
+                        gstyle_cmds.append(('BACKGROUND', (col, grow), (col, grow), SAVED))
+                        gstyle_cmds.append(('TEXTCOLOR', (col, grow), (col, grow), HexColor('#A9D18E')))
+                    if today_wk_idx is not None and i == today_wk_idx:
+                        gstyle_cmds.append(('BOX', (col, grow), (col, grow), 2, RED))
+                grow += 1
+                # PAINT ROW
+                pct_txt = '✓' if paint_pct >= 100 else (f'{paint_pct:.0f}%' if paint_pct > 0 else '-')
+                paint_row = ['', 'Paint', pct_txt]
+                for i, (ws_d, we_d) in enumerate(weeks):
+                    in_exp_p = ep_s and ep_e and ep_s <= we_d and ep_e >= ws_d
+                    in_std_p = paint_ps and paint_pe and paint_ps <= we_d and paint_pe >= ws_d
+                    in_std_f = fab_ps <= we_d and fab_pe >= ws_d
+                    in_exp_f = ef_s <= we_d and ef_e >= ws_d
+                    is_saved = has_expediting and (in_std_p or in_std_f) and not in_exp_p and not in_exp_f
+                    is_fc = dm_started and dm_fc and overall_pct < 100 and dm_fc >= ws_d and dm_fc <= we_d
+                    txt = ''
+                    if in_exp_p and today_wk_idx is not None and i == today_wk_idx and 0 < paint_pct < 100: txt = f'{paint_pct:.0f}%'
+                    elif in_exp_p and paint_pct >= 100: txt = '✓'
+                    elif is_saved: txt = '✓'
+                    elif is_fc: txt = '◆'
+                    paint_row.append(txt)
+                gdata.append(paint_row)
+                for i, (ws_d, we_d) in enumerate(weeks):
+                    col = 3 + i
+                    in_exp_p = ep_s and ep_e and ep_s <= we_d and ep_e >= ws_d
+                    in_std_p = paint_ps and paint_pe and paint_ps <= we_d and paint_pe >= ws_d
+                    in_std_f = fab_ps <= we_d and fab_pe >= ws_d
+                    in_exp_f = ef_s <= we_d and ef_e >= ws_d
+                    is_saved = has_expediting and (in_std_p or in_std_f) and not in_exp_p and not in_exp_f
+                    is_fc = dm_started and dm_fc and overall_pct < 100 and dm_fc >= ws_d and dm_fc <= we_d
+                    if in_exp_p:
+                        gstyle_cmds.append(('BACKGROUND', (col, grow), (col, grow), PAINT))
+                        gstyle_cmds.append(('TEXTCOLOR', (col, grow), (col, grow), white))
+                    elif is_saved:
+                        gstyle_cmds.append(('BACKGROUND', (col, grow), (col, grow), SAVED))
+                        gstyle_cmds.append(('TEXTCOLOR', (col, grow), (col, grow), HexColor('#A9D18E')))
+                    elif is_fc:
+                        gstyle_cmds.append(('BACKGROUND', (col, grow), (col, grow), FORECAST))
+                        gstyle_cmds.append(('TEXTCOLOR', (col, grow), (col, grow), HexColor('#C00000')))
+                    if today_wk_idx is not None and i == today_wk_idx:
+                        gstyle_cmds.append(('BOX', (col, grow), (col, grow), 2, RED))
+                grow += 1
+            gt = Table(gdata, colWidths=gcols, repeatRows=1)
+            gstyle_cmds.append(('FONTSIZE', (0,1), (-1,-1), 7))
+            gstyle_cmds.append(('FONTSIZE', (0,0), (-1,0), 6))
+            gt.setStyle(TableStyle(gstyle_cmds))
+            elems.append(gt)
+            # Legend
+            ldata = [['Legend:', '', '', '', '']]
+            lt = Table(ldata, colWidths=[18*mm, 20*mm, 20*mm, 22*mm, 20*mm])
+            lt.setStyle(TableStyle([
+                ('FONTNAME', (0,0), (0,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,0), 7),
+                ('BACKGROUND', (1,0), (1,0), FAB), ('TEXTCOLOR', (1,0), (1,0), white),
+                ('BACKGROUND', (2,0), (2,0), PAINT), ('TEXTCOLOR', (2,0), (2,0), white),
+                ('BACKGROUND', (3,0), (3,0), SAVED), ('TEXTCOLOR', (3,0), (3,0), HexColor('#A9D18E')),
+                ('BACKGROUND', (4,0), (4,0), FORECAST), ('TEXTCOLOR', (4,0), (4,0), HexColor('#C00000')),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ]))
+            ldata[0][1] = 'Fab'; ldata[0][2] = 'Paint'; ldata[0][3] = 'Saved ✓'; ldata[0][4] = '◆ Forecast'
+            lt = Table(ldata, colWidths=[18*mm, 20*mm, 20*mm, 22*mm, 20*mm])
+            lt.setStyle(TableStyle([
+                ('FONTNAME', (0,0), (0,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,0), 7),
+                ('BACKGROUND', (1,0), (1,0), FAB), ('TEXTCOLOR', (1,0), (1,0), white),
+                ('BACKGROUND', (2,0), (2,0), PAINT), ('TEXTCOLOR', (2,0), (2,0), white),
+                ('BACKGROUND', (3,0), (3,0), SAVED),
+                ('BACKGROUND', (4,0), (4,0), FORECAST),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ]))
+            elems.append(Spacer(1, 2*mm))
+            elems.append(lt)
+            elems.append(Spacer(1, 3*mm))
+        # ── Production Rate ──
+        actual_weld = fc_data.get('actual_weld_ipd', 0) or 0
+        actual_paint = fc_data.get('actual_paint_m2d', 0) or 0
+        weld_cap = fc_data.get('welding_capability', 0) or 0
+        paint_cap = fc_data.get('painting_capability', 0) or 0
+        elems.append(Paragraph("PRODUCTION RATE / 生产率", section_s))
+        rdata = [
+            ['Welding / 焊接', str(actual_weld), f'/ {weld_cap}', 'in/day', f"{min(actual_weld/max(weld_cap,1)*100,100):.0f}%"],
+            ['Painting / 涂装', str(actual_paint), f'/ {paint_cap}', 'm²/day', f"{min(actual_paint/max(paint_cap,1)*100,100):.0f}%"],
+        ]
+        rt = Table(rdata, colWidths=[40*mm, 20*mm, 20*mm, 20*mm, 20*mm])
+        rt_cmds = [('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,-1), 9),
+                   ('BACKGROUND', (0,0), (-1,-1), LGREY), ('GRID', (0,0), (-1,-1), 0.5, HexColor('#C0C0C0')),
+                   ('ALIGN', (1,0), (-1,-1), 'CENTER')]
+        for i, (_, a, _, _, _) in enumerate(rdata):
+            c = GREEN if float(a) >= [weld_cap, paint_cap][i] else RED
+            rt_cmds.append(('TEXTCOLOR', (1, i), (1, i), c))
+            rt_cmds.append(('FONTNAME', (1, i), (1, i), 'Helvetica-Bold'))
+        rt.setStyle(TableStyle(rt_cmds))
+        elems.append(rt)
+        elems.append(Spacer(1, 3*mm))
+        # ── Results Summary ──
+        elems.append(Paragraph("RESULTS SUMMARY / 结果摘要", section_s))
+        if has_expediting and std_end and commit_end:
+            fc_saved_d = (std_end - fc_end_d).days if fc_end_d else 0
+            fc_diff = (commit_end - fc_end_d).days if fc_end_d else 0
+            res = [
+                ['Overall Progress', f"{st['overall_pct']}%", f"{st['total']} spools · {st['in_progress']} WIP"],
+                ['Production End', f"{std_end} → {commit_end}", 'Standard → Committed'],
+                ['Expediting', f"{total_saved} days saved", f"{wks_saved} weeks"],
+                ['Forecast', f"{fc_saved_d}d saved · ends {fc_end_d or '—'}", f"{'✓ '+str(fc_diff)+'d ahead' if fc_diff>=0 else '✗ '+str(abs(fc_diff))+'d behind'} commitment"],
+                ['Actual End', '—' if st['completed'] < st['total'] else str(today), 'Shown when complete'],
+            ]
+        else:
+            res = [
+                ['Overall Progress', f"{st['overall_pct']}%", f"{st['total']} spools · {st['in_progress']} WIP"],
+                ['Forecast End', str(fc_end_d or '—'), 'Based on actual rate'],
+                ['Actual End', '—' if st['completed'] < st['total'] else str(today), 'Shown when complete'],
+            ]
+        rst = Table(res, colWidths=[40*mm, 60*mm, 60*mm])
+        rs_cmds = [('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,-1), 9),
+                   ('GRID', (0,0), (-1,-1), 0.5, HexColor('#C0C0C0')),
+                   ('BACKGROUND', (0,0), (-1,-2), LBLUE), ('FONTNAME', (1,0), (1,-1), 'Helvetica-Bold'),
+                   ('BACKGROUND', (0,-1), (-1,-1), DARK), ('TEXTCOLOR', (0,-1), (-1,-1), white)]
+        if has_expediting and len(res) >= 4:
+            rs_cmds.append(('BACKGROUND', (0,2), (-1,3), SAVED))
+        rst.setStyle(TableStyle(rs_cmds))
+        elems.append(rst)
+        elems.append(Spacer(1, 3*mm))
+        # ── Transit ──
+        if has_expediting and commit_end:
+            commit_arrival = commit_end + timedelta(days=transit_days)
+            fc_arrival = fc_end_d + timedelta(days=transit_days) if fc_end_d else None
+            elems.append(Paragraph("🚢 SEA TRANSIT / 海运", section_s))
+            trd = [[f"~{transit_days} days", f"Committed arrival: {commit_arrival}", f"Forecast arrival: {fc_arrival or '—'}"]]
+            trt = Table(trd, colWidths=[30*mm, 60*mm, 60*mm])
+            trt.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), SHIP), ('TEXTCOLOR', (0,0), (-1,0), white),
+                ('FONTNAME', (0,0), (0,0), 'Helvetica-Bold'), ('FONTSIZE', (0,0), (-1,0), 9),
+                ('GRID', (0,0), (-1,-1), 0.5, SHIP),
+            ]))
+            elems.append(trt)
+    # ── Activity Summary ──
+    if rpt.get('today_activity'):
+        elems.append(Paragraph(f"TODAY'S ACTIVITY ({rpt['date']}) / 今日动态", section_s))
+        steps_today = rpt.get('steps_completed_today', 0)
+        released = rpt.get('released_today', 0)
+        past_rt = rpt.get('past_rt', 0)
+        spools_touched = len(set(a.get('spool_id','') for a in rpt['today_activity']))
+        elems.append(Paragraph(f"<b>{steps_today}</b> steps &nbsp;|&nbsp; <b>{spools_touched}</b> spools &nbsp;|&nbsp; <font color='#27ae60'><b>{released}</b> released</font> &nbsp;|&nbsp; <font color='#4472C4'><b>{past_rt}</b> past RT</font>", normal_s))
+        elems.append(Spacer(1, 2*mm))
+        ahdr = ['Time', 'Spool', 'Action', 'Operator', 'Details']
+        adata = [[Paragraph(f"<b><font color='white'>{h}</font></b>", center_s) for h in ahdr]]
+        for a in rpt['today_activity'][:30]:
+            ts = str(a.get('timestamp','')); ts_short = ts[11:19] if len(ts) > 11 else ts
+            adata.append([ts_short, a.get('spool_id',''), a.get('action',''), a.get('operator',''), a.get('details','')[:50]])
+        at = Table(adata, colWidths=[22*mm, 22*mm, 20*mm, 20*mm, 80*mm], repeatRows=1)
+        at.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), BLUE), ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('GRID', (0,0), (-1,-1), 0.5, HexColor('#C0C0C0')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [white, LGREY]),
+            ('TOPPADDING', (0,0), (-1,-1), 1), ('BOTTOMPADDING', (0,0), (-1,-1), 1),
+        ]))
+        elems.append(at)
+    doc.build(elems)
+    return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{today.strftime('%Y%m%d')}.pdf")
+
 # ── HTML: Home (Project List) ─────────────────────────────────────────────────
 COMMON_CSS = """*{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#f0f2f5;color:#333}
@@ -1416,6 +1770,7 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
   <a class="btn" href="/api/project/{{ project }}/export">Export Excel</a>
   <a class="btn" href="/project/{{ project }}/report" style="background:#27ae60">📊 Report</a>
   <a class="btn" href="/api/project/{{ project }}/report/download" style="background:#ED7D31">📥 Report Excel</a>
+  <a class="btn" href="/api/project/{{ project }}/report/pdf" style="background:#C00000">📄 Report PDF</a>
 </div>
 <div class="section"><div class="spool-list" id="list"></div></div>
 <div class="section" id="act"></div>
@@ -1760,7 +2115,8 @@ REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vi
 </div>
 <div id="rpt-content"><div style="text-align:center;padding:40px;color:#888">Loading report... / 加载报告中...</div></div>
 <div style="padding:16px;text-align:center" class="no-print">
-  <a class="btn" href="/api/project/{{ project }}/report/download">📥 Download Excel Report / 下载Excel报告</a>
+  <a class="btn" href="/api/project/{{ project }}/report/download">📥 Excel Report / Excel报告</a>
+  <a class="btn" href="/api/project/{{ project }}/report/pdf" style="background:#C00000;margin-left:8px">📄 PDF Report / PDF报告</a>
   <button class="btn" onclick="window.print()" style="margin-left:8px">🖨 Print / 打印</button>
 </div>
 <script>

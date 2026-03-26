@@ -291,26 +291,49 @@ def parse_date(val):
     return None
 
 def schedule_status(project, bulk=None):
-    """Calculate on-track/danger/delay status per diameter based on schedule vs actual progress."""
+    """Calculate on-track/danger/delay status per diameter.
+    If expediting committed → compares against committed end date.
+    If no expediting → compares against standard schedule."""
     sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
     if not sched:
         return None
     if not bulk: bulk = bulk_spool_progress(project)
+    settings = get_project_settings(project)
+    std_weeks = int(settings.get('standard_weeks', '9'))
+    wks_saved = int(settings.get('committed_weeks_saved', '0'))
+    days_saved = int(settings.get('committed_days_saved', '0'))
+    total_saved = wks_saved * 7 + days_saved
+    has_expediting = total_saved > 0
     spools = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
     today = date.today()
+    # Find production start
+    prod_start = None
+    for sc in sched:
+        sd = parse_date(sc['planned_start'])
+        if sd and (prod_start is None or sd < prod_start): prod_start = sd
+    # Calculate committed end if expediting
+    if prod_start and has_expediting:
+        from datetime import timedelta
+        std_end = prod_start + timedelta(days=std_weeks * 7 - 1)
+        committed_end = std_end - timedelta(days=total_saved)
+    else:
+        committed_end = None
     # Group spools by diameter
     by_diam = {}
     for s in spools:
         d = s['main_diameter'] or '?'
         if d not in by_diam: by_diam[d] = []
         by_diam[d].append(s)
-    # Build schedule map: diameter -> {fabrication: {start, end}, painting: {start, end}}
+    # Build schedule map
     sched_map = {}
     for sc in sched:
         d = sc['diameter']
         if d not in sched_map: sched_map[d] = {}
         sd = parse_date(sc['planned_start']); ed = parse_date(sc['planned_end'])
         sched_map[d][sc['task_type']] = {'start': str(sd) if sd else '', 'end': str(ed) if ed else '', 'spool_count': sc.get('spool_count',0), 'description': sc.get('description','')}
+    # Get forecast for each diameter
+    fc = forecast_production(project, bulk)
+    fc_diams = fc['diameters'] if fc else {}
     result = []
     overall_expected = 0; overall_actual = 0; overall_count = 0
     for diam in DIAMETER_ORDER:
@@ -324,16 +347,18 @@ def schedule_status(project, bulk=None):
             fab_start = parse_date(fab['start']); fab_end = parse_date(fab['end'])
             if not fab_start or not fab_end: continue
             if paint:
-                paint_start = parse_date(paint['start']); paint_end = parse_date(paint['end'])
+                paint_end = parse_date(paint['end'])
                 total_end = paint_end if paint_end else fab_end
             else:
                 total_end = fab_end
-            total_days = max(1, (total_end - fab_start).days)
+            # Target end: committed end if expediting, standard end otherwise
+            target_end = committed_end if committed_end else total_end
+            total_days = max(1, (target_end - fab_start).days)
             elapsed = max(0, min((today - fab_start).days, total_days))
             expected_pct = round(elapsed / total_days * 100, 1) if total_days > 0 else 0
         except: continue
-        # Actual progress for this diameter (from bulk progress)
-        diam_spools = by_diam.get(dk, by_diam.get(f'{diam}\"', []))
+        # Actual progress
+        diam_spools = by_diam.get(dk, by_diam.get(f'{diam}"', []))
         if not diam_spools: continue
         actual_sum = sum(bulk.get(s['spool_id'], {}).get('pct', 0) for s in diam_spools)
         actual_pct = round(actual_sum / len(diam_spools), 1)
@@ -341,17 +366,24 @@ def schedule_status(project, bulk=None):
         paint_sum = sum(bulk.get(s['spool_id'], {}).get('paint_pct', 0) for s in diam_spools)
         fab_avg = round(fab_sum / len(diam_spools), 1)
         paint_avg = round(paint_sum / len(diam_spools), 1)
-        diff = actual_pct - expected_pct
-        if today < fab_start and actual_pct == 0:
+        # Status: compare forecast end vs target end
+        diam_fc = fc_diams.get(dk, {})
+        fc_end = parse_date(diam_fc.get('forecast_end')) if diam_fc.get('forecast_end') else None
+        if not diam_fc.get('started') and actual_pct == 0:
             status = 'not_started'
-        elif today < fab_start and actual_pct > 0:
-            status = 'on_time'  # Ahead of schedule — work started before planned date
-        elif diff >= -5:
-            status = 'on_time'  # Green
-        elif diff >= -15:
-            status = 'at_risk'  # Orange
+        elif fc_end and target_end:
+            days_diff = (target_end - fc_end).days
+            if days_diff >= 0:
+                status = 'on_time'  # Forecast finishes before target
+            elif days_diff >= -7:
+                status = 'at_risk'  # Forecast 1-7 days late
+            else:
+                status = 'delayed'  # Forecast 7+ days late
         else:
-            status = 'delayed'  # Red
+            diff = actual_pct - expected_pct
+            if diff >= -5: status = 'on_time'
+            elif diff >= -15: status = 'at_risk'
+            else: status = 'delayed'
         overall_expected += expected_pct; overall_actual += actual_pct; overall_count += 1
         # Calculate remaining RAF and surface for this diameter
         remaining_raf = sum(bulk.get(s['spool_id'], {}).get('raf_inches', 0) for s in diam_spools if bulk.get(s['spool_id'], {}).get('fab_pct', 0) < 100)

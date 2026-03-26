@@ -1486,10 +1486,13 @@ REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vi
 .commit-panel h4{font-size:12px;color:#2F5496;margin:0;white-space:nowrap}
 .cp-item{text-align:center;padding:0 12px;border-right:1px solid #eee}.cp-item:last-child{border-right:none}
 .cp-label{font-size:8px;color:#888;text-transform:uppercase}.cp-val{font-size:16px;font-weight:700}
-.results-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 16px}
-.res-card{background:#fff;border-radius:10px;padding:14px;box-shadow:0 1px 4px rgba(0,0,0,.06);text-align:center}
-.res-card h5{font-size:9px;color:#888;text-transform:uppercase;margin:0 0 4px}
-.res-card .rv{font-size:24px;font-weight:700}.res-card .rs{font-size:10px;color:#999;margin-top:2px}
+.results-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:12px 16px}
+.res-card{background:#fff;border-radius:12px;padding:20px 16px;text-align:center;border:2px dashed #d0d8e8}
+.res-card.rc-blue{border-color:#4472C4;border-top:4px solid #2F5496}.res-card.rc-green{border-color:#27ae60;border-top:4px solid #27ae60}.res-card.rc-dark{border-color:#1F4E79;border-top:4px solid #1F4E79}
+.res-card h5{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin:0 0 8px}
+.res-card .rv{font-size:28px;font-weight:700}.res-card .rs{font-size:11px;color:#999;margin-top:6px;line-height:1.4}
+.res-full{grid-column:1/-1}
+@media(max-width:768px){.results-grid{grid-template-columns:repeat(2,1fr)}}
 .transit-strip{background:#fff;border-radius:10px;padding:12px 18px;margin:10px 16px;box-shadow:0 1px 4px rgba(0,0,0,.06);display:flex;align-items:center;gap:16px;flex-wrap:wrap;border-left:4px solid #003366}
 .sa-card{border:1px solid #f0f0f0;border-radius:8px;margin-bottom:6px;overflow:hidden}
 .sa-header{display:flex;align-items:center;padding:8px 12px;gap:10px;cursor:pointer;user-select:none}
@@ -1750,19 +1753,30 @@ async function load(){
         </div></div>`;
 
       // Results cards
+      const fcSaved = fcEnd ? Math.ceil((stdEnd - fcEnd) / 86400000) : 0;
+      const fcDiffCommit = fcEnd && hasExpediting ? Math.ceil((commitEnd - fcEnd) / 86400000) : 0;
       html += `<div class="results-grid">
-        <div class="res-card" style="border-top:3px solid #2F5496"><h5>Overall / 总进度</h5><div class="rv" style="color:#2F5496">${st.overall_pct}%</div><div class="rs">${st.total} spools · ${st.in_progress} WIP</div></div>
-        <div class="res-card" style="border-top:3px solid #4472C4"><h5>Forecast End / 预测完工</h5><div class="rv" style="color:#4472C4">${fcEnd?fmtShort(fcEnd):'—'}</div><div class="rs">${fcEnd&&hasExpediting?(Math.ceil((commitEnd-fcEnd)/86400000)>=0?'✓ Ahead / 提前':'✗ Behind / 落后'):'Based on actual rate / 基于实际进度'}</div></div>
-        ${hasExpediting?`<div class="res-card" style="border-top:3px solid #27ae60"><h5>Expediting / 加急节省</h5><div class="rv" style="color:#27ae60">${totalSaved}<span style="font-size:12px"> days</span></div><div class="rs">${wksSaved} weeks saved / 节省周数</div></div>`:''}
-        <div class="res-card" style="border-top:3px solid #2F5496"><h5>Actual End / 实际完工</h5><div class="rv" style="color:#2F5496">${st.completed>=st.total?fmtShort(new Date()):'—'}</div><div class="rs">${st.completed>=st.total?'Complete / 完成':'In progress / 进行中'}</div></div>
+        <div class="res-card rc-blue"><h5>Overall Progress / 总进度</h5><div class="rv" style="color:#2F5496">${st.overall_pct}%</div><div class="rs">${st.total} spools · ${st.in_progress} WIP · ${st.not_started} pending</div></div>
+        ${hasExpediting?`<div class="res-card rc-blue"><h5>Production End / 生产完工</h5>
+          <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin:4px 0">
+            <span style="font-size:16px;color:#888;text-decoration:line-through">${fmtShort(stdEnd)}</span><span style="color:#888">→</span>
+            <span style="font-size:22px;font-weight:700;color:#4472C4">${fmtShort(commitEnd)}</span>
+          </div><div class="rs">Standard → Committed (Expediting) / 标准→承诺</div></div>
+        <div class="res-card rc-green"><h5>Expediting Commitment / 加急承诺</h5><div class="rv" style="color:#27ae60">${totalSaved}<span style="font-size:14px;font-weight:400"> days</span></div><div class="rs">saved with expediting fee (${wksSaved} weeks) / 加急节省</div></div>
+        <div class="res-card rc-green"><h5>Production Forecast / 生产预测</h5><div class="rv" style="color:#27ae60">${fcSaved}<span style="font-size:14px;font-weight:400"> days</span></div><div class="rs">predicted savings · ends ${fcEnd?fmtShort(fcEnd):'—'}${fcDiffCommit>=0?' · '+fcDiffCommit+' days ahead of commitment':''}</div></div>`
+        :`<div class="res-card rc-blue"><h5>Forecast End / 预测完工</h5><div class="rv" style="color:#4472C4">${fcEnd?fmtShort(fcEnd):'—'}</div><div class="rs">Based on actual rate / 基于实际进度</div></div>`}
+        <div class="res-card rc-dark res-full"><h5>Actual End / 实际完工</h5><div class="rv" style="color:#2F5496">${st.completed>=st.total?fmtShort(new Date()):'—'}</div><div class="rs">${st.completed>=st.total?'Production complete / 生产完成':'Shown when production completes / 生产完成后显示'}</div></div>
       </div>`;
 
       // Transit strip
       const arrivalDate = fcEnd ? new Date(fcEnd.getTime()+transitDays*86400000) : null;
+      const commitArrival = hasExpediting ? new Date(commitEnd.getTime()+transitDays*86400000) : null;
       html += `<div class="transit-strip">
         <div style="display:flex;align-items:center;gap:6px"><span style="font-size:18px">🚢</span><div><div style="font-size:10px;color:#888;text-transform:uppercase">Sea Transit / 海运</div><div style="font-size:14px;font-weight:700;color:#003366">~${transitDays} days</div></div></div>
+        ${hasExpediting?`<div style="width:1px;height:28px;background:#e0e0e0"></div>
+        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Expected Arrival Chile / 预计到达智利</div><div style="font-size:14px;font-weight:700;color:#003366">${fmt(commitArrival)}</div><div style="font-size:9px;color:#999">Based on committed production end (${fmtShort(commitEnd)}) + ${transitDays} days</div></div>`:''}
         <div style="width:1px;height:28px;background:#e0e0e0"></div>
-        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Forecast Arrival / 预测到达</div><div style="font-size:14px;font-weight:700;color:#003366">${arrivalDate?fmt(arrivalDate):'—'}</div></div>
+        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Forecast Arrival Last Shipment / 预测最后一批到达</div><div style="font-size:14px;font-weight:700;color:#27ae60">${arrivalDate?fmt(arrivalDate):'—'}</div><div style="font-size:9px;color:#999">Based on forecast production end${fcEnd?' ('+fmtShort(fcEnd)+')':''} + ${transitDays} days</div></div>
       </div>`;
     }
   } else {

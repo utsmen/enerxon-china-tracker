@@ -963,188 +963,336 @@ def report_page(project):
 @app.route('/api/project/<project>/report/download')
 @login_required
 def api_report_download(project):
-    """Download a professional Excel production report for customer."""
+    """Download a professional Excel production report matching the HTML report UI."""
     import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
+    from datetime import timedelta
     import tempfile
     rpt = generate_report_data(project)
-    st = rpt['stats']; sched = rpt.get('schedule')
+    st = rpt['stats']; sched = rpt.get('schedule'); sett = rpt.get('settings', {})
+    fc_data = rpt.get('forecast', {}) or {}
+    fc_diams = fc_data.get('diameters', {}) if fc_data else {}
     wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Production Report"
+    # Common styles
     hf = Font(bold=True, size=11, color='FFFFFF'); hfill = PatternFill(start_color='2F5496', end_color='2F5496', fill_type='solid')
+    dark_fill = PatternFill(start_color='404040', end_color='404040', fill_type='solid')
     bf = Font(size=10); bfb = Font(bold=True, size=10)
     green_fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
     orange_fill = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
     red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
     thin = Border(left=Side('thin',color='C0C0C0'),right=Side('thin',color='C0C0C0'),top=Side('thin',color='C0C0C0'),bottom=Side('thin',color='C0C0C0'))
-    # Title
+    center = Alignment(horizontal='center', vertical='center')
+    # Expediting settings
+    std_weeks = int(sett.get('standard_weeks', '9'))
+    wks_saved = int(sett.get('committed_weeks_saved', '0'))
+    days_saved = int(sett.get('committed_days_saved', '0'))
+    total_saved = wks_saved * 7 + days_saved
+    has_expediting = total_saved > 0
+    transit_days = int(sett.get('sea_transit_days', '45'))
+    today = date.today()
+    # ── Title ──
     ws.merge_cells('A1:H1')
     ws['A1'] = f"ENERXON — Production Report / 生产报告"; ws['A1'].font = Font(bold=True, size=16, color='2F5496')
     ws['A2'] = f"Project: {project}"; ws['A2'].font = bfb
     ws['A3'] = f"Date: {rpt['date']}"; ws['A3'].font = bf
-    ws['A4'] = f"Overall Progress: {st['overall_pct']}%"; ws['A4'].font = Font(bold=True, size=12, color='2F5496')
+    ws['A4'] = f"Overall Progress: {st['overall_pct']}%"; ws['A4'].font = Font(bold=True, size=14, color='2F5496')
     ws['A5'] = f"Total: {st['total']} spools | Done: {st['completed']} | In Progress: {st['in_progress']} | Pending: {st['not_started']}"; ws['A5'].font = bf
-    # Schedule status section
     row = 7
-    fc_data = rpt.get('forecast', {})
-    fc_diams = fc_data.get('diameters', {}) if fc_data else {}
+    # ── Schedule Status Table ──
     if sched and sched.get('diameters'):
         status_label = {'on_time': 'ON TIME ✓', 'at_risk': 'AT RISK ⚠', 'delayed': 'DELAYED ✗', 'not_started': 'NOT STARTED'}
-        ws.cell(row, 1, "PRODUCTION SCHEDULE STATUS / 生产计划状态").font = Font(bold=True, size=12, color='2F5496')
+        ws.cell(row, 1, "SCHEDULE STATUS BY DIAMETER / 按管径计划状态").font = Font(bold=True, size=12, color='2F5496')
         row += 1
-        for col, h in enumerate(['Diameter','Spools','Fab %','Paint %','Overall %','Diff (days)','Status','Fab Start','Fab End','Paint End','Forecast End'], 1):
+        headers = ['Diameter','Spools','Fab %','Paint %','Overall %','Diff (days)','Status','Fab Start','Fab End','Paint End','Forecast End']
+        for col, h in enumerate(headers, 1):
             c = ws.cell(row, col, h); c.font = hf; c.fill = hfill; c.alignment = Alignment(horizontal='center', wrap_text=True); c.border = thin
         row += 1
         for d in sched['diameters']:
-            ws.cell(row, 1, d['diameter']).font = bfb; ws.cell(row, 1).border = thin
-            ws.cell(row, 2, d['spool_count']).font = bf; ws.cell(row, 2).alignment = Alignment(horizontal='center'); ws.cell(row, 2).border = thin
-            # Fab % and Paint %
-            c3 = ws.cell(row, 3, d.get('fab_pct', 0)); c3.font = bfb; c3.alignment = Alignment(horizontal='center'); c3.border = thin
+            dk = d['diameter']; fcd = fc_diams.get(dk, {})
+            ws.cell(row, 1, dk).font = bfb; ws.cell(row, 1).border = thin
+            ws.cell(row, 2, d['spool_count']).font = bf; ws.cell(row, 2).alignment = center; ws.cell(row, 2).border = thin
+            c3 = ws.cell(row, 3, d.get('fab_pct', 0)); c3.font = bfb; c3.alignment = center; c3.border = thin
             if d.get('fab_pct', 0) >= 100: c3.fill = green_fill
-            c4 = ws.cell(row, 4, d.get('paint_pct', 0)); c4.font = bfb; c4.alignment = Alignment(horizontal='center'); c4.border = thin
+            c4 = ws.cell(row, 4, d.get('paint_pct', 0)); c4.font = bfb; c4.alignment = center; c4.border = thin
             if d.get('paint_pct', 0) >= 100: c4.fill = green_fill
-            # Overall %
-            c5 = ws.cell(row, 5, d['actual_pct']); c5.font = bfb; c5.alignment = Alignment(horizontal='center'); c5.border = thin
-            # Diff (days) — positive = ahead, negative = behind
-            diff_val = d['diff']
-            diff_label = f"+{diff_val}d" if diff_val > 0 else f"{diff_val}d" if diff_val < 0 else "0d"
-            c6 = ws.cell(row, 6, diff_label); c6.font = bf; c6.alignment = Alignment(horizontal='center'); c6.border = thin
-            if diff_val > 0: c6.font = Font(size=10, color='27AE60')
-            elif diff_val < 0: c6.font = Font(size=10, color='E74C3C')
-            # Status
+            ws.cell(row, 5, d['actual_pct']).font = bfb; ws.cell(row, 5).alignment = center; ws.cell(row, 5).border = thin
+            diff_val = d['diff']; diff_label = f"+{diff_val}d" if diff_val > 0 else f"{diff_val}d" if diff_val < 0 else "0d"
+            c6 = ws.cell(row, 6, diff_label); c6.alignment = center; c6.border = thin
+            c6.font = Font(size=10, color='27AE60' if diff_val > 0 else 'E74C3C' if diff_val < 0 else '333333')
             sc = ws.cell(row, 7, status_label.get(d['status'], d['status']))
-            sc.font = bfb; sc.alignment = Alignment(horizontal='center'); sc.border = thin
+            sc.font = bfb; sc.alignment = center; sc.border = thin
             if d['status'] == 'on_time': sc.fill = green_fill
             elif d['status'] == 'at_risk': sc.fill = orange_fill
             elif d['status'] == 'delayed': sc.fill = red_fill
             ws.cell(row, 8, d['fab_start']).font = bf; ws.cell(row, 8).border = thin
             ws.cell(row, 9, d['fab_end']).font = bf; ws.cell(row, 9).border = thin
             ws.cell(row, 10, d.get('paint_end','')).font = bf; ws.cell(row, 10).border = thin
-            # Forecast end
-            dk = d['diameter']
-            fcd = fc_diams.get(dk, {})
-            fc_end_str = fcd.get('forecast_end', '')
-            ws.cell(row, 11, fc_end_str).font = bf; ws.cell(row, 11).border = thin
+            ws.cell(row, 11, fcd.get('forecast_end', '')).font = bf; ws.cell(row, 11).border = thin
             row += 1
         row += 1
-        # Mini Gantt
-        ws.cell(row, 1, "GANTT OVERVIEW / 甘特图概览").font = Font(bold=True, size=12, color='2F5496')
+        # ── Expediting Commitment Panel ──
+        prod_start = None
+        starts = [d['fab_start'] for d in sched['diameters'] if d['fab_start']]
+        if starts: prod_start = date.fromisoformat(min(starts))
+        if prod_start and has_expediting:
+            std_end = prod_start + timedelta(days=std_weeks * 7 - 1)
+            commit_end = std_end - timedelta(days=total_saved)
+            fc_overall_end = fc_data.get('overall_forecast_end')
+            fc_end_d = date.fromisoformat(fc_overall_end) if fc_overall_end else None
+            fc_diff_commit = (commit_end - fc_end_d).days if fc_end_d else 0
+            commit_fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+            ws.cell(row, 1, "⚡ EXPEDITING COMMITMENT / 加急承诺").font = Font(bold=True, size=12, color='4472C4')
+            row += 1
+            commit_items = [
+                ('Start / 开始', str(prod_start), '2F5496'),
+                ('Standard End / 标准完工', str(std_end), '888888'),
+                ('Committed End / 承诺完工', str(commit_end), '4472C4'),
+                ('Saved / 节省', f"{total_saved} days ({wks_saved} weeks)", '4472C4'),
+                ('Forecast / 预测', f"{fc_end_d or '—'} {'✓' if fc_diff_commit >= 0 else '✗'}", '27AE60' if fc_diff_commit >= 0 else 'E74C3C'),
+            ]
+            for ci, (label, val, color) in enumerate(commit_items):
+                c1 = ws.cell(row, ci*2 + 1, label); c1.font = Font(size=9, color='666666'); c1.fill = commit_fill; c1.border = thin
+                c2 = ws.cell(row, ci*2 + 2, val); c2.font = Font(bold=True, size=11, color=color); c2.fill = commit_fill; c2.border = thin
+            row += 2
+        elif prod_start:
+            std_end = prod_start + timedelta(days=std_weeks * 7 - 1)
+            commit_end = std_end
+            fc_end_d = None
+        else:
+            std_end = None; commit_end = None; fc_end_d = None
+        # ── Production Gantt with Expediting ──
+        ws.cell(row, 1, "PRODUCTION GANTT / 生产甘特图").font = Font(bold=True, size=12, color='2F5496')
         row += 1
-        # Find date range for Gantt (include forecast ends)
-        all_starts = [d['fab_start'] for d in sched['diameters'] if d['fab_start']]
-        all_ends = [d.get('paint_end','') or d['fab_end'] for d in sched['diameters'] if d['fab_end']]
-        # Also include forecast ends to extend the Gantt if needed
-        for d in sched['diameters']:
-            fcd = fc_diams.get(d['diameter'], {})
-            fe = fcd.get('forecast_end', '')
-            if fe: all_ends.append(fe)
-        if all_starts and all_ends:
-            from datetime import timedelta
-            gmin = date.fromisoformat(min(all_starts)); gmax = date.fromisoformat(max(all_ends))
-            # Weeks
-            week_start = gmin - timedelta(days=gmin.weekday())
+        if prod_start:
+            fc_overall_end = fc_data.get('overall_forecast_end')
+            if not fc_end_d and fc_overall_end:
+                fc_end_d = date.fromisoformat(fc_overall_end)
+            # Number of weeks: use standard weeks if expediting, otherwise extend to cover forecast
+            if has_expediting:
+                num_weeks = std_weeks
+            else:
+                max_d = std_end or prod_start + timedelta(days=62)
+                if fc_end_d and fc_end_d > max_d: max_d = fc_end_d
+                num_weeks = max(std_weeks, ((max_d - prod_start).days // 7) + 2)
+            # Build week list from production start
             weeks = []
-            cur = week_start
-            while cur <= gmax + timedelta(days=7):
-                weeks.append(cur); cur += timedelta(days=7)
+            for i in range(num_weeks):
+                ws_date = prod_start + timedelta(days=i * 7)
+                we_date = ws_date + timedelta(days=6)
+                weeks.append((ws_date, we_date))
+            # Expediting ratio
+            ratio = (std_weeks - wks_saved) / std_weeks if has_expediting else 1.0
             # Headers
-            gantt_header_row = row
-            ws.cell(row, 1, 'Diameter').font = hf; ws.cell(row, 1).fill = hfill; ws.cell(row, 1).border = thin
-            ws.cell(row, 2, 'Phase').font = hf; ws.cell(row, 2).fill = hfill; ws.cell(row, 2).border = thin
-            ws.cell(row, 3, '%').font = hf; ws.cell(row, 3).fill = hfill; ws.cell(row, 3).alignment = Alignment(horizontal='center'); ws.cell(row, 3).border = thin
-            ws.column_dimensions['C'].width = 6
-            for i, w in enumerate(weeks):
-                c = ws.cell(row, 4+i, w.strftime('%d/%m'))
-                c.font = Font(bold=True, size=7, color='FFFFFF'); c.fill = hfill; c.alignment = Alignment(horizontal='center'); c.border = thin
-                ws.column_dimensions[openpyxl.utils.get_column_letter(4+i)].width = 5.5
-            # Today column
+            gantt_hdr_row = row
+            ws.cell(row, 1, 'Diameter').font = Font(bold=True, size=9, color='FFFFFF'); ws.cell(row, 1).fill = dark_fill; ws.cell(row, 1).border = thin
+            ws.cell(row, 2, 'Phase').font = Font(bold=True, size=9, color='FFFFFF'); ws.cell(row, 2).fill = dark_fill; ws.cell(row, 2).border = thin
+            ws.cell(row, 3, '%').font = Font(bold=True, size=9, color='FFFFFF'); ws.cell(row, 3).fill = dark_fill; ws.cell(row, 3).alignment = center; ws.cell(row, 3).border = thin
             today_col = None
-            for i, w in enumerate(weeks):
-                wend = w + timedelta(days=6)
-                if w <= date.today() <= wend: today_col = 4+i; break
-            # Mark today column header with red
-            if today_col:
-                tc = ws.cell(gantt_header_row, today_col)
-                tc.fill = PatternFill(start_color='C00000', end_color='C00000', fill_type='solid')
-                tc.font = Font(bold=True, size=7, color='FFFFFF')
+            for i, (ws_d, we_d) in enumerate(weeks):
+                col = 4 + i
+                wk_label = f"W{i+1}\n{ws_d.strftime('%d/%m')}"
+                c = ws.cell(row, col, wk_label)
+                is_current = ws_d <= today <= we_d
+                if is_current:
+                    c.fill = PatternFill(start_color='C00000', end_color='C00000', fill_type='solid')
+                    today_col = col
+                else:
+                    c.fill = dark_fill
+                c.font = Font(bold=True, size=7, color='FFFFFF'); c.alignment = Alignment(horizontal='center', wrap_text=True); c.border = thin
+                ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 5.5
             row += 1
+            # Bar fills
             fab_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
-            paint_fill = PatternFill(start_color='70AD47', end_color='70AD47', fill_type='solid')
+            paint_fill = PatternFill(start_color='ED7D31', end_color='ED7D31', fill_type='solid')
+            saved_fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
             forecast_fill = PatternFill(start_color='FFC000', end_color='FFC000', fill_type='solid')
             today_border = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('thin',color='C0C0C0'),bottom=Side('thin',color='C0C0C0'))
-            today_bar_border_fab = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('medium',color='2F5496'),bottom=Side('medium',color='2F5496'))
-            today_bar_border_paint = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('medium',color='4E8F30'),bottom=Side('medium',color='4E8F30'))
+            today_bar_border = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('medium',color='333333'),bottom=Side('medium',color='333333'))
             for d in sched['diameters']:
-                dk = d['diameter']
-                fcd = fc_diams.get(dk, {})
+                dk = d['diameter']; fcd = fc_diams.get(dk, {})
                 fab_pct = fcd.get('fab_pct', 0) or 0
                 paint_pct = fcd.get('paint_pct', 0) or 0
-                fc_end_str = fcd.get('forecast_end', '')
-                fc_end_d = date.fromisoformat(fc_end_str) if fc_end_str else None
-                for phase, ps, pe, fill, pct in [
-                    ('Fab', d['fab_start'], d['fab_end'], fab_fill, fab_pct),
-                    ('Paint', d.get('paint_start',''), d.get('paint_end',''), paint_fill, paint_pct)
-                ]:
-                    if not ps or not pe: continue
-                    ws.cell(row, 1, dk).font = bfb; ws.cell(row, 1).border = thin
-                    ws.cell(row, 2, phase).font = bf; ws.cell(row, 2).border = thin
-                    # % column with value
-                    pct_cell = ws.cell(row, 3)
-                    if pct >= 100:
-                        pct_cell.value = '✓'; pct_cell.font = Font(bold=True, size=10, color='27AE60')
-                    elif pct > 0:
-                        pct_cell.value = f'{pct:.0f}%'; pct_cell.font = Font(bold=True, size=8, color='2F5496')
+                overall_pct = fcd.get('overall_pct', 0) or 0
+                dm_started = fcd.get('started', False)
+                dm_fc_end_str = fcd.get('forecast_end', '')
+                dm_fc_end = date.fromisoformat(dm_fc_end_str) if dm_fc_end_str else None
+                fab_ps = date.fromisoformat(d['fab_start']); fab_pe = date.fromisoformat(d['fab_end'])
+                paint_ps_str = d.get('paint_start',''); paint_pe_str = d.get('paint_end','')
+                paint_ps = date.fromisoformat(paint_ps_str) if paint_ps_str else None
+                paint_pe = date.fromisoformat(paint_pe_str) if paint_pe_str else None
+                # Expediting bar positions (scaled by ratio)
+                if has_expediting and commit_end:
+                    exp_fab_s = prod_start + timedelta(days=(fab_ps - prod_start).days * ratio)
+                    exp_fab_e = prod_start + timedelta(days=(fab_pe - prod_start).days * ratio)
+                    if exp_fab_e > commit_end: exp_fab_e = commit_end
+                    if paint_ps and paint_pe:
+                        exp_paint_s = prod_start + timedelta(days=(paint_ps - prod_start).days * ratio)
+                        exp_paint_e = prod_start + timedelta(days=(paint_pe - prod_start).days * ratio)
+                        if exp_paint_s < exp_fab_e: exp_paint_s = exp_fab_e
+                        if exp_paint_e < exp_paint_s: exp_paint_e = exp_paint_s
+                        if exp_paint_e > commit_end: exp_paint_e = commit_end
                     else:
-                        pct_cell.value = '-'; pct_cell.font = Font(size=8, color='AAAAAA')
-                    pct_cell.alignment = Alignment(horizontal='center'); pct_cell.border = thin
-                    psd = date.fromisoformat(ps); ped = date.fromisoformat(pe)
-                    for i, w in enumerate(weeks):
-                        wend = w + timedelta(days=6)
-                        col = 4+i
-                        cell = ws.cell(row, col)
-                        cell.border = thin
-                        in_bar = psd <= wend and ped >= w
-                        is_today = today_col and col == today_col
-                        # Forecast extension: beyond paint_end but before forecast_end (only on paint row)
-                        in_forecast = False
-                        if phase == 'Paint' and fc_end_d and fc_end_d > ped:
-                            in_forecast = w <= fc_end_d and wend > ped and w > ped
-                        if in_bar:
-                            cell.fill = fill
-                            # Show % on today column inside the bar
-                            if is_today and 0 < pct < 100:
-                                cell.value = f'{pct:.0f}%'
-                                cell.font = Font(bold=True, size=7, color='FFFFFF')
-                                cell.alignment = Alignment(horizontal='center', vertical='center')
-                            elif pct >= 100:
-                                cell.value = '✓'
-                                cell.font = Font(bold=True, size=8, color='FFFFFF')
-                                cell.alignment = Alignment(horizontal='center', vertical='center')
-                        elif in_forecast:
-                            cell.fill = forecast_fill
-                        # Today column marker (red borders)
-                        if is_today:
-                            if in_bar:
-                                cell.border = today_bar_border_fab if phase == 'Fab' else today_bar_border_paint
-                            else:
-                                cell.border = today_border
-                    row += 1
-            # Legend row
+                        exp_paint_s = None; exp_paint_e = None
+                else:
+                    exp_fab_s = fab_ps; exp_fab_e = fab_pe
+                    exp_paint_s = paint_ps; exp_paint_e = paint_pe
+                # FAB ROW
+                ws.cell(row, 1, dk).font = Font(bold=True, size=11, color='2F5496'); ws.cell(row, 1).border = thin
+                ws.cell(row, 2, 'Fab').font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
+                pct_cell = ws.cell(row, 3)
+                if fab_pct >= 100:
+                    pct_cell.value = '✓'; pct_cell.font = Font(bold=True, size=10, color='27AE60')
+                elif fab_pct > 0:
+                    pct_cell.value = f'{fab_pct:.0f}%'; pct_cell.font = Font(bold=True, size=8, color='4472C4')
+                else:
+                    pct_cell.value = '-'; pct_cell.font = Font(size=8, color='AAAAAA')
+                pct_cell.alignment = center; pct_cell.border = thin
+                for i, (ws_d, we_d) in enumerate(weeks):
+                    col = 4 + i; cell = ws.cell(row, col); cell.border = thin
+                    in_std = fab_ps <= we_d and fab_pe >= ws_d
+                    in_exp = exp_fab_s <= we_d and exp_fab_e >= ws_d
+                    is_saved = has_expediting and in_std and not in_exp
+                    is_today_col = today_col and col == today_col
+                    if in_exp:
+                        cell.fill = fab_fill
+                        if is_today_col and 0 < fab_pct < 100:
+                            cell.value = f'{fab_pct:.0f}%'; cell.font = Font(bold=True, size=7, color='FFFFFF'); cell.alignment = center
+                        elif fab_pct >= 100 and we_d < today:
+                            cell.value = '✓'; cell.font = Font(bold=True, size=8, color='FFFFFF'); cell.alignment = center
+                    elif is_saved:
+                        cell.fill = saved_fill
+                        cell.value = '✓'; cell.font = Font(size=7, color='A9D18E'); cell.alignment = center
+                    if is_today_col:
+                        cell.border = today_bar_border if in_exp else today_border
+                row += 1
+                # PAINT ROW
+                ws.cell(row, 1, '').border = thin
+                ws.cell(row, 2, 'Paint').font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
+                pct_cell = ws.cell(row, 3)
+                if paint_pct >= 100:
+                    pct_cell.value = '✓'; pct_cell.font = Font(bold=True, size=10, color='27AE60')
+                elif paint_pct > 0:
+                    pct_cell.value = f'{paint_pct:.0f}%'; pct_cell.font = Font(bold=True, size=8, color='ED7D31')
+                else:
+                    pct_cell.value = '-'; pct_cell.font = Font(size=8, color='AAAAAA')
+                pct_cell.alignment = center; pct_cell.border = thin
+                for i, (ws_d, we_d) in enumerate(weeks):
+                    col = 4 + i; cell = ws.cell(row, col); cell.border = thin
+                    in_std_paint = paint_ps and paint_pe and paint_ps <= we_d and paint_pe >= ws_d
+                    in_exp_paint = exp_paint_s and exp_paint_e and exp_paint_s <= we_d and exp_paint_e >= ws_d
+                    in_std_fab = fab_ps <= we_d and fab_pe >= ws_d
+                    in_exp_fab = exp_fab_s <= we_d and exp_fab_e >= ws_d
+                    is_saved = has_expediting and (in_std_paint or in_std_fab) and not in_exp_paint and not in_exp_fab
+                    is_today_col = today_col and col == today_col
+                    # Forecast marker: dashed forecast end week
+                    is_forecast = dm_started and dm_fc_end and overall_pct < 100 and dm_fc_end >= ws_d and dm_fc_end <= we_d
+                    if in_exp_paint:
+                        cell.fill = paint_fill
+                        if is_today_col and 0 < paint_pct < 100:
+                            cell.value = f'{paint_pct:.0f}%'; cell.font = Font(bold=True, size=7, color='FFFFFF'); cell.alignment = center
+                        elif paint_pct >= 100 and we_d < today:
+                            cell.value = '✓'; cell.font = Font(bold=True, size=8, color='FFFFFF'); cell.alignment = center
+                    elif is_saved:
+                        cell.fill = saved_fill
+                        cell.value = '✓'; cell.font = Font(size=7, color='A9D18E'); cell.alignment = center
+                    elif is_forecast:
+                        cell.fill = forecast_fill
+                        cell.value = '◆'; cell.font = Font(size=8, color='C00000'); cell.alignment = center
+                    if is_today_col:
+                        cell.border = today_bar_border if in_exp_paint else today_border
+                row += 1
+            # Legend
             row += 1
             ws.cell(row, 1, 'Legend:').font = Font(bold=True, size=9)
-            lg_fab = ws.cell(row, 2, 'Fab'); lg_fab.fill = fab_fill; lg_fab.font = Font(size=8, color='FFFFFF'); lg_fab.alignment = Alignment(horizontal='center')
-            lg_paint = ws.cell(row, 3, 'Paint'); lg_paint.fill = paint_fill; lg_paint.font = Font(size=8, color='FFFFFF'); lg_paint.alignment = Alignment(horizontal='center')
-            lg_fc = ws.cell(row, 4, 'Forecast'); lg_fc.fill = forecast_fill; lg_fc.font = Font(size=8); lg_fc.alignment = Alignment(horizontal='center')
-            ws.cell(row, 5, '| Today |').font = Font(bold=True, size=8, color='FF0000')
+            lg = ws.cell(row, 2, 'Fab'); lg.fill = fab_fill; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
+            lg = ws.cell(row, 3, 'Paint'); lg.fill = paint_fill; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
+            if has_expediting:
+                lg = ws.cell(row, 4, 'Saved ✓'); lg.fill = saved_fill; lg.font = Font(size=8, color='A9D18E'); lg.alignment = center
+                lg = ws.cell(row, 5, '◆ Forecast'); lg.fill = forecast_fill; lg.font = Font(size=8, color='C00000'); lg.alignment = center
+                ws.cell(row, 6, '| Today |').font = Font(bold=True, size=8, color='FF0000')
+            else:
+                lg = ws.cell(row, 4, '◆ Forecast'); lg.fill = forecast_fill; lg.font = Font(size=8, color='C00000'); lg.alignment = center
+                ws.cell(row, 5, '| Today |').font = Font(bold=True, size=8, color='FF0000')
+            row += 2
+        # ── Production Rate ──
+        actual_weld = fc_data.get('actual_weld_ipd', 0) or 0
+        actual_paint = fc_data.get('actual_paint_m2d', 0) or 0
+        weld_cap = fc_data.get('welding_capability', 0) or 0
+        paint_cap = fc_data.get('painting_capability', 0) or 0
+        ws.cell(row, 1, "PRODUCTION RATE / 生产率").font = Font(bold=True, size=12, color='2F5496')
+        row += 1
+        rate_fill = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
+        for label, actual, target, unit in [
+            ('Welding / 焊接', actual_weld, weld_cap, 'linear inches/day'),
+            ('Painting / 涂装', actual_paint, paint_cap, 'm²/day'),
+        ]:
+            c1 = ws.cell(row, 1, label); c1.font = Font(bold=True, size=10); c1.fill = rate_fill; c1.border = thin
+            c2 = ws.cell(row, 2, actual); c2.font = Font(bold=True, size=12, color='27AE60' if actual >= target else 'E74C3C'); c2.alignment = center; c2.fill = rate_fill; c2.border = thin
+            c3 = ws.cell(row, 3, f"/ {target}"); c3.font = Font(size=9, color='888888'); c3.fill = rate_fill; c3.border = thin
+            c4 = ws.cell(row, 4, unit); c4.font = Font(size=9, color='888888'); c4.fill = rate_fill; c4.border = thin
+            pct_of_target = min(actual / max(target, 1) * 100, 100) if target else 0
+            c5 = ws.cell(row, 5, f"{pct_of_target:.0f}% of target"); c5.font = Font(size=9, color='27AE60' if actual >= target else 'E74C3C'); c5.fill = rate_fill; c5.border = thin
             row += 1
-    # Column widths (status table columns A-K)
-    ws.column_dimensions['A'].width = 12; ws.column_dimensions['B'].width = 8
-    # C width set in Gantt section (6 for % col, or 12 for status table)
-    if not (sched and sched.get('diameters')):
-        ws.column_dimensions['C'].width = 12
-    # Today's activity
-    row += 1
+        row += 1
+        # ── Results Summary ──
+        ws.cell(row, 1, "RESULTS SUMMARY / 结果摘要").font = Font(bold=True, size=12, color='2F5496')
+        row += 1
+        res_fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+        res_green = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+        res_dark = PatternFill(start_color='333333', end_color='333333', fill_type='solid')
+        if has_expediting and std_end and commit_end:
+            fc_saved = (std_end - fc_end_d).days if fc_end_d else 0
+            fc_diff_c = (commit_end - fc_end_d).days if fc_end_d else 0
+            results = [
+                ('Overall Progress / 总进度', f"{st['overall_pct']}%", f"{st['total']} spools · {st['in_progress']} WIP", res_fill, '2F5496'),
+                ('Production End / 生产完工', f"{str(std_end)} → {str(commit_end)}", 'Standard → Committed (Expediting)', res_fill, '4472C4'),
+                ('Expediting / 加急承诺', f"{total_saved} days saved", f"{wks_saved} weeks with expediting fee", res_green, '27AE60'),
+                ('Forecast / 生产预测', f"{fc_saved} days saved · ends {fc_end_d or '—'}", f"{'✓ ' + str(fc_diff_c) + 'd ahead of commitment' if fc_diff_c >= 0 else '✗ ' + str(abs(fc_diff_c)) + 'd behind commitment'}" if fc_end_d else '', res_green, '27AE60' if fc_diff_c >= 0 else 'E74C3C'),
+            ]
+        else:
+            results = [
+                ('Overall Progress / 总进度', f"{st['overall_pct']}%", f"{st['total']} spools · {st['in_progress']} WIP", res_fill, '2F5496'),
+                ('Forecast End / 预测完工', str(fc_end_d or '—'), 'Based on actual rate', res_fill, '4472C4'),
+            ]
+        for label, val, sub, fill, color in results:
+            c1 = ws.cell(row, 1, label); c1.font = Font(bold=True, size=10); c1.fill = fill; c1.border = thin
+            c2 = ws.cell(row, 2, val); c2.font = Font(bold=True, size=11, color=color); c2.fill = fill; c2.border = thin
+            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+            c5 = ws.cell(row, 5, sub); c5.font = Font(size=9, color='888888'); c5.fill = fill; c5.border = thin
+            row += 1
+        # Actual end (dark card)
+        c1 = ws.cell(row, 1, 'Actual End / 实际完工'); c1.font = Font(bold=True, size=10, color='FFFFFF'); c1.fill = res_dark; c1.border = thin
+        actual_end_val = str(today) if st['completed'] >= st['total'] else '—'
+        c2 = ws.cell(row, 2, actual_end_val); c2.font = Font(bold=True, size=11, color='FFFFFF'); c2.fill = res_dark; c2.border = thin
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+        c5 = ws.cell(row, 5, 'Production complete' if st['completed'] >= st['total'] else 'Shown when complete'); c5.font = Font(size=9, color='AAAAAA'); c5.fill = res_dark; c5.border = thin
+        row += 2
+        # ── Transit Strip ──
+        if has_expediting and commit_end:
+            commit_arrival = commit_end + timedelta(days=transit_days)
+            fc_arrival = fc_end_d + timedelta(days=transit_days) if fc_end_d else None
+            ship_fill = PatternFill(start_color='002060', end_color='002060', fill_type='solid')
+            ws.cell(row, 1, "🚢 SEA TRANSIT / 海运").font = Font(bold=True, size=12, color='002060')
+            row += 1
+            c1 = ws.cell(row, 1, f"~{transit_days} days transit"); c1.font = Font(bold=True, size=10, color='FFFFFF'); c1.fill = ship_fill; c1.border = thin
+            c2 = ws.cell(row, 2, f"Committed arrival: {commit_arrival}"); c2.font = Font(size=10, color='FFFFFF'); c2.fill = ship_fill; c2.border = thin
+            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=4)
+            if fc_arrival:
+                c5 = ws.cell(row, 5, f"Forecast arrival: {fc_arrival}"); c5.font = Font(size=10, color='FFFFFF'); c5.fill = ship_fill; c5.border = thin
+            row += 2
+    # ── Today's Activity ──
     if rpt.get('today_activity'):
         ws.cell(row, 1, f"TODAY'S ACTIVITY ({rpt['date']}) / 今日动态").font = Font(bold=True, size=12, color='2F5496')
+        row += 1
+        # Activity summary
+        steps_today = rpt.get('steps_completed_today', 0)
+        released = rpt.get('released_today', 0)
+        past_rt = rpt.get('past_rt', 0)
+        spools_touched = len(set(a.get('spool_id','') for a in rpt['today_activity']))
+        ws.cell(row, 1, f"{steps_today} steps").font = Font(bold=True, size=11, color='2F5496'); ws.cell(row, 1).border = thin
+        ws.cell(row, 2, f"{spools_touched} spools").font = Font(bold=True, size=11, color='2F5496'); ws.cell(row, 2).border = thin
+        ws.cell(row, 3, f"{released} released").font = Font(bold=True, size=11, color='27AE60'); ws.cell(row, 3).border = thin
+        ws.cell(row, 4, f"{past_rt} past RT").font = Font(bold=True, size=11, color='4472C4'); ws.cell(row, 4).border = thin
         row += 1
         for col, h in enumerate(['Time','Spool','Action','Operator','Details'], 1):
             c = ws.cell(row, col, h); c.font = hf; c.fill = hfill; c.border = thin
@@ -1157,9 +1305,11 @@ def api_report_download(project):
             ws.cell(row, 4, a.get('operator','')).font = bf; ws.cell(row, 4).border = thin
             ws.cell(row, 5, a.get('details','')).font = bf; ws.cell(row, 5).border = thin
             row += 1
+    # Column widths
+    ws.column_dimensions['A'].width = 22; ws.column_dimensions['B'].width = 12; ws.column_dimensions['C'].width = 8
     ws.freeze_panes = 'A7'
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False); wb.save(tmp.name)
-    return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{date.today().strftime('%Y%m%d')}.xlsx")
+    return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{today.strftime('%Y%m%d')}.xlsx")
 
 # ── HTML: Home (Project List) ─────────────────────────────────────────────────
 COMMON_CSS = """*{box-sizing:border-box;margin:0;padding:0}

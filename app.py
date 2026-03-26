@@ -367,20 +367,21 @@ def schedule_status(project, bulk=None):
         fab_avg = round(fab_sum / len(diam_spools), 1)
         paint_avg = round(paint_sum / len(diam_spools), 1)
         # Status: compare forecast end vs target end
+        diff = actual_pct - expected_pct
         diam_fc = fc_diams.get(dk, {})
         fc_end = parse_date(diam_fc.get('forecast_end')) if diam_fc.get('forecast_end') else None
         if not diam_fc.get('started') and actual_pct == 0:
             status = 'not_started'
         elif fc_end and target_end:
             days_diff = (target_end - fc_end).days
+            diff = days_diff  # use days diff for display
             if days_diff >= 0:
-                status = 'on_time'  # Forecast finishes before target
+                status = 'on_time'
             elif days_diff >= -7:
-                status = 'at_risk'  # Forecast 1-7 days late
+                status = 'at_risk'
             else:
-                status = 'delayed'  # Forecast 7+ days late
+                status = 'delayed'
         else:
-            diff = actual_pct - expected_pct
             if diff >= -5: status = 'on_time'
             elif diff >= -15: status = 'at_risk'
             else: status = 'delayed'

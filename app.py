@@ -398,11 +398,12 @@ def schedule_status(project, bulk=None):
             'paint_start': paint.get('start','') if paint else '', 'paint_end': paint.get('end','') if paint else '',
             'total_start': fab.get('start',''), 'total_end': str(total_end),
         })
-    overall_status = 'on_time'
-    if overall_count > 0:
-        avg_diff = (overall_actual - overall_expected) / overall_count
-        if avg_diff < -15: overall_status = 'delayed'
-        elif avg_diff < -5: overall_status = 'at_risk'
+    # Overall status = worst diameter status (if any delayed → overall delayed)
+    statuses = [r['status'] for r in result if r['status'] != 'not_started']
+    if 'delayed' in statuses: overall_status = 'delayed'
+    elif 'at_risk' in statuses: overall_status = 'at_risk'
+    elif statuses: overall_status = 'on_time'
+    else: overall_status = 'not_started'
     return {'diameters': result, 'overall_status': overall_status, 'today': str(today)}
 
 def daily_activity(project, day=None):

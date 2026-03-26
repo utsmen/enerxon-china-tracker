@@ -1431,7 +1431,6 @@ def api_report_pdf(project):
             elems.append(Spacer(1, 3*mm))
         # ── Production Gantt ──
         if prod_start:
-            elems.append(Paragraph("PRODUCTION GANTT / 生产甘特图", section_s))
             ratio = (std_weeks - wks_saved) / std_weeks if has_expediting else 1.0
             num_weeks = std_weeks if has_expediting else max(std_weeks, (((fc_end_d or std_end or prod_start + timedelta(days=62)) - prod_start).days // 7) + 2)
             weeks = []
@@ -1552,7 +1551,7 @@ def api_report_pdf(project):
             gstyle_cmds.append(('FONTSIZE', (0,1), (-1,-1), 7))
             gstyle_cmds.append(('FONTSIZE', (0,0), (-1,0), 6))
             gt.setStyle(TableStyle(gstyle_cmds))
-            elems.append(gt)
+            gantt_elems = [Paragraph("PRODUCTION GANTT / 生产甘特图", section_s), gt]
             # Legend
             ldata = [['Legend:', '', '', '', '']]
             lt = Table(ldata, colWidths=[18*mm, 20*mm, 20*mm, 22*mm, 20*mm])
@@ -1574,8 +1573,9 @@ def api_report_pdf(project):
                 ('BACKGROUND', (4,0), (4,0), FORECAST),
                 ('ALIGN', (0,0), (-1,-1), 'CENTER'),
             ]))
-            elems.append(Spacer(1, 2*mm))
-            elems.append(lt)
+            gantt_elems.append(Spacer(1, 2*mm))
+            gantt_elems.append(lt)
+            elems.append(KeepTogether(gantt_elems))
             elems.append(Spacer(1, 3*mm))
         # ── Production Rate ──
         actual_weld = fc_data.get('actual_weld_ipd', 0) or 0
@@ -1639,29 +1639,6 @@ def api_report_pdf(project):
                 ('GRID', (0,0), (-1,-1), 0.5, SHIP),
             ]))
             elems.append(trt)
-    # ── Activity Summary ──
-    if rpt.get('today_activity'):
-        elems.append(Paragraph(f"TODAY'S ACTIVITY ({rpt['date']}) / 今日动态", section_s))
-        steps_today = rpt.get('steps_completed_today', 0)
-        released = rpt.get('released_today', 0)
-        past_rt = rpt.get('past_rt', 0)
-        spools_touched = len(set(a.get('spool_id','') for a in rpt['today_activity']))
-        elems.append(Paragraph(f"<b>{steps_today}</b> steps &nbsp;|&nbsp; <b>{spools_touched}</b> spools &nbsp;|&nbsp; <font color='#27ae60'><b>{released}</b> released</font> &nbsp;|&nbsp; <font color='#4472C4'><b>{past_rt}</b> past RT</font>", normal_s))
-        elems.append(Spacer(1, 2*mm))
-        ahdr = ['Time', 'Spool', 'Action', 'Operator', 'Details']
-        adata = [[Paragraph(f"<b><font color='white'>{h}</font></b>", center_s) for h in ahdr]]
-        for a in rpt['today_activity'][:30]:
-            ts = str(a.get('timestamp','')); ts_short = ts[11:19] if len(ts) > 11 else ts
-            adata.append([ts_short, a.get('spool_id',''), a.get('action',''), a.get('operator',''), a.get('details','')[:50]])
-        at = Table(adata, colWidths=[22*mm, 22*mm, 20*mm, 20*mm, 80*mm], repeatRows=1)
-        at.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), BLUE), ('FONTSIZE', (0,0), (-1,-1), 7),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('GRID', (0,0), (-1,-1), 0.5, HexColor('#C0C0C0')),
-            ('ROWBACKGROUNDS', (0,1), (-1,-1), [white, LGREY]),
-            ('TOPPADDING', (0,0), (-1,-1), 1), ('BOTTOMPADDING', (0,0), (-1,-1), 1),
-        ]))
-        elems.append(at)
     doc.build(elems)
     return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{today.strftime('%Y%m%d')}.pdf")
 

@@ -228,6 +228,7 @@ def bulk_spool_progress(project, settings=None):
         done_steps = completed_map.get(sid, set())
         result[sid] = spool_hours(s, done_steps, settings)
         result[sid]['spool'] = s
+        result[sid]['done_steps'] = done_steps
     return result
 
 def spool_progress(project, spool_id):
@@ -419,29 +420,56 @@ def get_project_settings(project):
     """Get project settings with defaults."""
     rows = db_fetchall("SELECT key, value FROM project_settings WHERE project=?", (project,))
     settings = {r['key']: r['value'] for r in rows}
-    defaults = {'committed_weeks_saved':'0', 'committed_days_saved':'0', 'sea_transit_days':'45', 'standard_weeks':'9', 'welding_capability_ipd':'552', 'painting_capability_m2d':'91'}
+    defaults = {'committed_weeks_saved':'0', 'committed_days_saved':'0', 'sea_transit_days':'45', 'standard_weeks':'9', 'welding_capability_ipd':'1000', 'painting_capability_m2d':'91'}
     for k,v in defaults.items():
         if k not in settings: settings[k] = v
     return settings
 
 def forecast_production(project, bulk=None):
-    """Forecast per diameter using total remaining hours / actual throughput rate.
-    Capabilities (inches/day, m²/day) used for target comparison, not forecasting."""
+    """Forecast per diameter using actual throughput rates.
+    - Started diameters: remaining_hrs / actual_rate (per-diameter elapsed days)
+    - Not-started diameters: total_hrs / avg_rate_per_diameter, capped at committed end if on time
+    Actual welding/painting rates measured by step completion (step 6 / step 12)."""
     from datetime import timedelta
     sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
     if not sched: return None
     settings = get_project_settings(project)
-    weld_cap = float(settings.get('welding_capability_ipd', '552'))
+    weld_cap = float(settings.get('welding_capability_ipd', '1000'))
     paint_cap = float(settings.get('painting_capability_m2d', '91'))
     if not bulk: bulk = bulk_spool_progress(project, settings)
     today = date.today()
-    # Find production start (earliest schedule date)
+
+    # Find production start and committed end
     prod_start = None
     for sc in sched:
         sd = parse_date(sc['planned_start'])
         if sd and (prod_start is None or sd < prod_start): prod_start = sd
     if not prod_start: prod_start = today
-    days_elapsed = max(1, (today - prod_start).days)
+    global_days_elapsed = max(1, (today - prod_start).days)
+    std_weeks = int(settings.get('standard_weeks', '9'))
+    wks_saved = int(settings.get('committed_weeks_saved', '0'))
+    days_saved = int(settings.get('committed_days_saved', '0'))
+    total_saved = wks_saved * 7 + days_saved
+    std_end = prod_start + timedelta(days=std_weeks * 7 - 1)
+    committed_end = std_end - timedelta(days=total_saved) if total_saved > 0 else std_end
+
+    # Get earliest completed_at per diameter for per-diameter elapsed days
+    if USE_PG:
+        earliest_rows = db_fetchall(
+            "SELECT s.main_diameter, MIN(p.completed_at) as first_activity "
+            "FROM progress p JOIN spools s ON p.spool_id=s.spool_id AND p.project=s.project "
+            "WHERE p.project=%s AND p.completed=1 GROUP BY s.main_diameter", (project,))
+    else:
+        earliest_rows = db_fetchall(
+            "SELECT s.main_diameter, MIN(p.completed_at) as first_activity "
+            "FROM progress p JOIN spools s ON p.spool_id=s.spool_id AND p.project=s.project "
+            "WHERE p.project=? AND p.completed=1 GROUP BY s.main_diameter", (project,))
+    diam_first_activity = {}
+    for r in earliest_rows:
+        d = r['main_diameter']
+        fa = parse_date(r['first_activity'])
+        if d and fa: diam_first_activity[d] = fa
+
     # Group by diameter
     by_diam = {}
     for sid, info in bulk.items():
@@ -449,22 +477,36 @@ def forecast_production(project, bulk=None):
         d = s['main_diameter'] or '?'
         if d not in by_diam: by_diam[d] = []
         by_diam[d].append(info)
-    # Calculate actual rates from completed work
-    total_done_hrs_all = sum(i['done'] for i in bulk.values())
-    total_hrs_all = sum(i['total'] for i in bulk.values())
-    # Welding: sum RAF of completed spools (step 6 done)
-    welded_raf_total = sum(i['raf_inches'] for i in bulk.values() if i['fab_pct'] >= 100 or i.get('spool', {}).get('raf_inches', 0) == 0)
-    actual_weld_ipd = round(welded_raf_total / days_elapsed, 1) if days_elapsed > 0 else 0
-    # Painting: sum surface of completed spools (step 12 done)
-    painted_m2_total = sum(i['surface_m2'] * 0.98 for i in bulk.values() if i['paint_pct'] >= 100)
-    actual_paint_m2d = round(painted_m2_total / days_elapsed, 1) if days_elapsed > 0 else 0
+
+    # Actual welding rate: RAF from spools where step 6 (welding) is done
+    welded_raf_total = sum(i['raf_inches'] for i in bulk.values() if WELDING_STEP in i.get('done_steps', set()))
+    actual_weld_ipd = round(welded_raf_total / global_days_elapsed, 1) if global_days_elapsed > 0 else 0
+    # Actual painting rate: surface from spools where step 12 (painting) is done
+    painted_m2_total = sum(i['surface_m2'] * 0.98 for i in bulk.values() if 12 in i.get('done_steps', set()))
+    actual_paint_m2d = round(painted_m2_total / global_days_elapsed, 1) if global_days_elapsed > 0 else 0
+
+    # First pass: collect per-diameter rates from started diameters
+    started_rates = []
+    for diam in DIAMETER_ORDER:
+        dk = f'{diam}"'
+        diam_infos = by_diam.get(dk, by_diam.get(f'{diam}"', []))
+        if not diam_infos: continue
+        done_hrs = sum(i['done'] for i in diam_infos)
+        if done_hrs > 0:
+            first_activity = diam_first_activity.get(dk, prod_start)
+            diam_elapsed = max(1, (today - first_activity).days)
+            started_rates.append(done_hrs / diam_elapsed)
+
+    # Average rate per diameter (reflects parallel throughput)
+    avg_rate = sum(started_rates) / len(started_rates) if started_rates else None
+
+    # Second pass: calculate forecasts for all diameters
     result = {}
     overall_forecast = None
     for diam in DIAMETER_ORDER:
         dk = f'{diam}"'
         diam_infos = by_diam.get(dk, by_diam.get(f'{diam}"', []))
         if not diam_infos: continue
-        # Hours-based progress
         total_hrs = sum(i['total'] for i in diam_infos)
         done_hrs = sum(i['done'] for i in diam_infos)
         remaining_hrs = total_hrs - done_hrs
@@ -472,39 +514,57 @@ def forecast_production(project, bulk=None):
         paint_pct = sum(i['paint_pct'] for i in diam_infos) / len(diam_infos)
         overall_pct = done_hrs / total_hrs * 100 if total_hrs > 0 else 0
         started = done_hrs > 0
-        # Remaining RAF and surface for target comparison
         remaining_raf = sum(i['raf_inches'] for i in diam_infos if i['fab_pct'] < 100)
         remaining_m2 = sum(i['surface_m2'] * 0.98 for i in diam_infos if i['paint_pct'] < 100)
         total_raf = sum(i['raf_inches'] for i in diam_infos)
         total_m2 = sum(i['surface_m2'] for i in diam_infos)
-        # Forecast: total remaining hours / actual rate (hours/day)
-        if done_hrs > 0:
-            actual_rate = done_hrs / days_elapsed  # hours completed per day for this diameter
+
+        if started:
+            # Per-diameter elapsed days from actual first activity
+            first_activity = diam_first_activity.get(dk, prod_start)
+            diam_elapsed = max(1, (today - first_activity).days)
+            actual_rate = done_hrs / diam_elapsed
             forecast_days = remaining_hrs / actual_rate if actual_rate > 0 else 999
             forecast_end = today + timedelta(days=max(1, int(forecast_days + 0.5)))
-        elif started:
-            forecast_end = today + timedelta(days=30)  # rough estimate
+        elif avg_rate:
+            # Not started: estimate using avg rate from started diameters
+            forecast_days = total_hrs / avg_rate
+            latest_start = committed_end - timedelta(days=int(forecast_days + 0.5))
+            if today <= latest_start:
+                forecast_end = committed_end
+                forecast_days = (committed_end - today).days
+            else:
+                forecast_end = today + timedelta(days=max(1, int(forecast_days + 0.5)))
         else:
-            forecast_end = None  # not started — no forecast
+            # No started diameters yet — forecast at committed end
+            forecast_end = committed_end
+            forecast_days = (committed_end - today).days
+
+        # Cap: forecast never earlier than committed end
+        if forecast_end < committed_end:
+            forecast_end = committed_end
+            forecast_days = (committed_end - today).days
+
         result[dk] = {
             'fab_pct': round(fab_pct, 1), 'paint_pct': round(paint_pct, 1),
             'overall_pct': round(overall_pct, 1),
-            'forecast_end': str(forecast_end) if forecast_end else None,
-            'forecast_days': round(forecast_days, 1) if done_hrs > 0 else None,
+            'forecast_end': str(forecast_end),
+            'forecast_days': round(forecast_days, 1),
             'total_hrs': round(total_hrs, 1), 'done_hrs': round(done_hrs, 1),
             'remaining_hrs': round(remaining_hrs, 1),
             'remaining_raf': round(remaining_raf, 0), 'remaining_m2': round(remaining_m2, 1),
             'total_raf': round(total_raf, 0), 'total_m2': round(total_m2, 1),
             'spool_count': len(diam_infos), 'started': started,
         }
-        if started and forecast_end and (overall_forecast is None or forecast_end > overall_forecast):
+        if forecast_end and (overall_forecast is None or forecast_end > overall_forecast):
             overall_forecast = forecast_end
+
     return {
         'diameters': result, 'overall_forecast_end': str(overall_forecast) if overall_forecast else None,
         'today': str(today),
         'welding_capability': weld_cap, 'painting_capability': paint_cap,
         'actual_weld_ipd': actual_weld_ipd, 'actual_paint_m2d': actual_paint_m2d,
-        'days_elapsed': days_elapsed,
+        'days_elapsed': global_days_elapsed,
     }
 
 def past_rt_count(project):

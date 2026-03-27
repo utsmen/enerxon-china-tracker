@@ -10,8 +10,8 @@ Usage:
     --route-cards "/path/to/Combined/" \
     --schedule-start 2026-04-01 \
     --standard-weeks 9 \
-    --welding-ipd 500 \
-    --painting-m2d 80 \
+    --welding-ipd 1000 \
+    --painting-m2d 91 \
     --expediting-weeks 0 \
     [--drawings "/path/to/drawings/"] \
     [--transit-days 45]
@@ -430,8 +430,8 @@ if __name__ == '__main__':
     parser.add_argument('--route-cards', help='Path to route cards folder (Combined/)')
     parser.add_argument('--schedule-start', required=True, help='Production start date (YYYY-MM-DD)')
     parser.add_argument('--standard-weeks', type=int, default=9, help='Standard production weeks (default: 9)')
-    parser.add_argument('--welding-ipd', type=float, default=500, help='Welding capability (linear inches/day)')
-    parser.add_argument('--painting-m2d', type=float, default=80, help='Painting capability (m²/day, 0 if no painting)')
+    parser.add_argument('--welding-ipd', type=float, default=1000, help='Welding capability (linear inches/day)')
+    parser.add_argument('--painting-m2d', type=float, default=91, help='Painting capability (m²/day, 0 if no painting)')
     parser.add_argument('--expediting-weeks', type=int, default=0, help='Expediting weeks saved (0 = no expediting)')
     parser.add_argument('--transit-days', type=int, default=45, help='Sea transit days (default: 45)')
     parser.add_argument('--drawings', help='Path to spool drawings folder (optional)')

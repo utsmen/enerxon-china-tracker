@@ -144,6 +144,9 @@ def init_db():
             # Ensure spool_type column exists on old spools tables and backfill NULLs
             "ALTER TABLE spools ADD COLUMN spool_type TEXT DEFAULT 'SPOOL'",
             "UPDATE spools SET spool_type = 'SPOOL' WHERE spool_type IS NULL",
+            # Migrate legacy schedule task_type names to phase names
+            "UPDATE schedule SET task_type = 'fab' WHERE task_type IN ('fabrication', 'Fabricacion')",
+            "UPDATE schedule SET task_type = 'paint' WHERE task_type IN ('painting', 'Pintura')",
         ]
         for stmt in pg_statements:
             try: cur.execute(stmt)
@@ -160,6 +163,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS project_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key));
             CREATE TABLE IF NOT EXISTS drawings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BLOB NOT NULL, UNIQUE(project, spool_id));
             CREATE TABLE IF NOT EXISTS project_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', UNIQUE(project, step_number));
+            UPDATE schedule SET task_type = 'fab' WHERE task_type IN ('fabrication', 'Fabricacion');
+            UPDATE schedule SET task_type = 'paint' WHERE task_type IN ('painting', 'Pintura');
         """); c.close()
 
 # ── Helpers: Project Steps & Settings ─────────────────────────────────────────
@@ -402,20 +407,23 @@ def schedule_status(project, bulk=None):
         dk = f'{diam}"'
         if dk not in sched_map and diam not in sched_map: continue
         sm = sched_map.get(dk, sched_map.get(diam, {}))
-        fab = sm.get('fabrication', sm.get('Fabricacion', {}))
-        paint = sm.get('painting', sm.get('Pintura', {}))
-        if not fab: continue
+        # Build phase_dates from schedule map using phase names
+        phase_dates = {}
+        for ph in phase_order:
+            ph_entry = sm.get(ph, {})
+            if ph_entry:
+                ps = parse_date(ph_entry.get('start')); pe = parse_date(ph_entry.get('end'))
+                if ps and pe:
+                    phase_dates[ph] = {'start': str(ps), 'end': str(pe)}
+        if not phase_dates: continue
+        first_phase = phase_order[0] if phase_order else None
+        if not first_phase or first_phase not in phase_dates: continue
         try:
-            fab_start = parse_date(fab['start']); fab_end = parse_date(fab['end'])
-            if not fab_start or not fab_end: continue
-            if paint:
-                paint_end = parse_date(paint['end'])
-                total_end = paint_end if paint_end else fab_end
-            else:
-                total_end = fab_end
-            target_end = committed_end if committed_end else total_end
-            total_days = max(1, (target_end - fab_start).days)
-            elapsed = max(0, min((today - fab_start).days, total_days))
+            total_start_d = min(parse_date(pd['start']) for pd in phase_dates.values())
+            total_end_d = max(parse_date(pd['end']) for pd in phase_dates.values())
+            target_end = committed_end if committed_end else total_end_d
+            total_days = max(1, (target_end - total_start_d).days)
+            elapsed = max(0, min((today - total_start_d).days, total_days))
             expected_pct = round(elapsed / total_days * 100, 1) if total_days > 0 else 0
         except: continue
         diam_spools = by_diam.get(dk, by_diam.get(f'{diam}"', []))
@@ -452,9 +460,8 @@ def schedule_status(project, bulk=None):
             'expected_pct': expected_pct, 'actual_pct': actual_pct, 'diff': round(diff, 1), 'status': status,
             'phase_avgs': phase_avgs,
             'remaining_raf': round(remaining_raf, 0), 'remaining_m2': round(remaining_m2, 1),
-            'fab_start': fab.get('start',''), 'fab_end': fab.get('end',''),
-            'paint_start': paint.get('start','') if paint else '', 'paint_end': paint.get('end','') if paint else '',
-            'total_start': fab.get('start',''), 'total_end': str(total_end),
+            'phase_dates': phase_dates,
+            'total_start': str(total_start_d), 'total_end': str(total_end_d),
         })
     statuses = [r['status'] for r in result if r['status'] != 'not_started']
     if 'delayed' in statuses: overall_status = 'delayed'
@@ -993,6 +1000,8 @@ def api_set_schedule(project):
     elif isinstance(data, dict) and 'fab_start' in data:
         fab_start = date.fromisoformat(data['fab_start'])
         settings = get_project_settings(project)
+        steps_def = get_project_steps(project)
+        phase_order = get_phase_order(steps_def)
         spd = json.loads(settings.get('spools_per_day', '{}'))
         painting_days = int(settings.get('painting_days', '13'))
         diam_order = get_diameter_order(project)
@@ -1009,13 +1018,19 @@ def api_set_schedule(project):
             rate = float(spd.get(diam, 2.0))
             fab_days = max(1, round(cnt / rate))
             fab_end = current_fab + timedelta(days=fab_days)
-            paint_start = fab_end + timedelta(days=1)
-            paint_end = paint_start + timedelta(days=painting_days)
             dk = f'{diam}"'
-            for tt, sd, ed, desc in [
-                ('fabrication', current_fab, fab_end, f'Fabrication {dk} ({cnt} spools)'),
-                ('painting', paint_start, paint_end, f'Painting {dk}'),
-            ]:
+            # Build schedule entries for each phase
+            phase_entries = []
+            first_phase = phase_order[0] if phase_order else 'fab'
+            phase_entries.append((first_phase, current_fab, fab_end, f'{first_phase.capitalize()} {dk} ({cnt} spools)'))
+            # Secondary phases get follow-on schedule
+            prev_end = fab_end
+            for ph in phase_order[1:]:
+                ph_start = prev_end + timedelta(days=1)
+                ph_end = ph_start + timedelta(days=painting_days)
+                phase_entries.append((ph, ph_start, ph_end, f'{ph.capitalize()} {dk}'))
+                prev_end = ph_end
+            for tt, sd, ed, desc in phase_entries:
                 if USE_PG:
                     db_execute("INSERT INTO schedule (project,diameter,task_type,description,planned_start,planned_end,spool_count) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (project,diameter,task_type) DO UPDATE SET description=EXCLUDED.description,planned_start=EXCLUDED.planned_start,planned_end=EXCLUDED.planned_end,spool_count=EXCLUDED.spool_count",
                         (project, dk, tt, desc, str(sd), str(ed), cnt))
@@ -1130,16 +1145,16 @@ def api_report_download(project):
             elif d['status'] == 'at_risk': sc.fill = orange_fill
             elif d['status'] == 'delayed': sc.fill = red_fill
             col_idx += 1
-            ws.cell(row, col_idx, d['fab_start']).font = bf; ws.cell(row, col_idx).border = thin
+            ws.cell(row, col_idx, d.get('total_start','')).font = bf; ws.cell(row, col_idx).border = thin
             col_idx += 1
-            ws.cell(row, col_idx, d.get('paint_end','') or d['fab_end']).font = bf; ws.cell(row, col_idx).border = thin
+            ws.cell(row, col_idx, d.get('total_end','')).font = bf; ws.cell(row, col_idx).border = thin
             col_idx += 1
             ws.cell(row, col_idx, fcd.get('forecast_end', '')).font = bf; ws.cell(row, col_idx).border = thin
             row += 1
         row += 1
         # Expediting + Gantt + Rate + Results + Transit — same as before
         prod_start = None
-        starts = [d['fab_start'] for d in sched['diameters'] if d['fab_start']]
+        starts = [d['total_start'] for d in sched['diameters'] if d.get('total_start')]
         if starts: prod_start = date.fromisoformat(min(starts))
         if prod_start and has_expediting:
             std_end = prod_start + timedelta(days=std_weeks * 7 - 1)
@@ -1201,26 +1216,19 @@ def api_report_download(project):
             forecast_fill = PatternFill(start_color='FFC000', end_color='FFC000', fill_type='solid')
             today_border = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('thin',color='C0C0C0'),bottom=Side('thin',color='C0C0C0'))
             today_bar_border = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('medium',color='333333'),bottom=Side('medium',color='333333'))
-            # Map phase names to schedule task_types
-            phase_task_map = {'fab': 'fabrication', 'paint': 'painting'}
             for d in sched['diameters']:
                 dk = d['diameter']; fcd = fc_diams.get(dk, {})
                 overall_pct = fcd.get('overall_pct', 0) or 0; dm_started = fcd.get('started', False)
                 dm_fc_end_str = fcd.get('forecast_end', ''); dm_fc_end = date.fromisoformat(dm_fc_end_str) if dm_fc_end_str else None
                 # Get phase percentages from phase_avgs
                 dm_phase_avgs = fcd.get('phase_avgs', {}) or d.get('phase_avgs', {}) or {}
-                # Parse schedule dates for each phase
+                # Parse schedule dates from phase_dates
                 phase_dates = {}
-                # First phase always uses fab_start/fab_end
-                if phases:
-                    fs_str = d.get('fab_start',''); fe_str = d.get('fab_end','')
-                    if fs_str and fe_str:
-                        phase_dates[phases[0]] = (date.fromisoformat(fs_str), date.fromisoformat(fe_str))
-                # Second phase (if exists) uses paint_start/paint_end
-                if len(phases) > 1:
-                    ps_str = d.get('paint_start',''); pe_str = d.get('paint_end','')
-                    if ps_str and pe_str:
-                        phase_dates[phases[1]] = (date.fromisoformat(ps_str), date.fromisoformat(pe_str))
+                d_phase_dates = d.get('phase_dates', {})
+                for ph in phases:
+                    pd = d_phase_dates.get(ph, {})
+                    if pd.get('start') and pd.get('end'):
+                        phase_dates[ph] = (date.fromisoformat(pd['start']), date.fromisoformat(pd['end']))
                 # Compute expedited dates per phase
                 exp_phase_dates = {}
                 prev_exp_end = None
@@ -1476,15 +1484,7 @@ def api_report_pdf(project):
         story.append(p('SCHEDULE STATUS BY DIAMETER', s_heading))
         # Build headers dynamically
         phase_hdrs = [f'{ph.capitalize()} %' for ph in phases]
-        # Schedule date columns: one start/end per phase
-        date_hdrs = []
-        if phases:
-            date_hdrs.append(f'{phases[0].capitalize()} Start')
-            date_hdrs.append(f'{phases[0].capitalize()} End')
-        if len(phases) > 1:
-            date_hdrs.append(f'{phases[1].capitalize()} Start')
-            date_hdrs.append(f'{phases[1].capitalize()} End')
-        headers = ['Diameter', 'Spools'] + phase_hdrs + ['Overall %', 'Diff', 'Status'] + date_hdrs + ['Forecast End']
+        headers = ['Diameter', 'Spools'] + phase_hdrs + ['Overall %', 'Diff', 'Status', 'Start', 'End', 'Forecast End']
         hdr_row = [p(f'<font color="white"><b>{h}</b></font>', s_cell) for h in headers]
         data_rows = [hdr_row]
         for d in sched['diameters']:
@@ -1500,19 +1500,16 @@ def api_report_pdf(project):
             row_data.append(p(f'<font color="{diff_color}">{diff_str}</font>', s_cell))
             s_color = {'on_time': '#27AE60', 'at_risk': '#F39C12', 'delayed': '#E74C3C'}.get(d['status'], '#95A5A6')
             row_data.append(p(f'<font color="{s_color}"><b>{status_label(d["status"])}</b></font>', s_cell))
-            # Date columns
-            row_data.append(p(d.get('fab_start', ''), s_cell))
-            row_data.append(p(d.get('fab_end', ''), s_cell))
-            if len(phases) > 1:
-                row_data.append(p(d.get('paint_start', ''), s_cell))
-                row_data.append(p(d.get('paint_end', '') or d.get('fab_end', ''), s_cell))
+            # Date columns — total start/end
+            row_data.append(p(d.get('total_start', ''), s_cell))
+            row_data.append(p(d.get('total_end', ''), s_cell))
             row_data.append(p(fcd.get('forecast_end', ''), s_cell))
             data_rows.append(row_data)
 
         num_cols = len(headers)
         avail_w = page_w - 30*mm
         # Proportional column widths
-        base_widths = [42, 30] + [35]*len(phases) + [38, 32, 50] + [48]*len(date_hdrs) + [48]
+        base_widths = [42, 30] + [35]*len(phases) + [38, 32, 50, 48, 48, 48]
         total_base = sum(base_widths)
         col_widths = [w / total_base * avail_w for w in base_widths]
 
@@ -1548,7 +1545,7 @@ def api_report_pdf(project):
 
         # ── 3. Expediting Commitment Panel ───────────────────────────────────
         prod_start = None
-        starts = [d['fab_start'] for d in sched['diameters'] if d['fab_start']]
+        starts = [d['total_start'] for d in sched['diameters'] if d.get('total_start')]
         if starts:
             prod_start = date.fromisoformat(min(starts))
         if prod_start and has_expediting:
@@ -1619,9 +1616,6 @@ def api_report_pdf(project):
                     today_week_idx = i
                     break
 
-            # Phase-to-schedule mapping
-            phase_task_map = {'fab': 'fabrication', 'paint': 'painting'}
-
             for dm_idx, d in enumerate(sched['diameters']):
                 dk = d['diameter']; fcd = fc_diams.get(dk, {})
                 overall_pct = fcd.get('overall_pct', 0) or 0
@@ -1630,16 +1624,13 @@ def api_report_pdf(project):
                 dm_fc_end = date.fromisoformat(dm_fc_end_str) if dm_fc_end_str else None
                 dm_phase_avgs = fcd.get('phase_avgs', {}) or d.get('phase_avgs', {}) or {}
 
-                # Parse schedule dates per phase
+                # Parse schedule dates from phase_dates
                 phase_dates = {}
-                if phases:
-                    fs = d.get('fab_start', ''); fe = d.get('fab_end', '')
-                    if fs and fe:
-                        phase_dates[phases[0]] = (date.fromisoformat(fs), date.fromisoformat(fe))
-                if len(phases) > 1:
-                    ps = d.get('paint_start', ''); pe = d.get('paint_end', '')
-                    if ps and pe:
-                        phase_dates[phases[1]] = (date.fromisoformat(ps), date.fromisoformat(pe))
+                d_phase_dates = d.get('phase_dates', {})
+                for ph in phases:
+                    pd = d_phase_dates.get(ph, {})
+                    if pd.get('start') and pd.get('end'):
+                        phase_dates[ph] = (date.fromisoformat(pd['start']), date.fromisoformat(pd['end']))
 
                 # Compute expedited dates per phase
                 exp_phase_dates = {}
@@ -2027,7 +2018,7 @@ async function load(){
   const totalSaved = wksSaved*7+daysSaved;
   const hasExpediting = totalSaved > 0;
   if(hasExpediting && schd && schd.diameters && schd.diameters.length){
-    const starts = schd.diameters.map(x=>x.fab_start).filter(x=>x).sort();
+    const starts = schd.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length){
       const psDate = new Date(starts[0]);
       const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
@@ -2393,7 +2384,7 @@ async function load(){
     html += `</div></div>`;
 
     let prodStart = null;
-    const starts = sch.diameters.map(x=>x.fab_start).filter(x=>x).sort();
+    const starts = sch.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length) prodStart = starts[0];
     if(prodStart){
       const psDate = new Date(prodStart);
@@ -2437,10 +2428,13 @@ async function load(){
         const overallP = fdi.overall_pct||0;
         const dmFcEnd = fdi.forecast_end ? new Date(fdi.forecast_end) : null;
         const dmStarted = fdi.started;
-        // Parse schedule dates: first phase = fab, second = paint
+        // Parse schedule dates from phase_dates
         const phaseDates = {};
-        if(phases.length > 0 && dm.fab_start && dm.fab_end) phaseDates[phases[0]] = {s:new Date(dm.fab_start), e:new Date(dm.fab_end)};
-        if(phases.length > 1 && dm.paint_start && dm.paint_end) phaseDates[phases[1]] = {s:new Date(dm.paint_start), e:new Date(dm.paint_end)};
+        const dmPD = dm.phase_dates || {};
+        phases.forEach(ph => {
+          const pd = dmPD[ph];
+          if(pd && pd.start && pd.end) phaseDates[ph] = {s:new Date(pd.start), e:new Date(pd.end)};
+        });
         // Compute expedited dates per phase
         const expDates = {};
         let prevExpEnd = null;

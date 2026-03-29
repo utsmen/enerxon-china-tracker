@@ -224,8 +224,10 @@ def parse_route_cards(route_cards_dir):
     return spool_data
 
 
-def build_schedule(start_date, diameter_counts, spools_per_day, painting_days, diam_order):
-    """Build schedule entries per diameter."""
+def build_schedule(start_date, diameter_counts, spools_per_day, painting_days, diam_order, phase_order=None):
+    """Build schedule entries per diameter. Phase names come from step definitions."""
+    if not phase_order:
+        phase_order = ['fab']
     schedule = []
     current_fab = start_date
 
@@ -236,22 +238,28 @@ def build_schedule(start_date, diameter_counts, spools_per_day, painting_days, d
         rate = float(spools_per_day.get(diam, 2.0))
         fab_days = max(1, round(cnt / rate))
         fab_end = current_fab + timedelta(days=fab_days)
-        paint_start = fab_end + timedelta(days=1)
-        paint_end = paint_start + timedelta(days=painting_days)
         dk = f'{diam}"'
 
+        # First phase = fabrication schedule
+        first_phase = phase_order[0]
         schedule.append({
-            'diameter': dk, 'task_type': 'fabrication',
-            'description': f'Fabrication {dk} ({cnt} spools)',
+            'diameter': dk, 'task_type': first_phase,
+            'description': f'{first_phase.capitalize()} {dk} ({cnt} spools)',
             'planned_start': str(current_fab), 'planned_end': str(fab_end),
             'spool_count': cnt,
         })
-        schedule.append({
-            'diameter': dk, 'task_type': 'painting',
-            'description': f'Painting {dk}',
-            'planned_start': str(paint_start), 'planned_end': str(paint_end),
-            'spool_count': cnt,
-        })
+        # Secondary phases get follow-on schedule
+        prev_end = fab_end
+        for ph in phase_order[1:]:
+            ph_start = prev_end + timedelta(days=1)
+            ph_end = ph_start + timedelta(days=painting_days)
+            schedule.append({
+                'diameter': dk, 'task_type': ph,
+                'description': f'{ph.capitalize()} {dk}',
+                'planned_start': str(ph_start), 'planned_end': str(ph_end),
+                'spool_count': cnt,
+            })
+            prev_end = ph_end
 
         overlap = max(1, round(fab_days * 0.4))
         current_fab = current_fab + timedelta(days=fab_days - overlap)
@@ -357,7 +365,19 @@ def deploy(args):
     start = date.fromisoformat(args.schedule_start)
     # Derive diameter order from actual data (descending)
     diam_order = sorted(diameter_counts.keys(), key=lambda x: float(x) if x.replace('.','').isdigit() else 0, reverse=True)
-    schedule = build_schedule(start, diameter_counts, spd, painting_days, diam_order)
+    # Load phase order from step definitions
+    phase_order = ['fab']
+    if args.steps_file:
+        with open(args.steps_file) as f:
+            steps = json.load(f)
+        seen = set()
+        phase_order = []
+        for s in steps:
+            p = s.get('phase', 'fab')
+            if p not in seen:
+                seen.add(p)
+                phase_order.append(p)
+    schedule = build_schedule(start, diameter_counts, spd, painting_days, diam_order, phase_order)
     r = session.post(f"{TRACKER_URL}/api/project/{args.project}/schedule", json=schedule)
     print(f"  Result: {r.json()}")
 

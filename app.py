@@ -182,7 +182,7 @@ def get_project_settings(project):
     defaults = {'committed_weeks_saved':'0', 'committed_days_saved':'0', 'sea_transit_days':'45',
                 'standard_weeks':'9', 'welding_capability_ipd':'1000', 'painting_capability_m2d':'91',
                 'spools_per_day':'{}', 'painting_days':'13',
-                'fab_label':'Fab / \u5236\u4f5c', 'paint_label':'Paint / \u6d82\u88c5'}
+}
     for k,v in defaults.items():
         if k not in settings: settings[k] = v
     return settings
@@ -199,14 +199,22 @@ def get_diameter_order(project):
     return [d[1] for d in diameters]
 
 # ── Helpers: Progress Calculation ─────────────────────────────────────────────
+def get_phase_order(steps_def):
+    """Get ordered list of distinct phases from step definitions (by first appearance in display_order)."""
+    seen = set(); phases = []
+    for s in steps_def:
+        p = s['phase']
+        if p not in seen: seen.add(p); phases.append(p)
+    return phases
+
 def spool_hours(spool_row, completed_steps, settings, steps_def):
-    """Calculate hours-based progress for a single spool using dynamic step definitions."""
+    """Calculate hours-based progress for a single spool. Phases are dynamic — derived from step definitions."""
     raf = float(spool_row.get('raf_inches') or 0)
     surface = float(spool_row.get('surface_m2') or 0)
     has_br = spool_row.get('has_branches', 0)
     spool_type = spool_row.get('spool_type', 'SPOOL') or 'SPOOL'
     weld_cap = float(settings.get('welding_capability_ipd', '552'))
-    paint_cap = float(settings.get('painting_capability_m2d', '91'))
+    surface_cap = float(settings.get('painting_capability_m2d', '91'))
 
     # Pre-count surface steps per phase for even splitting
     surface_count_by_phase = {}
@@ -214,54 +222,51 @@ def spool_hours(spool_row, completed_steps, settings, steps_def):
         if step['hours_variable'] == 'surface' and step['phase']:
             surface_count_by_phase[step['phase']] = surface_count_by_phase.get(step['phase'], 0) + 1
 
-    fab_total = 0.0; fab_done = 0.0
-    paint_total = 0.0; paint_done = 0.0
+    # Determine which phases need surface area (contain surface_treatment steps)
+    phases_with_surface = set(surface_count_by_phase.keys())
+
+    # Accumulate per phase
+    phase_totals = {}  # {phase: {total, done}}
     weld_hrs = 0.0; surface_hrs = 0.0
 
     for step in steps_def:
         sn = step['step_number']
-        # Skip steps not applicable to this spool
-        if step['is_conditional'] and not has_br:
-            continue
+        phase = step['phase']
+        if step['is_conditional'] and not has_br: continue
         st = step.get('spool_type', 'ALL') or 'ALL'
-        if st != 'ALL' and st != spool_type:
-            continue
+        if st != 'ALL' and st != spool_type: continue
 
         # Calculate hours for this step
         if step['hours_variable'] == 'welding':
             hrs = (raf / weld_cap * 8) if weld_cap > 0 and raf > 0 else 0
             weld_hrs = hrs
         elif step['hours_variable'] == 'surface':
-            if surface <= 0:
-                continue  # skip surface steps if no painting
-            n_surface = surface_count_by_phase.get(step['phase'], 1)
-            total_surface_hrs = (surface * 0.98 / paint_cap * 8) if paint_cap > 0 else 0
+            if surface <= 0: continue
+            n_surface = surface_count_by_phase.get(phase, 1)
+            total_surface_hrs = (surface * 0.98 / surface_cap * 8) if surface_cap > 0 else 0
             hrs = total_surface_hrs / n_surface if n_surface > 0 else 0
             surface_hrs += hrs
         else:
-            # Fixed hours — skip paint-phase fixed steps if no surface
-            if step['phase'] == 'paint' and surface <= 0:
-                continue
+            # Fixed hours — skip if this phase requires surface and spool has none
+            if phase in phases_with_surface and surface <= 0: continue
             hrs = float(step.get('hours_fixed', 2.0) or 2.0)
 
-        # Accumulate by phase
-        if step['phase'] == 'fab':
-            fab_total += hrs
-            if sn in completed_steps: fab_done += hrs
-        else:
-            paint_total += hrs
-            if sn in completed_steps: paint_done += hrs
+        if phase not in phase_totals: phase_totals[phase] = {'total': 0.0, 'done': 0.0}
+        phase_totals[phase]['total'] += hrs
+        if sn in completed_steps: phase_totals[phase]['done'] += hrs
 
-    total = fab_total + paint_total
-    done = fab_done + paint_done
+    # Calculate percentages per phase
+    phases = {}
+    total = 0.0; done = 0.0
+    for phase, pt in phase_totals.items():
+        pct = round(pt['done'] / pt['total'] * 100, 1) if pt['total'] > 0 else 0.0
+        phases[phase] = {'total': pt['total'], 'done': pt['done'], 'pct': pct}
+        total += pt['total']; done += pt['done']
+
     pct = round(done / total * 100, 1) if total > 0 else 0.0
-    fab_pct = round(fab_done / fab_total * 100, 1) if fab_total > 0 else 0.0
-    paint_pct = round(paint_done / paint_total * 100, 1) if paint_total > 0 else 0.0
 
     return {
-        'fab_total': fab_total, 'fab_done': fab_done, 'fab_pct': fab_pct,
-        'paint_total': paint_total, 'paint_done': paint_done, 'paint_pct': paint_pct,
-        'total': total, 'done': done, 'pct': pct,
+        'phases': phases, 'total': total, 'done': done, 'pct': pct,
         'raf_inches': raf, 'surface_m2': surface, 'weld_hrs': weld_hrs, 'surface_hrs': surface_hrs,
     }
 
@@ -297,10 +302,12 @@ def spool_progress(project, spool_id):
 
 def project_stats(project):
     settings = get_project_settings(project)
+    steps_def = get_project_steps(project)
+    phase_order = get_phase_order(steps_def)
     bulk = bulk_spool_progress(project, settings)
     spools = [v for v in bulk.values()]
     total = len(spools)
-    st = {'total':total,'completed':0,'in_progress':0,'not_started':0,'overall_pct':0.0,'by_diameter':{},'by_line':{}}
+    st = {'total':total,'completed':0,'in_progress':0,'not_started':0,'overall_pct':0.0,'by_diameter':{},'by_line':{},'phase_order':phase_order}
     tp = 0
     for v in spools:
         p = v['pct']; tp += p; s = v['spool']
@@ -308,17 +315,20 @@ def project_stats(project):
         elif p>0: st['in_progress']+=1
         else: st['not_started']+=1
         d = s['main_diameter'] or '?'
-        if d not in st['by_diameter']: st['by_diameter'][d] = {'total':0,'pct_sum':0,'fab_pct_sum':0,'paint_pct_sum':0}
+        if d not in st['by_diameter']:
+            st['by_diameter'][d] = {'total':0,'pct_sum':0,'phase_pct_sums':{ph:0 for ph in phase_order}}
         st['by_diameter'][d]['total']+=1; st['by_diameter'][d]['pct_sum']+=p
-        st['by_diameter'][d]['fab_pct_sum']+=v['fab_pct']; st['by_diameter'][d]['paint_pct_sum']+=v['paint_pct']
+        for ph in phase_order:
+            st['by_diameter'][d]['phase_pct_sums'][ph] += v['phases'].get(ph, {}).get('pct', 0)
         l = s['line'] or '?'
         if l not in st['by_line']: st['by_line'][l] = {'total':0,'pct_sum':0}
         st['by_line'][l]['total']+=1; st['by_line'][l]['pct_sum']+=p
     if total: st['overall_pct'] = round(tp/total,1)
     for v in st['by_diameter'].values():
         v['avg_pct'] = round(v['pct_sum']/v['total'],1) if v['total'] else 0
-        v['fab_avg_pct'] = round(v['fab_pct_sum']/v['total'],1) if v['total'] else 0
-        v['paint_avg_pct'] = round(v['paint_pct_sum']/v['total'],1) if v['total'] else 0
+        v['phase_avgs'] = {}
+        for ph in phase_order:
+            v['phase_avgs'][ph] = round(v['phase_pct_sums'][ph]/v['total'],1) if v['total'] else 0
     for v in st['by_line'].values(): v['avg_pct'] = round(v['pct_sum']/v['total'],1) if v['total'] else 0
     return st
 
@@ -350,6 +360,8 @@ def schedule_status(project, bulk=None):
     sched = db_fetchall("SELECT * FROM schedule WHERE project=? ORDER BY planned_start", (project,))
     if not sched: return None
     if not bulk: bulk = bulk_spool_progress(project)
+    steps_def = get_project_steps(project)
+    phase_order = get_phase_order(steps_def)
     settings = get_project_settings(project)
     diam_order = get_diameter_order(project)
     std_weeks = int(settings.get('standard_weeks', '9'))
@@ -410,10 +422,11 @@ def schedule_status(project, bulk=None):
         if not diam_spools: continue
         actual_sum = sum(bulk.get(s['spool_id'], {}).get('pct', 0) for s in diam_spools)
         actual_pct = round(actual_sum / len(diam_spools), 1)
-        fab_sum = sum(bulk.get(s['spool_id'], {}).get('fab_pct', 0) for s in diam_spools)
-        paint_sum = sum(bulk.get(s['spool_id'], {}).get('paint_pct', 0) for s in diam_spools)
-        fab_avg = round(fab_sum / len(diam_spools), 1)
-        paint_avg = round(paint_sum / len(diam_spools), 1)
+        # Per-phase averages (dynamic)
+        phase_avgs = {}
+        for ph in phase_order:
+            ph_sum = sum(bulk.get(s['spool_id'], {}).get('phases', {}).get(ph, {}).get('pct', 0) for s in diam_spools)
+            phase_avgs[ph] = round(ph_sum / len(diam_spools), 1)
         diff = actual_pct - expected_pct
         diam_fc = fc_diams.get(dk, {})
         fc_end = parse_date(diam_fc.get('forecast_end')) if diam_fc.get('forecast_end') else None
@@ -430,12 +443,14 @@ def schedule_status(project, bulk=None):
             elif diff >= -15: status = 'at_risk'
             else: status = 'delayed'
         overall_expected += expected_pct; overall_actual += actual_pct; overall_count += 1
-        remaining_raf = sum(bulk.get(s['spool_id'], {}).get('raf_inches', 0) for s in diam_spools if bulk.get(s['spool_id'], {}).get('fab_pct', 0) < 100)
-        remaining_m2 = sum(float(s.get('surface_m2') or 0) * 0.98 for s in diam_spools if bulk.get(s['spool_id'], {}).get('paint_pct', 0) < 100)
+        # First phase = fabrication for remaining RAF, last phase for remaining surface
+        first_phase = phase_order[0] if phase_order else 'fab'
+        remaining_raf = sum(bulk.get(s['spool_id'], {}).get('raf_inches', 0) for s in diam_spools if bulk.get(s['spool_id'], {}).get('phases', {}).get(first_phase, {}).get('pct', 0) < 100)
+        remaining_m2 = sum(float(s.get('surface_m2') or 0) * 0.98 for s in diam_spools if bulk.get(s['spool_id'], {}).get('pct', 0) < 100)
         result.append({
             'diameter': dk, 'spool_count': len(diam_spools),
             'expected_pct': expected_pct, 'actual_pct': actual_pct, 'diff': round(diff, 1), 'status': status,
-            'fab_pct': fab_avg, 'paint_pct': paint_avg,
+            'phase_avgs': phase_avgs,
             'remaining_raf': round(remaining_raf, 0), 'remaining_m2': round(remaining_m2, 1),
             'fab_start': fab.get('start',''), 'fab_end': fab.get('end',''),
             'paint_start': paint.get('start','') if paint else '', 'paint_end': paint.get('end','') if paint else '',
@@ -446,7 +461,7 @@ def schedule_status(project, bulk=None):
     elif 'at_risk' in statuses: overall_status = 'at_risk'
     elif statuses: overall_status = 'on_time'
     else: overall_status = 'not_started'
-    return {'diameters': result, 'overall_status': overall_status, 'today': str(today)}
+    return {'diameters': result, 'overall_status': overall_status, 'today': str(today), 'phase_order': phase_order}
 
 def daily_activity(project, day=None):
     if not day: day = date.today().strftime('%Y-%m-%d')
@@ -462,6 +477,7 @@ def forecast_production(project, bulk=None):
     if not sched: return None
     settings = get_project_settings(project)
     steps_def = get_project_steps(project)
+    phase_order = get_phase_order(steps_def)
     diam_order = get_diameter_order(project)
     weld_cap = float(settings.get('welding_capability_ipd', '1000'))
     paint_cap = float(settings.get('painting_capability_m2d', '91'))
@@ -535,12 +551,16 @@ def forecast_production(project, bulk=None):
         total_hrs = sum(i['total'] for i in diam_infos)
         done_hrs = sum(i['done'] for i in diam_infos)
         remaining_hrs = total_hrs - done_hrs
-        fab_pct = sum(i['fab_pct'] for i in diam_infos) / len(diam_infos)
-        paint_pct = sum(i['paint_pct'] for i in diam_infos) / len(diam_infos)
+        # Per-phase averages (dynamic)
+        phase_avgs = {}
+        for ph in phase_order:
+            ph_sum = sum(i['phases'].get(ph, {}).get('pct', 0) for i in diam_infos)
+            phase_avgs[ph] = round(ph_sum / len(diam_infos), 1)
         overall_pct = done_hrs / total_hrs * 100 if total_hrs > 0 else 0
         started = done_hrs > 0
-        remaining_raf = sum(i['raf_inches'] for i in diam_infos if i['fab_pct'] < 100)
-        remaining_m2 = sum(i['surface_m2'] * 0.98 for i in diam_infos if i['paint_pct'] < 100)
+        first_phase = phase_order[0] if phase_order else 'fab'
+        remaining_raf = sum(i['raf_inches'] for i in diam_infos if i['phases'].get(first_phase, {}).get('pct', 0) < 100)
+        remaining_m2 = sum(i['surface_m2'] * 0.98 for i in diam_infos if i['pct'] < 100)
         total_raf = sum(i['raf_inches'] for i in diam_infos)
         total_m2 = sum(i['surface_m2'] for i in diam_infos)
 
@@ -564,7 +584,7 @@ def forecast_production(project, bulk=None):
             forecast_end = committed_end; forecast_days = (committed_end - today).days
 
         fc_result[dk] = {
-            'fab_pct': round(fab_pct, 1), 'paint_pct': round(paint_pct, 1),
+            'phase_avgs': phase_avgs,
             'overall_pct': round(overall_pct, 1), 'forecast_end': str(forecast_end),
             'forecast_days': round(forecast_days, 1),
             'total_hrs': round(total_hrs, 1), 'done_hrs': round(done_hrs, 1),
@@ -644,6 +664,7 @@ def generate_report_data(project):
         'production_rate': prod_rate, 'spool_progress': spool_pcts,
         'step_names': step_names, 'released_today': released_today,
         'hold_steps': list(hold_steps), 'release_steps': list(release_steps),
+        'phase_order': get_phase_order(steps_def),
     }
 
 # ── API: Projects ─────────────────────────────────────────────────────────────
@@ -1080,9 +1101,10 @@ def api_report_download(project):
         status_label = {'on_time': 'ON TIME \u2713', 'at_risk': 'AT RISK \u26a0', 'delayed': 'DELAYED \u2717', 'not_started': 'NOT STARTED'}
         ws.cell(row, 1, "SCHEDULE STATUS BY DIAMETER / \u6309\u7ba1\u5f84\u8ba1\u5212\u72b6\u6001").font = Font(bold=True, size=12, color='2F5496')
         row += 1
-        fl = sett.get('fab_label', 'Fab').split('/')[0].strip()
-        pl = sett.get('paint_label', 'Paint').split('/')[0].strip()
-        headers = ['Diameter','Spools',f'{fl} %',f'{pl} %','Overall %','Diff (days)','Status',f'{fl} Start',f'{fl} End',f'{pl} End','Forecast End']
+        phases = sched.get('phase_order', ['fab'])
+        phase_colors = ['4472C4', 'ED7D31', '8E44AD', '27AE60']
+        phase_headers = [f'{ph.capitalize()} %' for ph in phases]
+        headers = ['Diameter','Spools'] + phase_headers + ['Overall %','Diff (days)','Status','Start','End','Forecast End']
         for col, h in enumerate(headers, 1):
             c = ws.cell(row, col, h); c.font = hf; c.fill = hfill; c.alignment = Alignment(horizontal='center', wrap_text=True); c.border = thin
         row += 1
@@ -1090,23 +1112,29 @@ def api_report_download(project):
             dk = d['diameter']; fcd = fc_diams.get(dk, {})
             ws.cell(row, 1, dk).font = bfb; ws.cell(row, 1).border = thin
             ws.cell(row, 2, d['spool_count']).font = bf; ws.cell(row, 2).alignment = center; ws.cell(row, 2).border = thin
-            c3 = ws.cell(row, 3, d.get('fab_pct', 0)); c3.font = bfb; c3.alignment = center; c3.border = thin
-            if d.get('fab_pct', 0) >= 100: c3.fill = green_fill
-            c4 = ws.cell(row, 4, d.get('paint_pct', 0)); c4.font = bfb; c4.alignment = center; c4.border = thin
-            if d.get('paint_pct', 0) >= 100: c4.fill = green_fill
-            ws.cell(row, 5, d['actual_pct']).font = bfb; ws.cell(row, 5).alignment = center; ws.cell(row, 5).border = thin
+            col_idx = 3
+            for ph in phases:
+                ph_val = (d.get('phase_avgs') or {}).get(ph, 0)
+                cp = ws.cell(row, col_idx, ph_val); cp.font = bfb; cp.alignment = center; cp.border = thin
+                if ph_val >= 100: cp.fill = green_fill
+                col_idx += 1
+            ws.cell(row, col_idx, d['actual_pct']).font = bfb; ws.cell(row, col_idx).alignment = center; ws.cell(row, col_idx).border = thin
+            col_idx += 1
             diff_val = d['diff']; diff_label = f"+{diff_val}d" if diff_val > 0 else f"{diff_val}d" if diff_val < 0 else "0d"
-            c6 = ws.cell(row, 6, diff_label); c6.alignment = center; c6.border = thin
+            c6 = ws.cell(row, col_idx, diff_label); c6.alignment = center; c6.border = thin
             c6.font = Font(size=10, color='27AE60' if diff_val > 0 else 'E74C3C' if diff_val < 0 else '333333')
-            sc = ws.cell(row, 7, status_label.get(d['status'], d['status']))
+            col_idx += 1
+            sc = ws.cell(row, col_idx, status_label.get(d['status'], d['status']))
             sc.font = bfb; sc.alignment = center; sc.border = thin
             if d['status'] == 'on_time': sc.fill = green_fill
             elif d['status'] == 'at_risk': sc.fill = orange_fill
             elif d['status'] == 'delayed': sc.fill = red_fill
-            ws.cell(row, 8, d['fab_start']).font = bf; ws.cell(row, 8).border = thin
-            ws.cell(row, 9, d['fab_end']).font = bf; ws.cell(row, 9).border = thin
-            ws.cell(row, 10, d.get('paint_end','')).font = bf; ws.cell(row, 10).border = thin
-            ws.cell(row, 11, fcd.get('forecast_end', '')).font = bf; ws.cell(row, 11).border = thin
+            col_idx += 1
+            ws.cell(row, col_idx, d['fab_start']).font = bf; ws.cell(row, col_idx).border = thin
+            col_idx += 1
+            ws.cell(row, col_idx, d.get('paint_end','') or d['fab_end']).font = bf; ws.cell(row, col_idx).border = thin
+            col_idx += 1
+            ws.cell(row, col_idx, fcd.get('forecast_end', '')).font = bf; ws.cell(row, col_idx).border = thin
             row += 1
         row += 1
         # Expediting + Gantt + Rate + Results + Transit — same as before
@@ -1168,94 +1196,101 @@ def api_report_download(project):
                 c.font = Font(bold=True, size=7, color='FFFFFF'); c.alignment = Alignment(horizontal='center', wrap_text=True); c.border = thin
                 ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 5.5
             row += 1
-            fab_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
-            paint_fill = PatternFill(start_color='ED7D31', end_color='ED7D31', fill_type='solid')
+            phase_fills = [PatternFill(start_color=c, end_color=c, fill_type='solid') for c in phase_colors[:len(phases)]]
             saved_fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
             forecast_fill = PatternFill(start_color='FFC000', end_color='FFC000', fill_type='solid')
             today_border = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('thin',color='C0C0C0'),bottom=Side('thin',color='C0C0C0'))
             today_bar_border = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('medium',color='333333'),bottom=Side('medium',color='333333'))
+            # Map phase names to schedule task_types
+            phase_task_map = {'fab': 'fabrication', 'paint': 'painting'}
             for d in sched['diameters']:
                 dk = d['diameter']; fcd = fc_diams.get(dk, {})
-                fab_pct = fcd.get('fab_pct', 0) or 0; paint_pct = fcd.get('paint_pct', 0) or 0
                 overall_pct = fcd.get('overall_pct', 0) or 0; dm_started = fcd.get('started', False)
                 dm_fc_end_str = fcd.get('forecast_end', ''); dm_fc_end = date.fromisoformat(dm_fc_end_str) if dm_fc_end_str else None
-                fab_ps = date.fromisoformat(d['fab_start']); fab_pe = date.fromisoformat(d['fab_end'])
-                paint_ps_str = d.get('paint_start',''); paint_pe_str = d.get('paint_end','')
-                paint_ps = date.fromisoformat(paint_ps_str) if paint_ps_str else None
-                paint_pe = date.fromisoformat(paint_pe_str) if paint_pe_str else None
-                if has_expediting and commit_end:
-                    exp_fab_s = prod_start + timedelta(days=(fab_ps - prod_start).days * ratio)
-                    exp_fab_e = prod_start + timedelta(days=(fab_pe - prod_start).days * ratio)
-                    if exp_fab_e > commit_end: exp_fab_e = commit_end
-                    if paint_ps and paint_pe:
-                        exp_paint_s = prod_start + timedelta(days=(paint_ps - prod_start).days * ratio)
-                        exp_paint_e = prod_start + timedelta(days=(paint_pe - prod_start).days * ratio)
-                        if exp_paint_s < exp_fab_e: exp_paint_s = exp_fab_e
-                        if exp_paint_e < exp_paint_s: exp_paint_e = exp_paint_s
-                        if exp_paint_e > commit_end: exp_paint_e = commit_end
-                    else: exp_paint_s = None; exp_paint_e = None
-                else:
-                    exp_fab_s = fab_ps; exp_fab_e = fab_pe; exp_paint_s = paint_ps; exp_paint_e = paint_pe
-                # FAB ROW
-                ws.cell(row, 1, dk).font = Font(bold=True, size=11, color='2F5496'); ws.cell(row, 1).border = thin
-                ws.cell(row, 2, fl).font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
-                pct_cell = ws.cell(row, 3)
-                if fab_pct >= 100: pct_cell.value = '\u2713'; pct_cell.font = Font(bold=True, size=10, color='27AE60')
-                elif fab_pct > 0: pct_cell.value = f'{fab_pct:.0f}%'; pct_cell.font = Font(bold=True, size=8, color='4472C4')
-                else: pct_cell.value = '-'; pct_cell.font = Font(size=8, color='AAAAAA')
-                pct_cell.alignment = center; pct_cell.border = thin
-                for i, (ws_d, we_d) in enumerate(weeks):
-                    col = 4 + i; cell = ws.cell(row, col); cell.border = thin
-                    in_std = fab_ps <= we_d and fab_pe >= ws_d
-                    in_exp = exp_fab_s <= we_d and exp_fab_e >= ws_d
-                    is_saved = has_expediting and in_std and not in_exp
-                    is_today_col = today_col and col == today_col
-                    if in_exp:
-                        cell.fill = fab_fill
-                        if is_today_col and 0 < fab_pct < 100: cell.value = f'{fab_pct:.0f}%'; cell.font = Font(bold=True, size=7, color='FFFFFF'); cell.alignment = center
-                        elif fab_pct >= 100 and we_d < today: cell.value = '\u2713'; cell.font = Font(bold=True, size=8, color='FFFFFF'); cell.alignment = center
-                    elif is_saved:
-                        cell.fill = saved_fill; cell.value = '\u2713'; cell.font = Font(size=7, color='A9D18E'); cell.alignment = center
-                    if is_today_col: cell.border = today_bar_border if in_exp else today_border
-                row += 1
-                # PAINT ROW
-                ws.cell(row, 1, '').border = thin
-                ws.cell(row, 2, pl).font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
-                pct_cell = ws.cell(row, 3)
-                if paint_pct >= 100: pct_cell.value = '\u2713'; pct_cell.font = Font(bold=True, size=10, color='27AE60')
-                elif paint_pct > 0: pct_cell.value = f'{paint_pct:.0f}%'; pct_cell.font = Font(bold=True, size=8, color='ED7D31')
-                else: pct_cell.value = '-'; pct_cell.font = Font(size=8, color='AAAAAA')
-                pct_cell.alignment = center; pct_cell.border = thin
-                for i, (ws_d, we_d) in enumerate(weeks):
-                    col = 4 + i; cell = ws.cell(row, col); cell.border = thin
-                    in_std_paint = paint_ps and paint_pe and paint_ps <= we_d and paint_pe >= ws_d
-                    in_exp_paint = exp_paint_s and exp_paint_e and exp_paint_s <= we_d and exp_paint_e >= ws_d
-                    in_std_fab = fab_ps <= we_d and fab_pe >= ws_d
-                    in_exp_fab = exp_fab_s <= we_d and exp_fab_e >= ws_d
-                    is_saved = has_expediting and (in_std_paint or in_std_fab) and not in_exp_paint and not in_exp_fab
-                    is_today_col = today_col and col == today_col
-                    is_forecast = dm_started and dm_fc_end and overall_pct < 100 and dm_fc_end >= ws_d and dm_fc_end <= we_d
-                    if in_exp_paint:
-                        cell.fill = paint_fill
-                        if is_today_col and 0 < paint_pct < 100: cell.value = f'{paint_pct:.0f}%'; cell.font = Font(bold=True, size=7, color='FFFFFF'); cell.alignment = center
-                        elif paint_pct >= 100 and we_d < today: cell.value = '\u2713'; cell.font = Font(bold=True, size=8, color='FFFFFF'); cell.alignment = center
-                    elif is_saved:
-                        cell.fill = saved_fill; cell.value = '\u2713'; cell.font = Font(size=7, color='A9D18E'); cell.alignment = center
-                    elif is_forecast:
-                        cell.fill = forecast_fill; cell.value = '\u25c6'; cell.font = Font(size=8, color='C00000'); cell.alignment = center
-                    if is_today_col: cell.border = today_bar_border if in_exp_paint else today_border
-                row += 1
+                # Get phase percentages from phase_avgs
+                dm_phase_avgs = fcd.get('phase_avgs', {}) or d.get('phase_avgs', {}) or {}
+                # Parse schedule dates for each phase
+                phase_dates = {}
+                # First phase always uses fab_start/fab_end
+                if phases:
+                    fs_str = d.get('fab_start',''); fe_str = d.get('fab_end','')
+                    if fs_str and fe_str:
+                        phase_dates[phases[0]] = (date.fromisoformat(fs_str), date.fromisoformat(fe_str))
+                # Second phase (if exists) uses paint_start/paint_end
+                if len(phases) > 1:
+                    ps_str = d.get('paint_start',''); pe_str = d.get('paint_end','')
+                    if ps_str and pe_str:
+                        phase_dates[phases[1]] = (date.fromisoformat(ps_str), date.fromisoformat(pe_str))
+                # Compute expedited dates per phase
+                exp_phase_dates = {}
+                prev_exp_end = None
+                for pi, ph in enumerate(phases):
+                    if ph not in phase_dates: continue
+                    ph_ps, ph_pe = phase_dates[ph]
+                    if has_expediting and commit_end:
+                        exp_s = prod_start + timedelta(days=(ph_ps - prod_start).days * ratio)
+                        exp_e = prod_start + timedelta(days=(ph_pe - prod_start).days * ratio)
+                        if exp_e > commit_end: exp_e = commit_end
+                        if prev_exp_end and exp_s < prev_exp_end: exp_s = prev_exp_end
+                        if exp_e < exp_s: exp_e = exp_s
+                    else:
+                        exp_s = ph_ps; exp_e = ph_pe
+                    exp_phase_dates[ph] = (exp_s, exp_e)
+                    prev_exp_end = exp_e
+                # Render one row per phase
+                for pi, ph in enumerate(phases):
+                    ph_pct = dm_phase_avgs.get(ph, 0) or 0
+                    ph_color = phase_colors[pi % len(phase_colors)]
+                    ph_fill = phase_fills[pi % len(phase_fills)]
+                    is_first = pi == 0
+                    # Diameter label only on first row
+                    if is_first:
+                        ws.cell(row, 1, dk).font = Font(bold=True, size=11, color='2F5496'); ws.cell(row, 1).border = thin
+                    else:
+                        ws.cell(row, 1, '').border = thin
+                    ws.cell(row, 2, ph.capitalize()).font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
+                    pct_cell = ws.cell(row, 3)
+                    if ph_pct >= 100: pct_cell.value = '\u2713'; pct_cell.font = Font(bold=True, size=10, color='27AE60')
+                    elif ph_pct > 0: pct_cell.value = f'{ph_pct:.0f}%'; pct_cell.font = Font(bold=True, size=8, color=ph_color)
+                    else: pct_cell.value = '-'; pct_cell.font = Font(size=8, color='AAAAAA')
+                    pct_cell.alignment = center; pct_cell.border = thin
+                    if ph in phase_dates and ph in exp_phase_dates:
+                        ph_ps, ph_pe = phase_dates[ph]
+                        exp_s, exp_e = exp_phase_dates[ph]
+                        is_last_phase = pi == len(phases) - 1
+                        for i, (ws_d, we_d) in enumerate(weeks):
+                            col = 4 + i; cell = ws.cell(row, col); cell.border = thin
+                            in_std = ph_ps <= we_d and ph_pe >= ws_d
+                            in_exp = exp_s <= we_d and exp_e >= ws_d
+                            is_saved_cell = has_expediting and in_std and not in_exp
+                            is_today_col = today_col and col == today_col
+                            is_forecast = is_last_phase and dm_started and dm_fc_end and overall_pct < 100 and dm_fc_end >= ws_d and dm_fc_end <= we_d
+                            if in_exp:
+                                cell.fill = ph_fill
+                                if is_today_col and 0 < ph_pct < 100: cell.value = f'{ph_pct:.0f}%'; cell.font = Font(bold=True, size=7, color='FFFFFF'); cell.alignment = center
+                                elif ph_pct >= 100 and we_d < today: cell.value = '\u2713'; cell.font = Font(bold=True, size=8, color='FFFFFF'); cell.alignment = center
+                            elif is_saved_cell:
+                                cell.fill = saved_fill; cell.value = '\u2713'; cell.font = Font(size=7, color='A9D18E'); cell.alignment = center
+                            elif is_forecast:
+                                cell.fill = forecast_fill; cell.value = '\u25c6'; cell.font = Font(size=8, color='C00000'); cell.alignment = center
+                            if is_today_col: cell.border = today_bar_border if in_exp else today_border
+                    else:
+                        for i in range(len(weeks)):
+                            col = 4 + i; cell = ws.cell(row, col); cell.border = thin
+                            if today_col and col == today_col: cell.border = today_border
+                    row += 1
             row += 1
             ws.cell(row, 1, 'Legend:').font = Font(bold=True, size=9)
-            lg = ws.cell(row, 2, fl); lg.fill = fab_fill; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
-            lg = ws.cell(row, 3, pl); lg.fill = paint_fill; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
+            legend_col = 2
+            for pi, ph in enumerate(phases):
+                lg = ws.cell(row, legend_col, ph.capitalize()); lg.fill = phase_fills[pi % len(phase_fills)]; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
+                legend_col += 1
             if has_expediting:
-                lg = ws.cell(row, 4, 'Saved \u2713'); lg.fill = saved_fill; lg.font = Font(size=8, color='A9D18E'); lg.alignment = center
-                lg = ws.cell(row, 5, '\u25c6 Forecast'); lg.fill = forecast_fill; lg.font = Font(size=8, color='C00000'); lg.alignment = center
-                ws.cell(row, 6, '| Today |').font = Font(bold=True, size=8, color='FF0000')
-            else:
-                lg = ws.cell(row, 4, '\u25c6 Forecast'); lg.fill = forecast_fill; lg.font = Font(size=8, color='C00000'); lg.alignment = center
-                ws.cell(row, 5, '| Today |').font = Font(bold=True, size=8, color='FF0000')
+                lg = ws.cell(row, legend_col, 'Saved \u2713'); lg.fill = saved_fill; lg.font = Font(size=8, color='A9D18E'); lg.alignment = center
+                legend_col += 1
+            lg = ws.cell(row, legend_col, '\u25c6 Forecast'); lg.fill = forecast_fill; lg.font = Font(size=8, color='C00000'); lg.alignment = center
+            legend_col += 1
+            ws.cell(row, legend_col, '| Today |').font = Font(bold=True, size=8, color='FF0000')
             row += 2
         # Production Rate
         actual_weld = fc_data.get('actual_weld_ipd', 0) or 0
@@ -1265,10 +1300,13 @@ def api_report_download(project):
         ws.cell(row, 1, "PRODUCTION RATE / \u751f\u4ea7\u7387").font = Font(bold=True, size=12, color='2F5496')
         row += 1
         rate_fill = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
-        for label, actual, target, unit in [
-            ('Welding / \u710a\u63a5', actual_weld, weld_cap, 'linear inches/day'),
-            (sett.get('paint_label', 'Paint / \u6d82\u88c5'), actual_paint, paint_cap, 'm\u00b2/day'),
-        ]:
+        rate_items = [('Welding / \u710a\u63a5', actual_weld, weld_cap, 'linear inches/day')]
+        # Only show surface rate if project has surface steps
+        has_surface = any(s.get('hours_variable') == 'surface' for s in get_project_steps(project))
+        if has_surface:
+            surface_label = phases[-1].capitalize() if len(phases) > 1 else 'Surface'
+            rate_items.append((f'{surface_label} / \u6d82\u88c5', actual_paint, paint_cap, 'm\u00b2/day'))
+        for label, actual, target, unit in rate_items:
             c1 = ws.cell(row, 1, label); c1.font = Font(bold=True, size=10); c1.fill = rate_fill; c1.border = thin
             c2 = ws.cell(row, 2, actual); c2.font = Font(bold=True, size=12, color='27AE60' if actual >= target else 'E74C3C'); c2.alignment = center; c2.fill = rate_fill; c2.border = thin
             c3 = ws.cell(row, 3, f"/ {target}"); c3.font = Font(size=9, color='888888'); c3.fill = rate_fill; c3.border = thin
@@ -1464,8 +1502,8 @@ async function load(){
   const [dr, sr] = await Promise.all([fetch(`/api/project/${P}/dashboard`), fetch(`/api/project/${P}/spools`)]);
   const st = await dr.json(); all = await sr.json();
   const fc = st.forecast||{}, sett = st.settings||{}, schd = st.schedule_data, pr = st.production_rate||{};
-  const fabLabel = sett.fab_label || 'Fab / \u5236\u4f5c';
-  const paintLabel = sett.paint_label || 'Paint / \u6d82\u88c5';
+  const phases = st.phase_order || schd?.phase_order || ['fab'];
+  const phaseColors = ['#4472C4', '#ED7D31', '#8E44AD', '#27AE60'];
   document.getElementById('subtitle').textContent=`${st.total} spools \u00b7 ${st.overall_pct}% \u00b7 ${st.completed} done / \u5b8c\u6210 ${st.completed}`;
   document.getElementById('stats').innerHTML=[
     {v:st.total,l:'Total / \u603b\u6570'},{v:st.completed,l:'Done / \u5b8c\u6210',c:'#27ae60'},
@@ -1561,8 +1599,13 @@ async function load(){
       } else if(v.avg_pct > 0){cls='d-ontrack';badge='WIP';badgeCls='pb-ontrack';barColor='#4472C4';}
     } else if(v.avg_pct > 0){cls='d-ontrack';barColor='#4472C4';}
     else if(v.avg_pct >= 100){cls='d-ahead';barColor='#27ae60';}
+    const phAvgs = v.phase_avgs || {};
+    const phaseBars = phases.map((ph,pi) => {
+      const pv = phAvgs[ph]||0;
+      return `<div style="margin-top:${pi===0?6:2}px"><div style="font-size:8px;color:#aaa">${ph.charAt(0).toUpperCase()+ph.slice(1)}</div><div class="pbar-bg" style="height:8px"><div class="pbar-fill" style="width:${pv}%;background:${phaseColors[pi%phaseColors.length]};height:100%"></div></div></div>`;
+    }).join('');
     return `<div class="diam-card ${cls}"><div class="pace-badge ${badgeCls}">${badge}</div><div class="d">${d}</div><div class="p">${v.total} spools</div>
-      <div class="pbar-bg" style="margin-top:6px"><div class="pbar-fill" style="width:${v.avg_pct}%;background:${barColor}"></div></div>
+      ${phaseBars}
       <div style="font-size:12px;margin-top:4px;font-weight:600;color:${barColor}">${v.avg_pct}%</div>
       ${paceText?`<div style="font-size:9px;color:#888;margin-top:2px">${paceText}</div>`:''}</div>`;
   }).join('');
@@ -1793,8 +1836,8 @@ async function load(){
   const releaseStepSet = new Set(d.release_steps || []);
   let html = '';
   const st = d.stats, sch = d.schedule, sett = d.settings||{}, fc = d.forecast||{};
-  const fabLabel = sett.fab_label || 'Fab / \u5236\u4f5c';
-  const paintLabel = sett.paint_label || 'Paint / \u6d82\u88c5';
+  const phases = d.phase_order || sch?.phase_order || ['fab'];
+  const phaseColors = ['#4472C4', '#ED7D31', '#8E44AD', '#27AE60'];
   const overallStatus = sch ? sch.overall_status : 'not_started';
   const stdWeeks = parseInt(sett.standard_weeks||'9');
   const wksSaved = parseInt(sett.committed_weeks_saved||'0');
@@ -1824,15 +1867,14 @@ async function load(){
     sch.diameters.forEach(dm => {
       const color = STATUS_COLORS[dm.status] || '#95a5a6';
       const fdi = fcDiams[dm.diameter] || {};
-      const fabP = dm.fab_pct||fdi.fab_pct||0, paintP = dm.paint_pct||fdi.paint_pct||0;
+      const dmPhaseAvgs = dm.phase_avgs || fdi.phase_avgs || {};
+      const phaseInfo = phases.map((ph,pi) => `${ph.charAt(0).toUpperCase()+ph.slice(1)}: <strong>${dmPhaseAvgs[ph]||0}%</strong>`).join(' \u00b7 ');
+      const phaseBars = phases.map((ph,pi) => `<div style="flex:1"><div style="font-size:8px;color:#aaa">${ph.charAt(0).toUpperCase()+ph.slice(1)}</div><div class="expected-bar"><div class="actual-fill" style="width:${dmPhaseAvgs[ph]||0}%;background:${phaseColors[pi%phaseColors.length]};border-radius:6px"></div></div></div>`).join('');
       html += `<div class="diam-row" style="border-left:4px solid ${color}">
         <div class="d-name">${dm.diameter}</div>
         <div class="d-info">
-          <div style="font-size:12px;color:#888">${dm.spool_count} spools \u00b7 ${fabLabel}: <strong>${fabP}%</strong> \u00b7 ${paintLabel}: <strong>${paintP}%</strong> \u00b7 Overall / \u603b: <strong>${dm.actual_pct}%</strong></div>
-          <div style="display:flex;gap:4px;margin-top:6px">
-            <div style="flex:1"><div style="font-size:8px;color:#aaa">${fabLabel}</div><div class="expected-bar"><div class="actual-fill" style="width:${fabP}%;background:#4472C4;border-radius:6px"></div></div></div>
-            <div style="flex:1"><div style="font-size:8px;color:#aaa">${paintLabel}</div><div class="expected-bar"><div class="actual-fill" style="width:${paintP}%;background:#ED7D31;border-radius:6px"></div></div></div>
-          </div>
+          <div style="font-size:12px;color:#888">${dm.spool_count} spools \u00b7 ${phaseInfo} \u00b7 Overall / \u603b: <strong>${dm.actual_pct}%</strong></div>
+          <div style="display:flex;gap:4px;margin-top:6px">${phaseBars}</div>
           <div style="font-size:10px;color:#aaa;margin-top:2px">${fdi.remaining_raf?'RAF: '+fdi.remaining_raf+' in':''} ${fdi.remaining_m2?'\u00b7 Surface: '+fdi.remaining_m2+' m\u00b2':''}</div>
         </div>
         <div class="d-status"><span class="status-badge status-${dm.status}" style="font-size:11px;padding:4px 10px">${STATUS_LABELS[dm.status]||dm.status}</span></div>
@@ -1881,75 +1923,73 @@ async function load(){
 
       sch.diameters.forEach((dm, dmIdx) => {
         const fdi = fcDiams[dm.diameter] || {};
-        const fabP = fdi.fab_pct||0, paintP = fdi.paint_pct||0, overallP = fdi.overall_pct||0;
+        const dmPhaseAvgs = fdi.phase_avgs || dm.phase_avgs || {};
+        const overallP = fdi.overall_pct||0;
         const dmFcEnd = fdi.forecast_end ? new Date(fdi.forecast_end) : null;
         const dmStarted = fdi.started;
-        const fabPs = new Date(dm.fab_start), fabPe = new Date(dm.fab_end);
-        const paintPs = new Date(dm.paint_start), paintPe = new Date(dm.paint_end);
-        let expFabStart, expFabEnd, expPaintStart, expPaintEnd;
-        if(hasExpediting){
-          expFabStart = new Date(Math.min(psDate.getTime() + (fabPs-psDate)*ratio, commitEnd.getTime()));
-          expFabEnd = new Date(Math.min(psDate.getTime() + (fabPe-psDate)*ratio, commitEnd.getTime()));
-          expPaintStart = new Date(Math.min(psDate.getTime() + (paintPs-psDate)*ratio, commitEnd.getTime()));
-          expPaintEnd = new Date(Math.min(psDate.getTime() + (paintPe-psDate)*ratio, commitEnd.getTime()));
-          if(expPaintStart < expFabEnd) expPaintStart = expFabEnd;
-          if(expPaintEnd < expPaintStart) expPaintEnd = expPaintStart;
-        } else {
-          expFabStart = fabPs; expFabEnd = fabPe; expPaintStart = paintPs; expPaintEnd = paintPe;
-        }
-        // FAB ROW
-        html += `<tr>`;
-        html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${overallP}%"></div></div></td>`;
-        html += `<td class="g-label" style="font-size:9px;color:#666">${fabLabel.split('/')[0].trim()}</td>`;
-        weeks.forEach(w => {
-          const inStd = fabPs<=w.end && fabPe>=w.start;
-          const inExp = expFabStart<=w.end && expFabEnd>=w.start;
-          const isSaved = hasExpediting && inStd && !inExp;
-          const isToday = w.current;
-          let content = '';
-          if(inExp){ content = `<div class="g-bar g-exp-fab"></div>`;
-            if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${fabP}%</div>`;
-            else if(fabP >= 100 && w.end < today) content += `<div class="g-pct" style="color:#fff">\u2713</div>`;
-          } else if(isSaved){ content = `<div class="g-bar g-saved"></div>`; }
-          if(isToday && !inExp){
-            if(fabP > 0 && fabP < 100) content = `<div class="g-bar g-exp-fab"></div><div class="g-today-line"></div><div class="g-pct">${fabP}%</div>`;
-            else content += `<div class="g-today-line"></div>`;
-          }
-          html += `<td>${content}</td>`;
+        // Parse schedule dates: first phase = fab, second = paint
+        const phaseDates = {};
+        if(phases.length > 0 && dm.fab_start && dm.fab_end) phaseDates[phases[0]] = {s:new Date(dm.fab_start), e:new Date(dm.fab_end)};
+        if(phases.length > 1 && dm.paint_start && dm.paint_end) phaseDates[phases[1]] = {s:new Date(dm.paint_start), e:new Date(dm.paint_end)};
+        // Compute expedited dates per phase
+        const expDates = {};
+        let prevExpEnd = null;
+        phases.forEach(ph => {
+          if(!phaseDates[ph]) return;
+          const {s:phS, e:phE} = phaseDates[ph];
+          let expS, expE;
+          if(hasExpediting){
+            expS = new Date(Math.min(psDate.getTime() + (phS-psDate)*ratio, commitEnd.getTime()));
+            expE = new Date(Math.min(psDate.getTime() + (phE-psDate)*ratio, commitEnd.getTime()));
+            if(prevExpEnd && expS < prevExpEnd) expS = prevExpEnd;
+            if(expE < expS) expE = expS;
+          } else { expS = phS; expE = phE; }
+          expDates[ph] = {s:expS, e:expE};
+          prevExpEnd = expE;
         });
-        html += `</tr>`;
-        // PAINT ROW
-        html += `<tr><td class="g-label" style="font-size:9px;color:#666">${paintLabel.split('/')[0].trim()}</td>`;
         const isLast = dmIdx===lastDiamIdx;
-        weeks.forEach(w => {
-          const inStd = paintPs<=w.end && paintPe>=w.start;
-          const inExp = expPaintStart<=w.end && expPaintEnd>=w.start;
-          const inStdFab = fabPs<=w.end && fabPe>=w.start;
-          const inExpFab = expFabStart<=w.end && expFabEnd>=w.start;
-          const isSaved = hasExpediting && (inStd || inStdFab) && !inExp && !inExpFab;
-          const isToday = w.current;
-          const isForecastPaint = dmStarted && dmFcEnd && overallP<100 && dmFcEnd>=w.start && dmFcEnd<=w.end;
-          let content = '';
-          if(inExp){ content = `<div class="g-bar g-exp-paint"></div>`;
-            if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${paintP}%</div>`;
-            else if(paintP >= 100 && w.end < today) content += `<div class="g-pct" style="color:#fff">\u2713</div>`;
-          } else if(isSaved){ content = `<div class="g-bar g-saved"></div>`; }
-          if(isForecastPaint) content += `<div class="g-bar g-forecast"></div>`;
-          if(isToday && !inExp){
-            if(paintP > 0 && paintP < 100) content = `<div class="g-bar g-exp-paint"></div><div class="g-today-line"></div><div class="g-pct">${paintP}%</div>`;
-            else content += `<div class="g-today-line"></div>`;
-          }
-          if(isToday && isLast) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11">TODAY</div>`;
-          html += `<td>${content}</td>`;
+        // One row per phase
+        html += `<tr>`;
+        html += `<td class="g-label" rowspan="${phases.length}" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${overallP}%"></div></div></td>`;
+        phases.forEach((ph, pi) => {
+          if(pi > 0) html += `<tr>`;
+          const phP = dmPhaseAvgs[ph]||0;
+          const phColor = phaseColors[pi % phaseColors.length];
+          html += `<td class="g-label" style="font-size:9px;color:#666">${ph.charAt(0).toUpperCase()+ph.slice(1)}</td>`;
+          const isLastPhase = pi === phases.length - 1;
+          weeks.forEach(w => {
+            const isToday = w.current;
+            let content = '';
+            if(phaseDates[ph] && expDates[ph]){
+              const {s:phS, e:phE} = phaseDates[ph];
+              const {s:expS, e:expE} = expDates[ph];
+              const inStd = phS<=w.end && phE>=w.start;
+              const inExp = expS<=w.end && expE>=w.start;
+              const isSaved = hasExpediting && inStd && !inExp;
+              const isForecast = isLastPhase && dmStarted && dmFcEnd && overallP<100 && dmFcEnd>=w.start && dmFcEnd<=w.end;
+              if(inExp){ content = `<div class="g-bar" style="background:${phColor};position:absolute;top:2px;left:2px;right:2px;bottom:2px;border-radius:3px"></div>`;
+                if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${phP}%</div>`;
+                else if(phP >= 100 && w.end < today) content += `<div class="g-pct" style="color:#fff">\u2713</div>`;
+              } else if(isSaved){ content = `<div class="g-bar g-saved"></div>`; }
+              if(isForecast) content += `<div class="g-bar g-forecast"></div>`;
+              if(isToday && !inExp){
+                if(phP > 0 && phP < 100) content = `<div class="g-bar" style="background:${phColor};position:absolute;top:2px;left:2px;right:2px;bottom:2px;border-radius:3px"></div><div class="g-today-line"></div><div class="g-pct">${phP}%</div>`;
+                else content += `<div class="g-today-line"></div>`;
+              }
+            } else {
+              if(isToday) content += `<div class="g-today-line"></div>`;
+            }
+            if(isToday && isLast && isLastPhase) content += `<div style="position:absolute;bottom:-13px;left:50%;transform:translateX(-50%);font-size:7px;color:#e74c3c;font-weight:700;z-index:11">TODAY</div>`;
+            html += `<td>${content}</td>`;
+          });
+          html += `</tr>`;
         });
-        html += `</tr>`;
         html += `<tr><td colspan="${numWeeks+2}" style="height:2px;background:#f0f2f5;border:none"></td></tr>`;
       });
 
       html += `</tbody></table></div>
         <div class="legend">
-          <span><span class="box" style="background:#4472C4"></span> ${fabLabel}</span>
-          <span><span class="box" style="background:#ED7D31"></span> ${paintLabel}</span>
+          ${phases.map((ph,pi) => `<span><span class="box" style="background:${phaseColors[pi%phaseColors.length]}"></span> ${ph.charAt(0).toUpperCase()+ph.slice(1)}</span>`).join('')}
           ${hasExpediting?'<span><span class="box" style="background:#E2EFDA;border:1px solid #A9D18E"></span> Saved / \u8282\u7701 \u2713</span>':''}
           <span><span class="box" style="border:2px dashed #e74c3c;width:12px;height:8px;display:inline-block;border-radius:2px"></span> Forecast / \u9884\u6d4b</span>
           <span><span class="box" style="background:#e74c3c;width:3px"></span> Today / \u4eca\u5929</span>
@@ -1965,11 +2005,11 @@ async function load(){
             <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:24px;font-weight:700;color:${actualWeld>=weldCap?'#27ae60':'#e74c3c'}">${actualWeld}</span><span style="color:#888;font-size:12px">/ ${weldCap} target</span></div>
             <div class="expected-bar" style="margin-top:4px"><div class="actual-fill" style="width:${Math.min(actualWeld/Math.max(weldCap,1)*100,100)}%;background:${actualWeld>=weldCap?'#27ae60':'#e74c3c'}"></div></div>
           </div>
-          <div style="flex:1;min-width:200px">
-            <div style="font-size:12px;color:#888;margin-bottom:4px">${paintLabel} (m\u00b2/day)</div>
+          ${paintCap > 0 ? `<div style="flex:1;min-width:200px">
+            <div style="font-size:12px;color:#888;margin-bottom:4px">${phases.length>1?phases[phases.length-1].charAt(0).toUpperCase()+phases[phases.length-1].slice(1):'Surface'} / \u6d82\u88c5 (m\u00b2/day)</div>
             <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:24px;font-weight:700;color:${actualPaint>=paintCap?'#27ae60':'#e74c3c'}">${actualPaint}</span><span style="color:#888;font-size:12px">/ ${paintCap} target</span></div>
             <div class="expected-bar" style="margin-top:4px"><div class="actual-fill" style="width:${Math.min(actualPaint/Math.max(paintCap,1)*100,100)}%;background:${actualPaint>=paintCap?'#27ae60':'#e74c3c'}"></div></div>
-          </div>
+          </div>` : ''}
         </div></div>`;
 
       // Results

@@ -2178,14 +2178,14 @@ SPOOL_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
   <div class="sub" id="sub-info">Loading...</div>
 </div>
 <div class="info-bar" id="info-bar"></div>
+<div style="padding:8px 16px;display:none" id="dwg-wrap">
+  <a class="btn" id="dwg-btn" target="_blank" style="width:100%;text-align:center;display:block;padding:10px;font-size:14px">\U0001f4c4 View Drawing / \u67e5\u770b\u56fe\u7eb8</a>
+</div>
 <div class="prog"><div class="big" id="prog-pct">--</div><div class="lbl">Progress / \u8fdb\u5ea6</div>
   <div class="pbar-bg" style="max-width:300px;margin:8px auto"><div class="pbar-fill" id="prog-bar" style="width:0%;background:#2F5496"></div></div>
 </div>
 <div class="op-input"><input id="operator" placeholder="Operator name / \u64cd\u4f5c\u5458\u59d3\u540d" value=""></div>
 <div class="checklist" id="steps"></div>
-<div style="padding:16px;text-align:center">
-  <a class="btn" id="dwg-btn" style="display:none" target="_blank">\U0001f4c4 View Drawing / \u67e5\u770b\u56fe\u7eb8</a>
-</div>
 <script>
 const P='{{project}}',S='{{spool_id}}';
 let stepDefs=[], stepMap={};
@@ -2228,8 +2228,8 @@ async function load(){
     const dr=await fetch(`/api/project/${P}/drawings/list`);
     const dl=await dr.json();
     if(dl.find(x=>x.spool_id===S)){
-      const btn=document.getElementById('dwg-btn');btn.style.display='inline-block';
-      btn.href=`/api/project/${P}/spool/${S}/drawing`;
+      document.getElementById('dwg-wrap').style.display='block';
+      document.getElementById('dwg-btn').href=`/api/project/${P}/spool/${S}/drawing`;
     }
   }catch(e){}
 }

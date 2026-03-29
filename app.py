@@ -984,7 +984,7 @@ def api_project_steps(project):
 # ── API: Schedule & Reports ──────────────────────────────────────────────────
 @app.route('/api/project/<project>/schedule', methods=['POST'])
 def api_set_schedule(project):
-    """Import schedule data. Accepts JSON array or {fab_start} for auto-calculation."""
+    """Import schedule data. Accepts JSON array or {start: 'YYYY-MM-DD'} for auto-calculation."""
     data = request.get_json()
     if not data: return jsonify({'error': 'No JSON data'}), 400
     count = 0
@@ -997,39 +997,57 @@ def api_set_schedule(project):
                 db_execute("INSERT INTO schedule (project,diameter,task_type,description,planned_start,planned_end,spool_count) VALUES (?,?,?,?,?,?,?) ON CONFLICT(project,diameter,task_type) DO UPDATE SET description=excluded.description,planned_start=excluded.planned_start,planned_end=excluded.planned_end,spool_count=excluded.spool_count",
                     (project, item['diameter'], item['task_type'], item.get('description',''), item['planned_start'], item['planned_end'], item.get('spool_count',0)))
             count += 1
-    elif isinstance(data, dict) and 'fab_start' in data:
-        fab_start = date.fromisoformat(data['fab_start'])
+    elif isinstance(data, dict) and ('start' in data or 'fab_start' in data):
+        start_date = date.fromisoformat(data.get('start', data.get('fab_start')))
         settings = get_project_settings(project)
         steps_def = get_project_steps(project)
         phase_order = get_phase_order(steps_def)
-        spd = json.loads(settings.get('spools_per_day', '{}'))
+        std_weeks = int(settings.get('standard_weeks', '9'))
         painting_days = int(settings.get('painting_days', '13'))
         diam_order = get_diameter_order(project)
-        spools = db_fetchall("SELECT main_diameter FROM spools WHERE project=?", (project,))
+        spools_rows = db_fetchall("SELECT main_diameter FROM spools WHERE project=?", (project,))
         diam_counts = {}
-        for s in spools:
+        for s in spools_rows:
             d = (s['main_diameter'] or '?').replace('"','')
+            if d == '?' or d == '0' or d == '': continue
             if d not in diam_counts: diam_counts[d] = 0
             diam_counts[d] += 1
-        current_fab = fab_start
-        for diam in diam_order:
+        total_spools = sum(diam_counts.values())
+        # Standard schedule: proportional distribution across standard_weeks
+        # One diameter at a time, largest first, each gets (count/total) share of total days
+        total_std_days = std_weeks * 7
+        # For multi-phase: first phase gets (total_std_days - painting_days), second phase gets painting_days per diameter
+        if len(phase_order) > 1:
+            fab_total_days = total_std_days - painting_days  # last diameter's paint must finish by end
+        else:
+            fab_total_days = total_std_days  # single phase uses all days
+        current_start = start_date
+        remaining_days = fab_total_days
+        first_phase = phase_order[0] if phase_order else 'fab'
+        for i, diam in enumerate(diam_order):
             if diam not in diam_counts: continue
             cnt = diam_counts[diam]
-            rate = float(spd.get(diam, 2.0))
-            fab_days = max(1, round(cnt / rate))
-            fab_end = current_fab + timedelta(days=fab_days)
+            # Proportional: this diameter gets its share of total days
+            if total_spools > 0:
+                if i == len([d for d in diam_order if d in diam_counts]) - 1:
+                    fab_days = remaining_days  # last diameter gets remainder
+                else:
+                    fab_days = max(1, round(fab_total_days * cnt / total_spools))
+            else:
+                fab_days = 1
+            remaining_days -= fab_days
+            fab_end = current_start + timedelta(days=fab_days)
             dk = f'{diam}"'
-            # Build schedule entries for each phase
             phase_entries = []
-            first_phase = phase_order[0] if phase_order else 'fab'
-            phase_entries.append((first_phase, current_fab, fab_end, f'{first_phase.capitalize()} {dk} ({cnt} spools)'))
-            # Secondary phases get follow-on schedule
+            phase_entries.append((first_phase, current_start, fab_end, f'{first_phase.capitalize()} {dk} ({cnt} spools)'))
+            # Secondary phases follow immediately after first phase for this diameter
             prev_end = fab_end
             for ph in phase_order[1:]:
                 ph_start = prev_end + timedelta(days=1)
                 ph_end = ph_start + timedelta(days=painting_days)
                 phase_entries.append((ph, ph_start, ph_end, f'{ph.capitalize()} {dk}'))
                 prev_end = ph_end
+            current_start = fab_end  # next diameter starts when this one's first phase ends
             for tt, sd, ed, desc in phase_entries:
                 if USE_PG:
                     db_execute("INSERT INTO schedule (project,diameter,task_type,description,planned_start,planned_end,spool_count) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (project,diameter,task_type) DO UPDATE SET description=EXCLUDED.description,planned_start=EXCLUDED.planned_start,planned_end=EXCLUDED.planned_end,spool_count=EXCLUDED.spool_count",
@@ -1038,8 +1056,6 @@ def api_set_schedule(project):
                     db_execute("INSERT INTO schedule (project,diameter,task_type,description,planned_start,planned_end,spool_count) VALUES (?,?,?,?,?,?,?) ON CONFLICT(project,diameter,task_type) DO UPDATE SET description=excluded.description,planned_start=excluded.planned_start,planned_end=excluded.planned_end,spool_count=excluded.spool_count",
                         (project, dk, tt, desc, str(sd), str(ed), cnt))
                 count += 1
-            overlap = max(1, round(fab_days * 0.4))
-            current_fab = current_fab + timedelta(days=fab_days - overlap)
     db_commit()
     return jsonify({'ok': True, 'entries': count})
 
@@ -1278,7 +1294,7 @@ def api_report_download(project):
                                 if is_today_col and 0 < ph_pct < 100: cell.value = f'{ph_pct:.0f}%'; cell.font = Font(bold=True, size=7, color='FFFFFF'); cell.alignment = center
                                 elif ph_pct >= 100 and we_d < today: cell.value = '\u2713'; cell.font = Font(bold=True, size=8, color='FFFFFF'); cell.alignment = center
                             elif is_saved_cell:
-                                cell.fill = saved_fill; cell.value = '\u2713'; cell.font = Font(size=7, color='A9D18E'); cell.alignment = center
+                                cell.fill = saved_fill
                             elif is_forecast:
                                 cell.fill = forecast_fill; cell.value = '\u25c6'; cell.font = Font(size=8, color='C00000'); cell.alignment = center
                             if is_today_col: cell.border = today_bar_border if in_exp else today_border
@@ -1687,7 +1703,6 @@ def api_report_pdf(project):
                                     cell_text = f'{ph_pct:.0f}%'
                             elif is_saved_cell:
                                 cell_bg = LIGHT_GREEN
-                                cell_text = '\u2713'
                             if is_forecast:
                                 if not in_exp: cell_bg = None  # transparent
                                 cell_text = '\u25c6'
@@ -2255,7 +2270,7 @@ REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vi
 .gantt-mini{overflow-x:auto}
 .gantt-table{border-collapse:collapse;width:100%;font-size:10px}
 .gantt-table th{background:#404040;color:#fff;padding:4px 3px;font-size:9px;white-space:nowrap;text-align:center;min-width:45px}
-.gantt-table td{padding:0;height:22px;position:relative;border:1px solid #f0f2f5;text-align:center;min-width:45px}
+.gantt-table td{padding:0;height:28px;position:relative;border:1px solid #f0f2f5;text-align:center;min-width:45px}
 .gantt-table .g-label{font-weight:600;padding:4px 6px;text-align:left;white-space:nowrap;background:#fff;border-right:2px solid #e8e8e8}
 .g-bar{position:absolute;top:2px;left:2px;right:2px;bottom:2px;border-radius:3px}
 .g-exp-fab{background:#4472C4}.g-exp-paint{background:#ED7D31}.g-saved{background:#E2EFDA;border:1px dashed #A9D18E}

@@ -224,31 +224,36 @@ def parse_route_cards(route_cards_dir):
     return spool_data
 
 
-def build_schedule(start_date, diameter_counts, spools_per_day, painting_days, diam_order, phase_order=None):
-    """Build schedule entries per diameter. Phase names come from step definitions."""
+def build_schedule(start_date, standard_weeks, diameter_counts, painting_days, diam_order, phase_order=None):
+    """Build standard schedule: proportional distribution across standard_weeks.
+    One diameter at a time, largest first. Each gets (count/total) share of total days."""
     if not phase_order:
         phase_order = ['fab']
+    total_spools = sum(diameter_counts.values())
+    total_std_days = standard_weeks * 7
+    first_phase = phase_order[0]
+    # For multi-phase: first phase total days = total - painting_days (last diameter paint must finish by end)
+    fab_total_days = total_std_days - painting_days if len(phase_order) > 1 else total_std_days
     schedule = []
-    current_fab = start_date
+    current_start = start_date
+    remaining_days = fab_total_days
+    active_diams = [d for d in diam_order if d in diameter_counts]
 
-    for diam in diam_order:
-        if diam not in diameter_counts:
-            continue
+    for i, diam in enumerate(active_diams):
         cnt = diameter_counts[diam]
-        rate = float(spools_per_day.get(diam, 2.0))
-        fab_days = max(1, round(cnt / rate))
-        fab_end = current_fab + timedelta(days=fab_days)
+        if i == len(active_diams) - 1:
+            fab_days = remaining_days  # last diameter gets remainder
+        else:
+            fab_days = max(1, round(fab_total_days * cnt / total_spools))
+        remaining_days -= fab_days
+        fab_end = current_start + timedelta(days=fab_days)
         dk = f'{diam}"'
-
-        # First phase = fabrication schedule
-        first_phase = phase_order[0]
         schedule.append({
             'diameter': dk, 'task_type': first_phase,
             'description': f'{first_phase.capitalize()} {dk} ({cnt} spools)',
-            'planned_start': str(current_fab), 'planned_end': str(fab_end),
+            'planned_start': str(current_start), 'planned_end': str(fab_end),
             'spool_count': cnt,
         })
-        # Secondary phases get follow-on schedule
         prev_end = fab_end
         for ph in phase_order[1:]:
             ph_start = prev_end + timedelta(days=1)
@@ -260,9 +265,7 @@ def build_schedule(start_date, diameter_counts, spools_per_day, painting_days, d
                 'spool_count': cnt,
             })
             prev_end = ph_end
-
-        overlap = max(1, round(fab_days * 0.4))
-        current_fab = current_fab + timedelta(days=fab_days - overlap)
+        current_start = fab_end  # next diameter starts when this one's first phase ends
 
     return schedule
 
@@ -377,7 +380,7 @@ def deploy(args):
             if p not in seen:
                 seen.add(p)
                 phase_order.append(p)
-    schedule = build_schedule(start, diameter_counts, spd, painting_days, diam_order, phase_order)
+    schedule = build_schedule(start, args.standard_weeks, diameter_counts, painting_days, diam_order, phase_order)
     r = session.post(f"{TRACKER_URL}/api/project/{args.project}/schedule", json=schedule)
     print(f"  Result: {r.json()}")
 

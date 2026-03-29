@@ -130,17 +130,25 @@ def init_db():
         import psycopg2
         c = psycopg2.connect(DATABASE_URL.replace('postgres://','postgresql://',1)); c.autocommit = True
         cur = c.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS spools (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, spool_full TEXT DEFAULT '', iso_no TEXT DEFAULT '', marking TEXT DEFAULT '', mk_number TEXT DEFAULT '', main_diameter TEXT DEFAULT '', line TEXT DEFAULT '', sequence INTEGER DEFAULT 0, project TEXT DEFAULT '', has_branches INTEGER DEFAULT 0, spool_type TEXT DEFAULT 'SPOOL', actual_weight_kg REAL DEFAULT 0, surface_m2 REAL DEFAULT 0, joint_count INTEGER DEFAULT 0, raf_inches REAL DEFAULT 0, created_at TIMESTAMP DEFAULT NOW(), UNIQUE(project, spool_id));
-            CREATE TABLE IF NOT EXISTS progress (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER NOT NULL, completed INTEGER DEFAULT 0, completed_by TEXT DEFAULT '', completed_at TIMESTAMP, remarks TEXT DEFAULT '', UNIQUE(project, spool_id, step_number));
-            CREATE TABLE IF NOT EXISTS activity_log (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER, action TEXT NOT NULL, operator TEXT DEFAULT '', timestamp TIMESTAMP DEFAULT NOW(), details TEXT DEFAULT '');
-            CREATE INDEX IF NOT EXISTS idx_progress_ps ON progress(project, spool_id);
-            CREATE INDEX IF NOT EXISTS idx_activity_ps ON activity_log(project, spool_id);
-            CREATE TABLE IF NOT EXISTS schedule (id SERIAL PRIMARY KEY, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start DATE NOT NULL, planned_end DATE NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type));
-            CREATE TABLE IF NOT EXISTS project_settings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key));
-            CREATE TABLE IF NOT EXISTS drawings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BYTEA NOT NULL, UNIQUE(project, spool_id));
-            CREATE TABLE IF NOT EXISTS project_steps (id SERIAL PRIMARY KEY, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', UNIQUE(project, step_number));
-        """); c.close()
+        # Execute each statement separately so one failure doesn't block the rest
+        pg_statements = [
+            "CREATE TABLE IF NOT EXISTS spools (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, spool_full TEXT DEFAULT '', iso_no TEXT DEFAULT '', marking TEXT DEFAULT '', mk_number TEXT DEFAULT '', main_diameter TEXT DEFAULT '', line TEXT DEFAULT '', sequence INTEGER DEFAULT 0, project TEXT DEFAULT '', has_branches INTEGER DEFAULT 0, spool_type TEXT DEFAULT 'SPOOL', actual_weight_kg REAL DEFAULT 0, surface_m2 REAL DEFAULT 0, joint_count INTEGER DEFAULT 0, raf_inches REAL DEFAULT 0, created_at TIMESTAMP DEFAULT NOW(), UNIQUE(project, spool_id))",
+            "CREATE TABLE IF NOT EXISTS progress (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER NOT NULL, completed INTEGER DEFAULT 0, completed_by TEXT DEFAULT '', completed_at TIMESTAMP, remarks TEXT DEFAULT '', UNIQUE(project, spool_id, step_number))",
+            "CREATE TABLE IF NOT EXISTS activity_log (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER, action TEXT NOT NULL, operator TEXT DEFAULT '', timestamp TIMESTAMP DEFAULT NOW(), details TEXT DEFAULT '')",
+            "CREATE INDEX IF NOT EXISTS idx_progress_ps ON progress(project, spool_id)",
+            "CREATE INDEX IF NOT EXISTS idx_activity_ps ON activity_log(project, spool_id)",
+            "CREATE TABLE IF NOT EXISTS schedule (id SERIAL PRIMARY KEY, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start DATE NOT NULL, planned_end DATE NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type))",
+            "CREATE TABLE IF NOT EXISTS project_settings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key))",
+            "CREATE TABLE IF NOT EXISTS drawings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BYTEA NOT NULL, UNIQUE(project, spool_id))",
+            "CREATE TABLE IF NOT EXISTS project_steps (id SERIAL PRIMARY KEY, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', UNIQUE(project, step_number))",
+            # Ensure spool_type column exists on old spools tables and backfill NULLs
+            "ALTER TABLE spools ADD COLUMN spool_type TEXT DEFAULT 'SPOOL'",
+            "UPDATE spools SET spool_type = 'SPOOL' WHERE spool_type IS NULL",
+        ]
+        for stmt in pg_statements:
+            try: cur.execute(stmt)
+            except Exception as e: print(f"init_db skip: {e}")
+        c.close()
     else:
         import sqlite3
         c = sqlite3.connect(os.environ.get('SQLITE_PATH','tracker.db'))
@@ -664,17 +672,22 @@ def project_page(project):
 @app.route('/api/project/<project>/dashboard')
 @login_required
 def api_project_dashboard(project):
-    settings = get_project_settings(project)
-    bulk = bulk_spool_progress(project, settings)
-    st = project_stats(project)
-    act = db_fetchall("SELECT * FROM activity_log WHERE project=? ORDER BY timestamp DESC LIMIT 20", (project,))
-    st['recent_activity'] = fix_timestamps(act)
-    st['settings'] = settings
-    st['forecast'] = forecast_production(project, bulk)
-    st['past_rt'] = past_hold_point_count(project)
-    st['production_rate'] = daily_production_rate(project)
-    st['schedule_data'] = schedule_status(project, bulk)
-    return jsonify(st)
+    import traceback as tb
+    try:
+        settings = get_project_settings(project)
+        bulk = bulk_spool_progress(project, settings)
+        st = project_stats(project)
+        act = db_fetchall("SELECT * FROM activity_log WHERE project=? ORDER BY timestamp DESC LIMIT 20", (project,))
+        st['recent_activity'] = fix_timestamps(act)
+        st['settings'] = settings
+        st['forecast'] = forecast_production(project, bulk)
+        st['past_rt'] = past_hold_point_count(project)
+        st['production_rate'] = daily_production_rate(project)
+        st['schedule_data'] = schedule_status(project, bulk)
+        return jsonify(st)
+    except Exception as e:
+        print(f"Dashboard error: {e}\n{tb.format_exc()}")
+        return jsonify({'error': str(e), 'trace': tb.format_exc()}), 500
 
 @app.route('/api/project/<project>/spools')
 @login_required
@@ -1016,7 +1029,12 @@ def api_project_settings(project):
 @app.route('/api/project/<project>/report')
 @login_required
 def api_report_data(project):
-    return jsonify(generate_report_data(project))
+    import traceback as tb
+    try:
+        return jsonify(generate_report_data(project))
+    except Exception as e:
+        print(f"Report error: {e}\n{tb.format_exc()}")
+        return jsonify({'error': str(e), 'trace': tb.format_exc()}), 500
 
 @app.route('/project/<project>/report')
 @login_required

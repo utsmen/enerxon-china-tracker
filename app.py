@@ -188,7 +188,7 @@ def get_project_settings(project):
 
 def get_diameter_order(project):
     """Get diameter order for a project, sorted descending by numeric value."""
-    rows = db_fetchall("SELECT DISTINCT main_diameter FROM spools WHERE project=? AND main_diameter != '' AND main_diameter != '?'", (project,))
+    rows = db_fetchall("SELECT DISTINCT main_diameter FROM spools WHERE project=? AND main_diameter != '' AND main_diameter != ?", (project, '?'))
     diameters = []
     for r in rows:
         d = (r['main_diameter'] or '').replace('"', '')

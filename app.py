@@ -181,7 +181,8 @@ def get_project_settings(project):
     settings = {r['key']: r['value'] for r in rows}
     defaults = {'committed_weeks_saved':'0', 'committed_days_saved':'0', 'sea_transit_days':'45',
                 'standard_weeks':'9', 'welding_capability_ipd':'1000', 'painting_capability_m2d':'91',
-                'spools_per_day':'{}', 'painting_days':'13'}
+                'spools_per_day':'{}', 'painting_days':'13',
+                'fab_label':'Fab / \u5236\u4f5c', 'paint_label':'Paint / \u6d82\u88c5'}
     for k,v in defaults.items():
         if k not in settings: settings[k] = v
     return settings
@@ -1079,7 +1080,9 @@ def api_report_download(project):
         status_label = {'on_time': 'ON TIME \u2713', 'at_risk': 'AT RISK \u26a0', 'delayed': 'DELAYED \u2717', 'not_started': 'NOT STARTED'}
         ws.cell(row, 1, "SCHEDULE STATUS BY DIAMETER / \u6309\u7ba1\u5f84\u8ba1\u5212\u72b6\u6001").font = Font(bold=True, size=12, color='2F5496')
         row += 1
-        headers = ['Diameter','Spools','Fab %','Paint %','Overall %','Diff (days)','Status','Fab Start','Fab End','Paint End','Forecast End']
+        fl = sett.get('fab_label', 'Fab').split('/')[0].strip()
+        pl = sett.get('paint_label', 'Paint').split('/')[0].strip()
+        headers = ['Diameter','Spools',f'{fl} %',f'{pl} %','Overall %','Diff (days)','Status',f'{fl} Start',f'{fl} End',f'{pl} End','Forecast End']
         for col, h in enumerate(headers, 1):
             c = ws.cell(row, col, h); c.font = hf; c.fill = hfill; c.alignment = Alignment(horizontal='center', wrap_text=True); c.border = thin
         row += 1
@@ -1195,7 +1198,7 @@ def api_report_download(project):
                     exp_fab_s = fab_ps; exp_fab_e = fab_pe; exp_paint_s = paint_ps; exp_paint_e = paint_pe
                 # FAB ROW
                 ws.cell(row, 1, dk).font = Font(bold=True, size=11, color='2F5496'); ws.cell(row, 1).border = thin
-                ws.cell(row, 2, 'Fab').font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
+                ws.cell(row, 2, fl).font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
                 pct_cell = ws.cell(row, 3)
                 if fab_pct >= 100: pct_cell.value = '\u2713'; pct_cell.font = Font(bold=True, size=10, color='27AE60')
                 elif fab_pct > 0: pct_cell.value = f'{fab_pct:.0f}%'; pct_cell.font = Font(bold=True, size=8, color='4472C4')
@@ -1217,7 +1220,7 @@ def api_report_download(project):
                 row += 1
                 # PAINT ROW
                 ws.cell(row, 1, '').border = thin
-                ws.cell(row, 2, 'Paint').font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
+                ws.cell(row, 2, pl).font = Font(size=9, color='666666'); ws.cell(row, 2).border = thin
                 pct_cell = ws.cell(row, 3)
                 if paint_pct >= 100: pct_cell.value = '\u2713'; pct_cell.font = Font(bold=True, size=10, color='27AE60')
                 elif paint_pct > 0: pct_cell.value = f'{paint_pct:.0f}%'; pct_cell.font = Font(bold=True, size=8, color='ED7D31')
@@ -1244,8 +1247,8 @@ def api_report_download(project):
                 row += 1
             row += 1
             ws.cell(row, 1, 'Legend:').font = Font(bold=True, size=9)
-            lg = ws.cell(row, 2, 'Fab'); lg.fill = fab_fill; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
-            lg = ws.cell(row, 3, 'Paint'); lg.fill = paint_fill; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
+            lg = ws.cell(row, 2, fl); lg.fill = fab_fill; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
+            lg = ws.cell(row, 3, pl); lg.fill = paint_fill; lg.font = Font(size=8, color='FFFFFF'); lg.alignment = center
             if has_expediting:
                 lg = ws.cell(row, 4, 'Saved \u2713'); lg.fill = saved_fill; lg.font = Font(size=8, color='A9D18E'); lg.alignment = center
                 lg = ws.cell(row, 5, '\u25c6 Forecast'); lg.fill = forecast_fill; lg.font = Font(size=8, color='C00000'); lg.alignment = center
@@ -1264,7 +1267,7 @@ def api_report_download(project):
         rate_fill = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
         for label, actual, target, unit in [
             ('Welding / \u710a\u63a5', actual_weld, weld_cap, 'linear inches/day'),
-            ('Painting / \u6d82\u88c5', actual_paint, paint_cap, 'm\u00b2/day'),
+            (sett.get('paint_label', 'Paint / \u6d82\u88c5'), actual_paint, paint_cap, 'm\u00b2/day'),
         ]:
             c1 = ws.cell(row, 1, label); c1.font = Font(bold=True, size=10); c1.fill = rate_fill; c1.border = thin
             c2 = ws.cell(row, 2, actual); c2.font = Font(bold=True, size=12, color='27AE60' if actual >= target else 'E74C3C'); c2.alignment = center; c2.fill = rate_fill; c2.border = thin
@@ -1461,6 +1464,8 @@ async function load(){
   const [dr, sr] = await Promise.all([fetch(`/api/project/${P}/dashboard`), fetch(`/api/project/${P}/spools`)]);
   const st = await dr.json(); all = await sr.json();
   const fc = st.forecast||{}, sett = st.settings||{}, schd = st.schedule_data, pr = st.production_rate||{};
+  const fabLabel = sett.fab_label || 'Fab / \u5236\u4f5c';
+  const paintLabel = sett.paint_label || 'Paint / \u6d82\u88c5';
   document.getElementById('subtitle').textContent=`${st.total} spools \u00b7 ${st.overall_pct}% \u00b7 ${st.completed} done / \u5b8c\u6210 ${st.completed}`;
   document.getElementById('stats').innerHTML=[
     {v:st.total,l:'Total / \u603b\u6570'},{v:st.completed,l:'Done / \u5b8c\u6210',c:'#27ae60'},
@@ -1788,6 +1793,8 @@ async function load(){
   const releaseStepSet = new Set(d.release_steps || []);
   let html = '';
   const st = d.stats, sch = d.schedule, sett = d.settings||{}, fc = d.forecast||{};
+  const fabLabel = sett.fab_label || 'Fab / \u5236\u4f5c';
+  const paintLabel = sett.paint_label || 'Paint / \u6d82\u88c5';
   const overallStatus = sch ? sch.overall_status : 'not_started';
   const stdWeeks = parseInt(sett.standard_weeks||'9');
   const wksSaved = parseInt(sett.committed_weeks_saved||'0');
@@ -1821,10 +1828,10 @@ async function load(){
       html += `<div class="diam-row" style="border-left:4px solid ${color}">
         <div class="d-name">${dm.diameter}</div>
         <div class="d-info">
-          <div style="font-size:12px;color:#888">${dm.spool_count} spools \u00b7 Fab / \u5236\u4f5c: <strong>${fabP}%</strong> \u00b7 Paint / \u6d82\u88c5: <strong>${paintP}%</strong> \u00b7 Overall / \u603b: <strong>${dm.actual_pct}%</strong></div>
+          <div style="font-size:12px;color:#888">${dm.spool_count} spools \u00b7 ${fabLabel}: <strong>${fabP}%</strong> \u00b7 ${paintLabel}: <strong>${paintP}%</strong> \u00b7 Overall / \u603b: <strong>${dm.actual_pct}%</strong></div>
           <div style="display:flex;gap:4px;margin-top:6px">
-            <div style="flex:1"><div style="font-size:8px;color:#aaa">Fab</div><div class="expected-bar"><div class="actual-fill" style="width:${fabP}%;background:#4472C4;border-radius:6px"></div></div></div>
-            <div style="flex:1"><div style="font-size:8px;color:#aaa">Paint</div><div class="expected-bar"><div class="actual-fill" style="width:${paintP}%;background:#ED7D31;border-radius:6px"></div></div></div>
+            <div style="flex:1"><div style="font-size:8px;color:#aaa">${fabLabel}</div><div class="expected-bar"><div class="actual-fill" style="width:${fabP}%;background:#4472C4;border-radius:6px"></div></div></div>
+            <div style="flex:1"><div style="font-size:8px;color:#aaa">${paintLabel}</div><div class="expected-bar"><div class="actual-fill" style="width:${paintP}%;background:#ED7D31;border-radius:6px"></div></div></div>
           </div>
           <div style="font-size:10px;color:#aaa;margin-top:2px">${fdi.remaining_raf?'RAF: '+fdi.remaining_raf+' in':''} ${fdi.remaining_m2?'\u00b7 Surface: '+fdi.remaining_m2+' m\u00b2':''}</div>
         </div>
@@ -1893,7 +1900,7 @@ async function load(){
         // FAB ROW
         html += `<tr>`;
         html += `<td class="g-label" rowspan="2" style="color:#2F5496;font-size:13px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${overallP}%"></div></div></td>`;
-        html += `<td class="g-label" style="font-size:9px;color:#666">Fab</td>`;
+        html += `<td class="g-label" style="font-size:9px;color:#666">${fabLabel.split('/')[0].trim()}</td>`;
         weeks.forEach(w => {
           const inStd = fabPs<=w.end && fabPe>=w.start;
           const inExp = expFabStart<=w.end && expFabEnd>=w.start;
@@ -1912,7 +1919,7 @@ async function load(){
         });
         html += `</tr>`;
         // PAINT ROW
-        html += `<tr><td class="g-label" style="font-size:9px;color:#666">Paint</td>`;
+        html += `<tr><td class="g-label" style="font-size:9px;color:#666">${paintLabel.split('/')[0].trim()}</td>`;
         const isLast = dmIdx===lastDiamIdx;
         weeks.forEach(w => {
           const inStd = paintPs<=w.end && paintPe>=w.start;
@@ -1941,8 +1948,8 @@ async function load(){
 
       html += `</tbody></table></div>
         <div class="legend">
-          <span><span class="box" style="background:#4472C4"></span> Fabrication / \u5236\u4f5c</span>
-          <span><span class="box" style="background:#ED7D31"></span> Painting / \u6d82\u88c5</span>
+          <span><span class="box" style="background:#4472C4"></span> ${fabLabel}</span>
+          <span><span class="box" style="background:#ED7D31"></span> ${paintLabel}</span>
           ${hasExpediting?'<span><span class="box" style="background:#E2EFDA;border:1px solid #A9D18E"></span> Saved / \u8282\u7701 \u2713</span>':''}
           <span><span class="box" style="border:2px dashed #e74c3c;width:12px;height:8px;display:inline-block;border-radius:2px"></span> Forecast / \u9884\u6d4b</span>
           <span><span class="box" style="background:#e74c3c;width:3px"></span> Today / \u4eca\u5929</span>
@@ -1959,7 +1966,7 @@ async function load(){
             <div class="expected-bar" style="margin-top:4px"><div class="actual-fill" style="width:${Math.min(actualWeld/Math.max(weldCap,1)*100,100)}%;background:${actualWeld>=weldCap?'#27ae60':'#e74c3c'}"></div></div>
           </div>
           <div style="flex:1;min-width:200px">
-            <div style="font-size:12px;color:#888;margin-bottom:4px">Painting / \u6d82\u88c5 (m\u00b2/day)</div>
+            <div style="font-size:12px;color:#888;margin-bottom:4px">${paintLabel} (m\u00b2/day)</div>
             <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:24px;font-weight:700;color:${actualPaint>=paintCap?'#27ae60':'#e74c3c'}">${actualPaint}</span><span style="color:#888;font-size:12px">/ ${paintCap} target</span></div>
             <div class="expected-bar" style="margin-top:4px"><div class="actual-fill" style="width:${Math.min(actualPaint/Math.max(paintCap,1)*100,100)}%;background:${actualPaint>=paintCap?'#27ae60':'#e74c3c'}"></div></div>
           </div>

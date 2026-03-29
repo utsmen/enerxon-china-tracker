@@ -13,10 +13,10 @@ Usage:
     --schedule-start 2026-04-01 \
     --standard-weeks 9 \
     --welding-ipd 1000 \
-    --painting-m2d 91 \
+    --surface-m2d 91 \
     --expediting-weeks 0 \
     --spools-per-day '{"32":1.5,"24":1.7,"18":3.0,"16":2.0,"8":1.5,"2":2.5,"1":2.5}' \
-    --painting-days 13 \
+    --secondary-phase-days 13 \
     [--drawings "/path/to/drawings/"] \
     [--transit-days 45]
 """
@@ -224,7 +224,7 @@ def parse_route_cards(route_cards_dir):
     return spool_data
 
 
-def build_schedule(start_date, standard_weeks, diameter_counts, painting_days, diam_order, phase_order=None):
+def build_schedule(start_date, standard_weeks, diameter_counts, secondary_phase_days, diam_order, phase_order=None):
     """Build standard schedule: proportional distribution across standard_weeks.
     One diameter at a time, largest first. Each gets (count/total) share of total days."""
     if not phase_order:
@@ -232,11 +232,11 @@ def build_schedule(start_date, standard_weeks, diameter_counts, painting_days, d
     total_spools = sum(diameter_counts.values())
     total_std_days = standard_weeks * 7
     first_phase = phase_order[0]
-    # For multi-phase: first phase total days = total - painting_days (last diameter paint must finish by end)
-    fab_total_days = total_std_days - painting_days if len(phase_order) > 1 else total_std_days
+    # For multi-phase: first phase total days = total - secondary_phase_days (last diameter paint must finish by end)
+    first_phase_total_days = total_std_days - secondary_phase_days if len(phase_order) > 1 else total_std_days
     schedule = []
     current_start = start_date
-    remaining_days = fab_total_days
+    remaining_days = first_phase_total_days
     active_diams = [d for d in diam_order if d in diameter_counts]
 
     for i, diam in enumerate(active_diams):
@@ -244,7 +244,7 @@ def build_schedule(start_date, standard_weeks, diameter_counts, painting_days, d
         if i == len(active_diams) - 1:
             fab_days = remaining_days  # last diameter gets remainder
         else:
-            fab_days = max(1, round(fab_total_days * cnt / total_spools))
+            fab_days = max(1, round(first_phase_total_days * cnt / total_spools))
         remaining_days -= fab_days
         fab_end = current_start + timedelta(days=fab_days)
         dk = f'{diam}"'
@@ -257,7 +257,7 @@ def build_schedule(start_date, standard_weeks, diameter_counts, painting_days, d
         prev_end = fab_end
         for ph in phase_order[1:]:
             ph_start = prev_end + timedelta(days=1)
-            ph_end = ph_start + timedelta(days=painting_days)
+            ph_end = ph_start + timedelta(days=secondary_phase_days)
             schedule.append({
                 'diameter': dk, 'task_type': ph,
                 'description': f'{ph.capitalize()} {dk}',
@@ -281,7 +281,7 @@ def deploy(args):
 
     # Parse spools_per_day
     spd = json.loads(args.spools_per_day) if args.spools_per_day else {}
-    painting_days = args.painting_days
+    secondary_phase_days = args.secondary_phase_days
 
     # ── Step 1: Parse Spool Matrix ──────────────────────────────
     print("Step 1: Parsing spool matrix...")
@@ -380,7 +380,7 @@ def deploy(args):
             if p not in seen:
                 seen.add(p)
                 phase_order.append(p)
-    schedule = build_schedule(start, args.standard_weeks, diameter_counts, painting_days, diam_order, phase_order)
+    schedule = build_schedule(start, args.standard_weeks, diameter_counts, secondary_phase_days, diam_order, phase_order)
     r = session.post(f"{TRACKER_URL}/api/project/{args.project}/schedule", json=schedule)
     print(f"  Result: {r.json()}")
 
@@ -389,12 +389,12 @@ def deploy(args):
     settings = {
         'standard_weeks': str(args.standard_weeks),
         'welding_capability_ipd': str(args.welding_ipd),
-        'painting_capability_m2d': str(args.painting_m2d),
+        'surface_capability_m2d': str(args.surface_m2d),
         'committed_weeks_saved': str(args.expediting_weeks),
         'committed_days_saved': '0',
         'sea_transit_days': str(args.transit_days),
         'spools_per_day': json.dumps(spd),
-        'painting_days': str(painting_days),
+        'secondary_phase_days': str(secondary_phase_days),
     }
     r = session.post(f"{TRACKER_URL}/api/project/{args.project}/settings", json=settings)
     print(f"  Result: {r.json()}")
@@ -445,12 +445,12 @@ if __name__ == '__main__':
     parser.add_argument('--schedule-start', required=True, help='Production start date (YYYY-MM-DD)')
     parser.add_argument('--standard-weeks', type=int, default=9, help='Standard production weeks (default: 9)')
     parser.add_argument('--welding-ipd', type=float, default=1000, help='Welding capability (linear inches/day)')
-    parser.add_argument('--painting-m2d', type=float, default=91, help='Painting capability (m\u00b2/day, 0 if no painting)')
+    parser.add_argument('--surface-m2d', type=float, default=91, help='Surface treatment capability (m\u00b2/day, 0 if no surface phase)')
     parser.add_argument('--expediting-weeks', type=int, default=0, help='Expediting weeks saved (0 = no expediting)')
     parser.add_argument('--transit-days', type=int, default=45, help='Sea transit days (default: 45)')
     parser.add_argument('--drawings', help='Path to spool drawings folder (optional)')
     parser.add_argument('--spools-per-day', default='{}', help='JSON: spools/day per diameter, e.g. \'{"32":1.5,"24":1.7}\'')
-    parser.add_argument('--painting-days', type=int, default=13, help='Days for painting phase (default: 13)')
+    parser.add_argument('--secondary-phase-days', type=int, default=13, help='Days for secondary phase per diameter (default: 13)')
 
     args = parser.parse_args()
     deploy(args)

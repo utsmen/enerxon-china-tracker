@@ -68,8 +68,8 @@ body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;backgr
 </div>
 </body></html>"""
 
-# Legacy 424 steps — used ONLY as fallback seed data during migration
-_LEGACY_424_STEPS = [
+# Default step definitions — fallback when project has no steps defined yet
+_DEFAULT_STEPS = [
     {'step_number':1,'name_en':'Material Receiving & Traceability','name_cn':'\u6765\u6599\u68c0\u9a8c\u53ca\u53ef\u8ffd\u6eaf\u6027','weight':5,'category':'fab_fixed','hours_fixed':2.0,'hours_variable':'','spool_type':'ALL','display_order':1,'is_conditional':0,'is_hold_point':0,'is_release':0,'phase':'fab'},
     {'step_number':2,'name_en':'Documentation Review (WPS/PQR/ITP)','name_cn':'\u6587\u4ef6\u5ba1\u67e5\uff08WPS/PQR/ITP\uff09','weight':3,'category':'fab_fixed','hours_fixed':2.0,'hours_variable':'','spool_type':'ALL','display_order':2,'is_conditional':0,'is_hold_point':0,'is_release':0,'phase':'fab'},
     {'step_number':3,'name_en':'Pipe Cutting \u2014 Dimensional Check','name_cn':'\u7ba1\u9053\u5207\u5272 \u2014 \u5c3a\u5bf8\u68c0\u9a8c','weight':8,'category':'fab_fixed','hours_fixed':2.0,'hours_variable':'','spool_type':'ALL','display_order':3,'is_conditional':0,'is_hold_point':0,'is_release':0,'phase':'fab'},
@@ -176,7 +176,7 @@ def get_project_steps(project):
     rows = db_fetchall("SELECT * FROM project_steps WHERE project=? ORDER BY display_order", (project,))
     if not rows:
         # Fallback: seed legacy 424 steps for this project
-        rows = _LEGACY_424_STEPS
+        rows = _DEFAULT_STEPS
     setattr(g, cache_key, rows)
     return rows
 
@@ -184,10 +184,14 @@ def get_project_settings(project):
     """Get project settings with defaults."""
     rows = db_fetchall("SELECT key, value FROM project_settings WHERE project=?", (project,))
     settings = {r['key']: r['value'] for r in rows}
+    # Migrate old setting names to new ones
+    key_migrations = {'painting_capability_m2d': 'surface_capability_m2d', 'painting_days': 'secondary_phase_days'}
+    for old_key, new_key in key_migrations.items():
+        if old_key in settings and new_key not in settings:
+            settings[new_key] = settings[old_key]
     defaults = {'committed_weeks_saved':'0', 'committed_days_saved':'0', 'sea_transit_days':'45',
-                'standard_weeks':'9', 'welding_capability_ipd':'1000', 'painting_capability_m2d':'91',
-                'spools_per_day':'{}', 'painting_days':'13',
-}
+                'standard_weeks':'9', 'welding_capability_ipd':'1000', 'surface_capability_m2d':'91',
+                'spools_per_day':'{}', 'secondary_phase_days':'13'}
     for k,v in defaults.items():
         if k not in settings: settings[k] = v
     return settings
@@ -219,7 +223,7 @@ def spool_hours(spool_row, completed_steps, settings, steps_def):
     has_br = spool_row.get('has_branches', 0)
     spool_type = spool_row.get('spool_type', 'SPOOL') or 'SPOOL'
     weld_cap = float(settings.get('welding_capability_ipd', '552'))
-    surface_cap = float(settings.get('painting_capability_m2d', '91'))
+    surface_cap = float(settings.get('surface_capability_m2d', '91'))
 
     # Pre-count surface steps per phase for even splitting
     surface_count_by_phase = {}
@@ -487,7 +491,7 @@ def forecast_production(project, bulk=None):
     phase_order = get_phase_order(steps_def)
     diam_order = get_diameter_order(project)
     weld_cap = float(settings.get('welding_capability_ipd', '1000'))
-    paint_cap = float(settings.get('painting_capability_m2d', '91'))
+    paint_cap = float(settings.get('surface_capability_m2d', '91'))
     if not bulk: bulk = bulk_spool_progress(project, settings)
     today = date.today()
 
@@ -942,10 +946,7 @@ def api_cleanup():
     db_execute("DELETE FROM activity_log WHERE project=''")
     db_execute("DELETE FROM progress WHERE project=''")
     db_execute("DELETE FROM spools WHERE project=''")
-    if USE_PG:
-        db_execute("DELETE FROM drawings WHERE NOT EXISTS (SELECT 1 FROM spools WHERE spools.project=drawings.project AND spools.spool_id=drawings.spool_id)")
-    else:
-        db_execute("DELETE FROM drawings WHERE NOT EXISTS (SELECT 1 FROM spools WHERE spools.project=drawings.project AND spools.spool_id=drawings.spool_id)")
+    db_execute("DELETE FROM drawings WHERE NOT EXISTS (SELECT 1 FROM spools WHERE spools.project=drawings.project AND spools.spool_id=drawings.spool_id)")
     db_commit()
     return jsonify({'ok': True})
 
@@ -1003,7 +1004,7 @@ def api_set_schedule(project):
         steps_def = get_project_steps(project)
         phase_order = get_phase_order(steps_def)
         std_weeks = int(settings.get('standard_weeks', '9'))
-        painting_days = int(settings.get('painting_days', '13'))
+        secondary_phase_days = int(settings.get('secondary_phase_days', '13'))
         diam_order = get_diameter_order(project)
         spools_rows = db_fetchall("SELECT main_diameter FROM spools WHERE project=?", (project,))
         diam_counts = {}
@@ -1016,13 +1017,13 @@ def api_set_schedule(project):
         # Standard schedule: proportional distribution across standard_weeks
         # One diameter at a time, largest first, each gets (count/total) share of total days
         total_std_days = std_weeks * 7
-        # For multi-phase: first phase gets (total_std_days - painting_days), second phase gets painting_days per diameter
+        # For multi-phase: first phase gets (total_std_days - secondary_phase_days), second phase gets secondary_phase_days per diameter
         if len(phase_order) > 1:
-            fab_total_days = total_std_days - painting_days  # last diameter's paint must finish by end
+            first_phase_total_days = total_std_days - secondary_phase_days  # last diameter's paint must finish by end
         else:
-            fab_total_days = total_std_days  # single phase uses all days
+            first_phase_total_days = total_std_days  # single phase uses all days
         current_start = start_date
-        remaining_days = fab_total_days
+        remaining_days = first_phase_total_days
         first_phase = phase_order[0] if phase_order else 'fab'
         for i, diam in enumerate(diam_order):
             if diam not in diam_counts: continue
@@ -1032,7 +1033,7 @@ def api_set_schedule(project):
                 if i == len([d for d in diam_order if d in diam_counts]) - 1:
                     fab_days = remaining_days  # last diameter gets remainder
                 else:
-                    fab_days = max(1, round(fab_total_days * cnt / total_spools))
+                    fab_days = max(1, round(first_phase_total_days * cnt / total_spools))
             else:
                 fab_days = 1
             remaining_days -= fab_days
@@ -1044,7 +1045,7 @@ def api_set_schedule(project):
             prev_end = fab_end
             for ph in phase_order[1:]:
                 ph_start = prev_end + timedelta(days=1)
-                ph_end = ph_start + timedelta(days=painting_days)
+                ph_end = ph_start + timedelta(days=secondary_phase_days)
                 phase_entries.append((ph, ph_start, ph_end, f'{ph.capitalize()} {dk}'))
                 prev_end = ph_end
             current_start = fab_end  # next diameter starts when this one's first phase ends

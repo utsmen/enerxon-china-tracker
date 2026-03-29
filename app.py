@@ -1390,6 +1390,514 @@ def api_report_download(project):
     tmp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False); wb.save(tmp.name)
     return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{today.strftime('%Y%m%d')}.xlsx")
 
+@app.route('/api/project/<project>/report/pdf')
+@login_required
+def api_report_pdf(project):
+    """Download a professional PDF production report (landscape A4)."""
+    import tempfile
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import mm, inch
+    from reportlab.lib.colors import HexColor, white, black, Color
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether
+    from reportlab.platypus.flowables import HRFlowable
+
+    rpt = generate_report_data(project)
+    st = rpt['stats']; sched = rpt.get('schedule'); sett = rpt.get('settings', {})
+    fc_data = rpt.get('forecast', {}) or {}
+    fc_diams = fc_data.get('diameters', {}) if fc_data else {}
+    phases = rpt.get('phase_order', ['fab'])
+    phase_colors = ['#4472C4', '#ED7D31', '#8E44AD', '#27AE60']
+    today = date.today()
+
+    # Settings
+    std_weeks = int(sett.get('standard_weeks', '9'))
+    wks_saved = int(sett.get('committed_weeks_saved', '0'))
+    days_saved_val = int(sett.get('committed_days_saved', '0'))
+    total_saved = wks_saved * 7 + days_saved_val
+    has_expediting = total_saved > 0
+    transit_days = int(sett.get('sea_transit_days', '45'))
+
+    # Colors
+    BLUE = HexColor('#2F5496')
+    DARK = HexColor('#404040')
+    LIGHT_BLUE = HexColor('#D9E2F3')
+    LIGHT_GREEN = HexColor('#E2EFDA')
+    LIGHT_GRAY = HexColor('#F2F2F2')
+    GREEN = HexColor('#27AE60')
+    RED = HexColor('#E74C3C')
+    ORANGE = HexColor('#F39C12')
+    NAVY = HexColor('#002060')
+    WHITE = white
+    BLACK = black
+
+    # Styles
+    styles = getSampleStyleSheet()
+    s_title = ParagraphStyle('RPT_Title', parent=styles['Title'], fontSize=18, textColor=BLUE, spaceAfter=2, alignment=TA_LEFT)
+    s_heading = ParagraphStyle('RPT_H2', parent=styles['Heading2'], fontSize=13, textColor=BLUE, spaceBefore=6, spaceAfter=4, alignment=TA_LEFT)
+    s_normal = ParagraphStyle('RPT_Normal', parent=styles['Normal'], fontSize=9, textColor=BLACK, leading=12)
+    s_small = ParagraphStyle('RPT_Small', parent=styles['Normal'], fontSize=8, textColor=HexColor('#888888'), leading=10)
+    s_center = ParagraphStyle('RPT_Center', parent=styles['Normal'], fontSize=9, textColor=BLACK, alignment=TA_CENTER, leading=11)
+    s_center_bold = ParagraphStyle('RPT_CenterBold', parent=styles['Normal'], fontSize=9, textColor=BLACK, alignment=TA_CENTER, leading=11, fontName='Helvetica-Bold')
+    s_cell = ParagraphStyle('RPT_Cell', parent=styles['Normal'], fontSize=8, textColor=BLACK, leading=10, alignment=TA_CENTER)
+    s_cell_left = ParagraphStyle('RPT_CellL', parent=styles['Normal'], fontSize=8, textColor=BLACK, leading=10, alignment=TA_LEFT)
+    s_cell_bold = ParagraphStyle('RPT_CellB', parent=styles['Normal'], fontSize=8, textColor=BLACK, leading=10, alignment=TA_CENTER, fontName='Helvetica-Bold')
+
+    def p(text, style=s_normal):
+        return Paragraph(str(text), style)
+
+    def color_for_status(status):
+        return {'on_time': GREEN, 'at_risk': ORANGE, 'delayed': RED}.get(status, HexColor('#95A5A6'))
+
+    def status_label(status):
+        return {'on_time': 'ON TIME', 'at_risk': 'AT RISK', 'delayed': 'DELAYED', 'not_started': 'NOT STARTED'}.get(status, status)
+
+    page_w, page_h = landscape(A4)
+    tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
+    doc = SimpleDocTemplate(tmp.name, pagesize=landscape(A4),
+                            leftMargin=15*mm, rightMargin=15*mm,
+                            topMargin=12*mm, bottomMargin=12*mm)
+    story = []
+
+    # ── 1. Title Section ─────────────────────────────────────────────────────
+    story.append(p('ENERXON \u2014 Production Report', s_title))
+    story.append(Spacer(1, 2*mm))
+    story.append(p(f'<b>Project:</b> {project} &nbsp;&nbsp;&nbsp; <b>Date:</b> {rpt["date"]}', s_normal))
+    story.append(Spacer(1, 3*mm))
+    s_big_pct = ParagraphStyle('RPT_BigPct', parent=styles['Normal'], fontSize=18, textColor=BLUE, fontName='Helvetica-Bold', leading=22)
+    story.append(p(f'{st["overall_pct"]}% <font size="10" color="#888888">Overall Progress</font>', s_big_pct))
+    story.append(Spacer(1, 2*mm))
+    story.append(p(f'Total: {st["total"]} spools &nbsp;|&nbsp; Done: {st["completed"]} &nbsp;|&nbsp; In Progress: {st["in_progress"]} &nbsp;|&nbsp; Pending: {st["not_started"]}', s_small))
+    story.append(Spacer(1, 8*mm))
+
+    # ── 2. Schedule Status Table ─────────────────────────────────────────────
+    if sched and sched.get('diameters'):
+        story.append(p('SCHEDULE STATUS BY DIAMETER', s_heading))
+        # Build headers dynamically
+        phase_hdrs = [f'{ph.capitalize()} %' for ph in phases]
+        # Schedule date columns: one start/end per phase
+        date_hdrs = []
+        if phases:
+            date_hdrs.append(f'{phases[0].capitalize()} Start')
+            date_hdrs.append(f'{phases[0].capitalize()} End')
+        if len(phases) > 1:
+            date_hdrs.append(f'{phases[1].capitalize()} Start')
+            date_hdrs.append(f'{phases[1].capitalize()} End')
+        headers = ['Diameter', 'Spools'] + phase_hdrs + ['Overall %', 'Diff', 'Status'] + date_hdrs + ['Forecast End']
+        hdr_row = [p(f'<font color="white"><b>{h}</b></font>', s_cell) for h in headers]
+        data_rows = [hdr_row]
+        for d in sched['diameters']:
+            dk = d['diameter']; fcd = fc_diams.get(dk, {})
+            row_data = [p(f'<b>{dk}</b>', s_cell_left), p(str(d['spool_count']), s_cell)]
+            for ph in phases:
+                ph_val = (d.get('phase_avgs') or {}).get(ph, 0)
+                row_data.append(p(f'<b>{ph_val}%</b>', s_cell_bold))
+            row_data.append(p(f'<b>{d["actual_pct"]}%</b>', s_cell_bold))
+            diff_val = d['diff']
+            diff_str = f'+{diff_val}d' if diff_val > 0 else f'{diff_val}d' if diff_val < 0 else '0d'
+            diff_color = '#27AE60' if diff_val > 0 else '#E74C3C' if diff_val < 0 else '#333333'
+            row_data.append(p(f'<font color="{diff_color}">{diff_str}</font>', s_cell))
+            s_color = {'on_time': '#27AE60', 'at_risk': '#F39C12', 'delayed': '#E74C3C'}.get(d['status'], '#95A5A6')
+            row_data.append(p(f'<font color="{s_color}"><b>{status_label(d["status"])}</b></font>', s_cell))
+            # Date columns
+            row_data.append(p(d.get('fab_start', ''), s_cell))
+            row_data.append(p(d.get('fab_end', ''), s_cell))
+            if len(phases) > 1:
+                row_data.append(p(d.get('paint_start', ''), s_cell))
+                row_data.append(p(d.get('paint_end', '') or d.get('fab_end', ''), s_cell))
+            row_data.append(p(fcd.get('forecast_end', ''), s_cell))
+            data_rows.append(row_data)
+
+        num_cols = len(headers)
+        avail_w = page_w - 30*mm
+        # Proportional column widths
+        base_widths = [42, 30] + [35]*len(phases) + [38, 32, 50] + [48]*len(date_hdrs) + [48]
+        total_base = sum(base_widths)
+        col_widths = [w / total_base * avail_w for w in base_widths]
+
+        t = Table(data_rows, colWidths=col_widths, repeatRows=1)
+        t_style = [
+            ('BACKGROUND', (0,0), (-1,0), BLUE),
+            ('TEXTCOLOR', (0,0), (-1,0), WHITE),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 8),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('ALIGN', (0,0), (0,-1), 'LEFT'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('GRID', (0,0), (-1,-1), 0.5, HexColor('#C0C0C0')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [WHITE, HexColor('#FAFBFD')]),
+            ('TOPPADDING', (0,0), (-1,-1), 3),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+        ]
+        # Highlight phase % cells >= 100 green
+        phase_col_start = 2
+        for ri, d in enumerate(sched['diameters'], 1):
+            for pi, ph in enumerate(phases):
+                ph_val = (d.get('phase_avgs') or {}).get(ph, 0)
+                if ph_val >= 100:
+                    t_style.append(('BACKGROUND', (phase_col_start+pi, ri), (phase_col_start+pi, ri), HexColor('#C6EFCE')))
+            # Status cell color
+            status_col = 2 + len(phases) + 2  # after phases, overall, diff
+            s_bg = {'on_time': '#C6EFCE', 'at_risk': '#FCE4D6', 'delayed': '#FFC7CE'}.get(d['status'])
+            if s_bg:
+                t_style.append(('BACKGROUND', (status_col, ri), (status_col, ri), HexColor(s_bg)))
+        t.setStyle(TableStyle(t_style))
+        story.append(t)
+        story.append(Spacer(1, 6*mm))
+
+        # ── 3. Expediting Commitment Panel ───────────────────────────────────
+        prod_start = None
+        starts = [d['fab_start'] for d in sched['diameters'] if d['fab_start']]
+        if starts:
+            prod_start = date.fromisoformat(min(starts))
+        if prod_start and has_expediting:
+            std_end = prod_start + timedelta(days=std_weeks * 7 - 1)
+            commit_end = std_end - timedelta(days=total_saved)
+            fc_overall_end = fc_data.get('overall_forecast_end')
+            fc_end_d = date.fromisoformat(fc_overall_end) if fc_overall_end else None
+            fc_diff_commit = (commit_end - fc_end_d).days if fc_end_d else 0
+
+            s_exp_card = ParagraphStyle('RPT_ExpCard', parent=styles['Normal'], fontSize=9, alignment=TA_CENTER, leading=20)
+            exp_row = [
+                p(f'<font color="#2F5496" size="14"><b>{prod_start.strftime("%d %b")}</b></font><br/><font size="8" color="#333333"><b>START</b></font>', s_exp_card),
+                p(f'<font color="#888888" size="14"><s>{std_end.strftime("%d %b")}</s></font><br/><font size="8" color="#333333"><b>STANDARD END</b></font>', s_exp_card),
+                p(f'<font color="#4472C4" size="14"><b>{commit_end.strftime("%d %b")}</b></font><br/><font size="8" color="#333333"><b>COMMITTED END</b></font>', s_exp_card),
+                p(f'<font color="#4472C4" size="16"><b>{total_saved}d</b></font><br/><font size="8" color="#333333"><b>SAVED ({wks_saved} WK)</b></font>', s_exp_card),
+                p(f'<font color="{"#27AE60" if fc_diff_commit >= 0 else "#E74C3C"}" size="14"><b>{fc_end_d.strftime("%d %b") if fc_end_d else chr(8212)}</b></font><br/><font size="8" color="#333333"><b>FORECAST {"&#10003;" if fc_diff_commit >= 0 else "&#10007;"}</b></font>', s_exp_card),
+            ]
+            exp_w = avail_w / 5
+            exp_t = Table([exp_row], colWidths=[exp_w]*5)
+            exp_t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,-1), LIGHT_BLUE),
+                ('GRID', (0,0), (-1,-1), 0.3, HexColor('#C0D4E8')),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('TOPPADDING', (0,0), (-1,-1), 8),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+            ]))
+            story.append(KeepTogether([p('EXPEDITING COMMITMENT', s_heading), exp_t]))
+            story.append(Spacer(1, 6*mm))
+        elif prod_start:
+            std_end = prod_start + timedelta(days=std_weeks * 7 - 1)
+            commit_end = std_end; fc_end_d = None
+        else:
+            std_end = None; commit_end = None; fc_end_d = None; prod_start = None
+
+        # ── 4. Production Gantt ──────────────────────────────────────────────
+        gantt_elems = [p('PRODUCTION GANTT', s_heading)]  # Will be wrapped in KeepTogether
+        if prod_start:
+            fc_overall_end = fc_data.get('overall_forecast_end')
+            if not fc_end_d and fc_overall_end:
+                fc_end_d = date.fromisoformat(fc_overall_end)
+            if has_expediting:
+                num_weeks = std_weeks
+            else:
+                max_d = std_end or prod_start + timedelta(days=62)
+                if fc_end_d and fc_end_d > max_d:
+                    max_d = fc_end_d
+                num_weeks = max(std_weeks, ((max_d - prod_start).days // 7) + 2)
+
+            weeks = []
+            for i in range(num_weeks):
+                ws_date = prod_start + timedelta(days=i * 7)
+                we_date = ws_date + timedelta(days=6)
+                weeks.append((ws_date, we_date))
+
+            ratio = (std_weeks - wks_saved) / std_weeks if has_expediting else 1.0
+
+            # Build Gantt table
+            gantt_hdrs = ['Diameter', 'Phase'] + [f'W{i+1}\n{ws.strftime("%d/%m")}-{we.strftime("%d/%m")}' for i, (ws, we) in enumerate(weeks)]
+            gantt_data = []
+            # Header row
+            hdr = [p(f'<font color="white"><b>{h}</b></font>', s_cell) for h in gantt_hdrs]
+            gantt_data.append(hdr)
+
+            # Determine today column
+            today_week_idx = None
+            for i, (ws_d, we_d) in enumerate(weeks):
+                if ws_d <= today <= we_d:
+                    today_week_idx = i
+                    break
+
+            # Phase-to-schedule mapping
+            phase_task_map = {'fab': 'fabrication', 'paint': 'painting'}
+
+            for dm_idx, d in enumerate(sched['diameters']):
+                dk = d['diameter']; fcd = fc_diams.get(dk, {})
+                overall_pct = fcd.get('overall_pct', 0) or 0
+                dm_started = fcd.get('started', False)
+                dm_fc_end_str = fcd.get('forecast_end', '')
+                dm_fc_end = date.fromisoformat(dm_fc_end_str) if dm_fc_end_str else None
+                dm_phase_avgs = fcd.get('phase_avgs', {}) or d.get('phase_avgs', {}) or {}
+
+                # Parse schedule dates per phase
+                phase_dates = {}
+                if phases:
+                    fs = d.get('fab_start', ''); fe = d.get('fab_end', '')
+                    if fs and fe:
+                        phase_dates[phases[0]] = (date.fromisoformat(fs), date.fromisoformat(fe))
+                if len(phases) > 1:
+                    ps = d.get('paint_start', ''); pe = d.get('paint_end', '')
+                    if ps and pe:
+                        phase_dates[phases[1]] = (date.fromisoformat(ps), date.fromisoformat(pe))
+
+                # Compute expedited dates per phase
+                exp_phase_dates = {}
+                prev_exp_end = None
+                for pi, ph in enumerate(phases):
+                    if ph not in phase_dates:
+                        continue
+                    ph_ps, ph_pe = phase_dates[ph]
+                    if has_expediting and commit_end:
+                        exp_s = prod_start + timedelta(days=int((ph_ps - prod_start).days * ratio))
+                        exp_e = prod_start + timedelta(days=int((ph_pe - prod_start).days * ratio))
+                        if exp_e > commit_end:
+                            exp_e = commit_end
+                        if prev_exp_end and exp_s < prev_exp_end:
+                            exp_s = prev_exp_end
+                        if exp_e < exp_s:
+                            exp_e = exp_s
+                    else:
+                        exp_s = ph_ps; exp_e = ph_pe
+                    exp_phase_dates[ph] = (exp_s, exp_e)
+                    prev_exp_end = exp_e
+
+                # One row per phase
+                for pi, ph in enumerate(phases):
+                    ph_pct = dm_phase_avgs.get(ph, 0) or 0
+                    ph_hex = phase_colors[pi % len(phase_colors)]
+                    is_first = pi == 0
+                    is_last_phase = pi == len(phases) - 1
+                    row = []
+                    # Diameter label only on first phase row
+                    if is_first:
+                        row.append(p(f'<b>{dk}</b><br/><font size="6" color="#888888">{d["spool_count"]} spools</font>', s_cell_left))
+                    else:
+                        row.append(p('', s_cell))
+                    # Phase label
+                    row.append(p(f'<font color="#666666">{ph.capitalize()}</font>', s_cell))
+                    # Week cells
+                    for wi, (ws_d, we_d) in enumerate(weeks):
+                        cell_text = ''
+                        cell_bg = None
+                        if ph in phase_dates and ph in exp_phase_dates:
+                            ph_ps, ph_pe = phase_dates[ph]
+                            exp_s, exp_e = exp_phase_dates[ph]
+                            in_std = ph_ps <= we_d and ph_pe >= ws_d
+                            in_exp = exp_s <= we_d and exp_e >= ws_d
+                            is_saved_cell = has_expediting and in_std and not in_exp
+                            is_forecast = is_last_phase and dm_started and dm_fc_end and overall_pct < 100 and dm_fc_end >= ws_d and dm_fc_end <= we_d
+
+                            if in_exp:
+                                cell_bg = HexColor(ph_hex)
+                                if ph_pct >= 100 and we_d < today:
+                                    cell_text = '\u2713'
+                                elif today_week_idx is not None and wi == today_week_idx and 0 < ph_pct < 100:
+                                    cell_text = f'{ph_pct:.0f}%'
+                            elif is_saved_cell:
+                                cell_bg = LIGHT_GREEN
+                                cell_text = '\u2713'
+                            if is_forecast:
+                                if not in_exp: cell_bg = None  # transparent
+                                cell_text = '\u25c6'
+                        # Text color: white on colored bg, green for forecast, dark otherwise
+                        if cell_text:
+                            if cell_text == '\u25c6':
+                                txt_color = '#1B7340'
+                            elif cell_bg and cell_bg != LIGHT_GREEN:
+                                txt_color = 'white'
+                            else:
+                                txt_color = '#333'
+                            row.append(p(f'<font color="{txt_color}" size="7"><b>{cell_text}</b></font>', s_cell))
+                        else:
+                            row.append(p('', s_cell))
+                        # Store bg info for styling later
+                        if '_gantt_bgs' not in d:
+                            d['_gantt_bgs'] = {}
+                        d['_gantt_bgs'][(pi, wi)] = cell_bg
+                    gantt_data.append(row)
+
+            # Column widths for Gantt
+            diam_col_w = 55
+            phase_col_w = 32
+            week_col_w = max(14, (avail_w - diam_col_w - phase_col_w) / max(num_weeks, 1))
+            gantt_col_widths = [diam_col_w, phase_col_w] + [week_col_w] * num_weeks
+
+            gantt_t = Table(gantt_data, colWidths=gantt_col_widths, repeatRows=1)
+            gantt_style = [
+                ('BACKGROUND', (0,0), (-1,0), DARK),
+                ('TEXTCOLOR', (0,0), (-1,0), WHITE),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0,0), (-1,-1), 7),
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ('ALIGN', (0,0), (0,-1), 'LEFT'),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('GRID', (0,0), (-1,-1), 0.3, HexColor('#E0E0E0')),
+                ('TOPPADDING', (0,0), (-1,-1), 2),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+                ('LEFTPADDING', (0,0), (-1,-1), 2),
+                ('RIGHTPADDING', (0,0), (-1,-1), 2),
+            ]
+            # Today column highlight
+            if today_week_idx is not None:
+                tc = today_week_idx + 2  # offset for Diameter+Phase columns
+                gantt_style.append(('BACKGROUND', (tc, 0), (tc, 0), HexColor('#C00000')))
+                # Red borders on today column for all data rows
+                for ri in range(1, len(gantt_data)):
+                    gantt_style.append(('LINEAFTER', (tc, ri), (tc, ri), 1.5, RED))
+                    gantt_style.append(('LINEBEFORE', (tc, ri), (tc, ri), 1.5, RED))
+
+            # Apply phase bar backgrounds
+            data_row_idx = 1
+            for dm_idx, d in enumerate(sched['diameters']):
+                for pi, ph in enumerate(phases):
+                    for wi in range(num_weeks):
+                        bg = d.get('_gantt_bgs', {}).get((pi, wi))
+                        if bg:
+                            gantt_style.append(('BACKGROUND', (wi+2, data_row_idx), (wi+2, data_row_idx), bg))
+                    data_row_idx += 1
+                # Merge diameter cells across phase rows
+                if len(phases) > 1:
+                    first_row = data_row_idx - len(phases)
+                    gantt_style.append(('SPAN', (0, first_row), (0, first_row + len(phases) - 1)))
+
+            gantt_t.setStyle(TableStyle(gantt_style))
+            # Clean up temp _gantt_bgs
+            for d in sched['diameters']:
+                d.pop('_gantt_bgs', None)
+
+            gantt_elems.append(gantt_t)
+
+            # Legend
+            legend_items = []
+            for pi, ph in enumerate(phases):
+                legend_items.append(f'<font color="{phase_colors[pi % len(phase_colors)]}">\u25a0</font> {ph.capitalize()}')
+            if has_expediting:
+                legend_items.append('<font color="#A9D18E">\u25a0</font> Saved')
+            legend_items.append('<font color="#1B7340">\u25c6</font> Forecast')
+            legend_items.append('<font color="#E74C3C">|</font> Today')
+            gantt_elems.append(p('&nbsp;&nbsp;&nbsp;'.join(legend_items), s_small))
+            story.append(KeepTogether(gantt_elems))
+            story.append(Spacer(1, 6*mm))
+
+        # ── 5. Production Rate ───────────────────────────────────────────────
+        actual_weld = fc_data.get('actual_weld_ipd', 0) or 0
+        actual_paint = fc_data.get('actual_paint_m2d', 0) or 0
+        weld_cap = fc_data.get('welding_capability', 0) or 0
+        paint_cap = fc_data.get('painting_capability', 0) or 0
+        steps_def = get_project_steps(project)
+        has_surface = any(s.get('hours_variable') == 'surface' for s in steps_def)
+
+        rate_elems = [p('PRODUCTION RATE', s_heading)]
+        rate_data = []
+        weld_color = '#27AE60' if actual_weld >= weld_cap else '#E74C3C'
+        weld_pct = min(actual_weld / max(weld_cap, 1) * 100, 100) if weld_cap else 0
+        rate_data.append([
+            p('<b>Welding</b>', s_cell_left),
+            p(f'<font color="{weld_color}" size="12"><b>{actual_weld}</b></font>', s_cell),
+            p(f'/ {weld_cap}', s_cell),
+            p('linear inches/day', s_cell),
+            p(f'<font color="{weld_color}">{weld_pct:.0f}% of target</font>', s_cell),
+        ])
+        if has_surface:
+            surface_label = phases[-1].capitalize() if len(phases) > 1 else 'Surface'
+            paint_color = '#27AE60' if actual_paint >= paint_cap else '#E74C3C'
+            paint_pct = min(actual_paint / max(paint_cap, 1) * 100, 100) if paint_cap else 0
+            rate_data.append([
+                p(f'<b>{surface_label}</b>', s_cell_left),
+                p(f'<font color="{paint_color}" size="12"><b>{actual_paint}</b></font>', s_cell),
+                p(f'/ {paint_cap}', s_cell),
+                p('m\u00b2/day', s_cell),
+                p(f'<font color="{paint_color}">{paint_pct:.0f}% of target</font>', s_cell),
+            ])
+        rate_widths = [avail_w * f for f in [0.22, 0.15, 0.1, 0.2, 0.33]]
+        rate_t = Table(rate_data, colWidths=rate_widths)
+        rate_t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), LIGHT_GRAY),
+            ('GRID', (0,0), (-1,-1), 0.5, HexColor('#D0D0D0')),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ]))
+        rate_elems.append(rate_t)
+        story.append(KeepTogether(rate_elems))
+        story.append(Spacer(1, 6*mm))
+
+        # ── 6. Results Summary — Visual KPI cards ────────────────────────────
+        if has_expediting and std_end and commit_end:
+            if not fc_end_d and fc_data and fc_data.get('overall_forecast_end'):
+                fc_end_d = date.fromisoformat(fc_data['overall_forecast_end'])
+            fc_saved = (std_end - fc_end_d).days if fc_end_d else 0
+            fc_diff_c = (commit_end - fc_end_d).days if fc_end_d else 0
+            cards = [
+                ('#2F5496', f'{st["overall_pct"]}%', 'PROGRESS', f'{st["total"]} spools | {st["completed"]} done'),
+                ('#4472C4', f'{commit_end.strftime("%d %b %Y")}', 'COMMITTED END', f'{total_saved}d saved ({wks_saved} wk)'),
+                ('#27AE60' if fc_diff_c >= 0 else '#E74C3C',
+                 f'{fc_end_d.strftime("%d %b %Y") if fc_end_d else chr(8212)}',
+                 'FORECAST END',
+                 f'{"+" if fc_diff_c >= 0 else ""}{fc_diff_c}d vs commitment' if fc_end_d else ''),
+                ('white', str(today) if st['completed'] >= st['total'] else chr(8212), 'ACTUAL END', 'Shown when complete'),
+            ]
+        else:
+            fc_end_d_val = date.fromisoformat(fc_data.get('overall_forecast_end')) if fc_data and fc_data.get('overall_forecast_end') else None
+            cards = [
+                ('#2F5496', f'{st["overall_pct"]}%', 'PROGRESS', f'{st["total"]} spools | {st["completed"]} done'),
+                ('#4472C4', fc_end_d_val.strftime('%d %b %Y') if fc_end_d_val else chr(8212), 'FORECAST END', 'Based on actual rate'),
+                ('white', str(today) if st['completed'] >= st['total'] else chr(8212), 'ACTUAL END', 'Shown when complete'),
+            ]
+        # Build as a row of cards — big number on top, label below
+        s_card = ParagraphStyle('RPT_Card', parent=styles['Normal'], fontSize=9, alignment=TA_CENTER, leading=20)
+        card_row = []
+        for ci, (color, val, label, sub) in enumerate(cards):
+            is_dark = ci == len(cards) - 1  # last card = dark bg
+            lbl_color = 'white' if is_dark else '#333333'
+            sub_color = '#AAAAAA' if is_dark else '#888888'
+            card_row.append(p(
+                f'<font color="{color}" size="16"><b>{val}</b></font><br/>'
+                f'<font color="{lbl_color}" size="8"><b>{label}</b></font><br/>'
+                f'<font color="{sub_color}" size="7">{sub}</font>', s_card))
+        card_w = avail_w / len(cards)
+        card_t = Table([card_row], colWidths=[card_w]*len(cards))
+        card_style = [
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('TOPPADDING', (0,0), (-1,-1), 10), ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+            ('BACKGROUND', (0,0), (-2,-1), LIGHT_BLUE),
+            ('BACKGROUND', (-1,0), (-1,-1), DARK),
+            ('BOX', (0,0), (-1,-1), 0.5, HexColor('#C0D4E8')),
+        ]
+        for ci in range(len(cards)):
+            card_style.append(('LINEBEFORE', (ci, 0), (ci, -1), 0.3, HexColor('#C0D4E8')))
+        card_t.setStyle(TableStyle(card_style))
+        story.append(KeepTogether([p('RESULTS SUMMARY', s_heading), card_t]))
+        story.append(Spacer(1, 6*mm))
+
+        # ── 7. Sea Transit ───────────────────────────────────────────────────
+        if has_expediting and commit_end:
+            if not fc_end_d and fc_data and fc_data.get('overall_forecast_end'):
+                fc_end_d = date.fromisoformat(fc_data['overall_forecast_end'])
+            commit_arrival = commit_end + timedelta(days=transit_days)
+            fc_arrival = fc_end_d + timedelta(days=transit_days) if fc_end_d else None
+            # Visual KPI cards for transit
+            s_transit_card = ParagraphStyle('RPT_TransitCard', parent=styles['Normal'], fontSize=9, alignment=TA_CENTER, leading=20)
+            transit_row = [
+                p(f'<font color="white" size="16"><b>~{transit_days}d</b></font><br/><font size="8" color="#99BBDD"><b>SEA TRANSIT</b></font>', s_transit_card),
+                p(f'<font color="white" size="14"><b>{commit_arrival.strftime("%d %b %Y")}</b></font><br/><font size="8" color="#99BBDD"><b>COMMITTED ARRIVAL</b></font>', s_transit_card),
+                p(f'<font color="white" size="14"><b>{fc_arrival.strftime("%d %b %Y") if fc_arrival else chr(8212)}</b></font><br/><font size="8" color="#99BBDD"><b>FORECAST ARRIVAL</b></font>', s_transit_card),
+            ]
+            transit_t = Table([transit_row], colWidths=[avail_w/3]*3)
+            transit_t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,-1), NAVY),
+                ('VALIGN', (0,0), (-1,0), 'BOTTOM'), ('VALIGN', (0,1), (-1,1), 'TOP'),
+                ('TOPPADDING', (0,0), (-1,0), 8), ('BOTTOMPADDING', (0,0), (-1,0), 0),
+                ('TOPPADDING', (0,1), (-1,1), 0), ('BOTTOMPADDING', (0,1), (-1,1), 6),
+                ('BOX', (0,0), (-1,-1), 0.5, HexColor('#003366')),
+            ]))
+            story.append(KeepTogether([p('SEA TRANSIT', s_heading), transit_t]))
+
+    doc.build(story)
+    return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{today.strftime('%Y%m%d')}.pdf",
+                     mimetype='application/pdf')
+
 # ── HTML Templates ───────────────────────────────────────────────────────────
 COMMON_CSS = """*{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#f0f2f5;color:#333}
@@ -1482,6 +1990,7 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
   <a class="btn" href="/api/project/{{ project }}/export">\U0001f4e5 Export Excel</a>
   <a class="btn" href="/project/{{ project }}/report" style="background:#27ae60">\U0001f4ca Report / \u62a5\u544a</a>
   <a class="btn" href="/api/project/{{ project }}/report/download" style="background:#ED7D31">\U0001f4ca Report Excel</a>
+  <a class="btn" href="/api/project/{{ project }}/report/pdf" style="background:#E74C3C">\U0001f4c4 Report PDF</a>
 </div>
 <div id="target-banner"></div>
 <div id="rate-strip"></div>
@@ -1821,6 +2330,7 @@ REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vi
 <div id="rpt-content"><div style="text-align:center;padding:40px;color:#888">Loading report... / \u52a0\u8f7d\u62a5\u544a\u4e2d...</div></div>
 <div style="padding:16px;text-align:center" class="no-print">
   <a class="btn" href="/api/project/{{ project }}/report/download">\U0001f4e5 Excel Report / Excel\u62a5\u544a</a>
+  <a class="btn" href="/api/project/{{ project }}/report/pdf" style="margin-left:8px;background:#E74C3C">\U0001f4c4 PDF Report / PDF\u62a5\u544a</a>
   <button class="btn" onclick="window.print()" style="margin-left:8px">\U0001f5a8 Print / \u6253\u5370</button>
 </div>
 <script>

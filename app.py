@@ -2430,7 +2430,6 @@ async function load(){
         <div class="gantt-mini"><table class="gantt-table"><thead><tr>
         <th style="min-width:70px;background:#404040">Diameter</th><th style="min-width:45px;background:#404040">Phase</th>`;
       const weeks = [];
-      const addDays = (dt,n) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()+n);
       for(let i=0;i<numWeeks;i++){
         const ws = addDays(psDate, i*7);
         const we = addDays(ws, 6);

@@ -2478,7 +2478,7 @@ async function load(){
         const isLast = dmIdx===lastDiamIdx;
         // One row per phase
         html += `<tr>`;
-        html += `<td class="g-label" rowspan="${phases.length}" style="color:#2F5496;font-size:13px;height:${Math.max(50, phases.length*28)}px">${dm.diameter}<br><span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog"><div class="mini-prog-fill" style="width:${overallP}%"></div></div></td>`;
+        html += `<td class="g-label" rowspan="${phases.length}" style="color:#2F5496;font-size:13px"><b>${dm.diameter}</b> <span style="font-size:8px;color:#888;font-weight:400">${dm.spool_count} spools</span><div class="mini-prog" style="margin-top:2px"><div class="mini-prog-fill" style="width:${overallP}%"></div></div></td>`;
         phases.forEach((ph, pi) => {
           if(pi > 0) html += `<tr>`;
           const phP = dmPhaseAvgs[ph]||0;

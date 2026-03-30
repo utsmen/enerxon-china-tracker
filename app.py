@@ -1292,8 +1292,8 @@ def api_report_download(project):
                             is_forecast = is_last_phase and dm_started and dm_fc_end and overall_pct < 100 and dm_fc_end >= ws_d and dm_fc_end <= we_d
                             if in_exp:
                                 cell.fill = ph_fill
-                                if is_today_col and 0 < ph_pct < 100: cell.value = f'{ph_pct:.0f}%'; cell.font = Font(bold=True, size=7, color='FFFFFF'); cell.alignment = center
-                                elif ph_pct >= 100 and we_d < today: cell.value = '\u2713'; cell.font = Font(bold=True, size=8, color='FFFFFF'); cell.alignment = center
+                                if is_today_col: cell.value = f'{ph_pct:.0f}%'; cell.font = Font(bold=True, size=7, color='FFFFFF'); cell.alignment = center
+                                elif we_d < today: cell.value = '\u2713'; cell.font = Font(bold=True, size=8, color='FFFFFF'); cell.alignment = center
                             elif is_saved_cell:
                                 cell.fill = saved_fill
                             elif is_forecast:
@@ -1698,14 +1698,14 @@ def api_report_pdf(project):
 
                             if in_exp:
                                 cell_bg = HexColor(ph_hex)
-                                if ph_pct >= 100 and we_d < today:
-                                    cell_text = '\u2713'
-                                elif today_week_idx is not None and wi == today_week_idx and 0 < ph_pct < 100:
+                                if today_week_idx is not None and wi == today_week_idx:
                                     cell_text = f'{ph_pct:.0f}%'
+                                elif we_d < today:
+                                    cell_text = '\u2713'
                             elif is_saved_cell:
                                 cell_bg = LIGHT_GREEN
                             if is_forecast:
-                                if not in_exp: cell_bg = None  # transparent
+                                if not in_exp: cell_bg = None
                                 cell_text = '\u25c6'
                         # Text color: white on colored bg, green for forecast, dark otherwise
                         if cell_text:

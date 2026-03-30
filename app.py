@@ -2036,7 +2036,7 @@ async function load(){
   if(hasExpediting && schd && schd.diameters && schd.diameters.length){
     const starts = schd.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length){
-      const toLocal = s => new Date(s + 'T00:00:00');
+      const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
       const psDate = toLocal(starts[0]);
       const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
       const commitEnd = new Date(stdEnd.getTime() - totalSaved*86400000);
@@ -2405,7 +2405,7 @@ async function load(){
     if(starts.length) prodStart = starts[0];
     if(prodStart){
       // Parse dates as local time (append T00:00 to avoid UTC interpretation)
-      const toLocal = s => new Date(s + 'T00:00:00');
+      const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
       const psDate = toLocal(prodStart);
       const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
       const commitEnd = hasExpediting ? new Date(stdEnd.getTime() - totalSaved*86400000) : stdEnd;

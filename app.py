@@ -2020,6 +2020,9 @@ async function load(){
   const fc = st.forecast||{}, sett = st.settings||{}, schd = st.schedule_data, pr = st.production_rate||{};
   const phases = st.phase_order || schd?.phase_order || ['fab'];
   const phaseColors = ['#4472C4', '#ED7D31', '#8E44AD', '#27AE60'];
+  const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
+  const addDays = (dt,n) => new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+n);
+  const fmt = d => d.toLocaleDateString('en',{day:'2-digit',month:'short'});
   document.getElementById('subtitle').textContent=`${st.total} spools \u00b7 ${st.overall_pct}% \u00b7 ${st.completed} done / \u5b8c\u6210 ${st.completed}`;
   document.getElementById('stats').innerHTML=[
     {v:st.total,l:'Total / \u603b\u6570'},{v:st.completed,l:'Done / \u5b8c\u6210',c:'#27ae60'},
@@ -2036,8 +2039,6 @@ async function load(){
   if(hasExpediting && schd && schd.diameters && schd.diameters.length){
     const starts = schd.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length){
-      const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
-      const addDays = (dt,n) => new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+n);
       const psDate = toLocal(starts[0]);
       const stdEnd = addDays(psDate, stdWeeks*7 - 1);
       const commitEnd = addDays(stdEnd, -totalSaved);
@@ -2046,7 +2047,6 @@ async function load(){
       const daysToTarget = Math.round((commitEnd - today) / 86400000);
       const fcSaved = fcEnd ? Math.ceil((stdEnd - fcEnd) / 86400000) : 0;
       const fcDiff = fcEnd ? Math.ceil((commitEnd - fcEnd) / 86400000) : 0;
-      const fmt = d => d.toLocaleDateString('en',{day:'2-digit',month:'short'});
       const statusCls = fcDiff >= 0 ? 'tb-ok' : 'tb-warn';
       const pillCls = fcDiff >= 0 ? 'sp-green' : 'sp-red';
       const pillText = fcDiff >= 0 ? `\u2713 ${fcDiff}d ahead / \u8d85\u524d` : `\u2717 ${Math.abs(fcDiff)}d behind / \u843d\u540e`;
@@ -2364,6 +2364,8 @@ async function load(){
   const totalSaved = wksSaved*7+daysSaved;
   const hasExpediting = totalSaved > 0;
   const transitDays = parseInt(sett.sea_transit_days||'45');
+  const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
+  const addDays = (dt,n) => new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+n);
   const fmt = dt => dt.toLocaleDateString('en',{day:'2-digit',month:'short',year:'numeric'});
   const fmtShort = dt => dt.toLocaleDateString('en',{day:'2-digit',month:'short'});
 
@@ -2405,8 +2407,6 @@ async function load(){
     const starts = sch.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length) prodStart = starts[0];
     if(prodStart){
-      const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
-      const addDays = (dt,n) => new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+n);
       const psDate = toLocal(prodStart);
       const stdEnd = addDays(psDate, stdWeeks*7 - 1);
       const commitEnd = hasExpediting ? addDays(stdEnd, -totalSaved) : stdEnd;

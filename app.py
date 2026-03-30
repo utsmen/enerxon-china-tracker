@@ -2037,12 +2037,13 @@ async function load(){
     const starts = schd.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length){
       const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
+      const addDays = (dt,n) => new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+n);
       const psDate = toLocal(starts[0]);
-      const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
-      const commitEnd = new Date(stdEnd.getTime() - totalSaved*86400000);
+      const stdEnd = addDays(psDate, stdWeeks*7 - 1);
+      const commitEnd = addDays(stdEnd, -totalSaved);
       const fcEnd = fc.overall_forecast_end ? toLocal(fc.overall_forecast_end) : null;
       const today = new Date(); today.setHours(0,0,0,0);
-      const daysToTarget = Math.ceil((commitEnd - today) / 86400000);
+      const daysToTarget = Math.round((commitEnd - today) / 86400000);
       const fcSaved = fcEnd ? Math.ceil((stdEnd - fcEnd) / 86400000) : 0;
       const fcDiff = fcEnd ? Math.ceil((commitEnd - fcEnd) / 86400000) : 0;
       const fmt = d => d.toLocaleDateString('en',{day:'2-digit',month:'short'});
@@ -2404,11 +2405,11 @@ async function load(){
     const starts = sch.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length) prodStart = starts[0];
     if(prodStart){
-      // Parse dates as local time (append T00:00 to avoid UTC interpretation)
       const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
+      const addDays = (dt,n) => new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+n);
       const psDate = toLocal(prodStart);
-      const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
-      const commitEnd = hasExpediting ? new Date(stdEnd.getTime() - totalSaved*86400000) : stdEnd;
+      const stdEnd = addDays(psDate, stdWeeks*7 - 1);
+      const commitEnd = hasExpediting ? addDays(stdEnd, -totalSaved) : stdEnd;
       const fcEnd = fc.overall_forecast_end ? toLocal(fc.overall_forecast_end) : null;
       const today = new Date(); today.setHours(0,0,0,0);
 
@@ -2429,9 +2430,10 @@ async function load(){
         <div class="gantt-mini"><table class="gantt-table"><thead><tr>
         <th style="min-width:70px;background:#404040">Diameter</th><th style="min-width:45px;background:#404040">Phase</th>`;
       const weeks = [];
+      const addDays = (dt,n) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()+n);
       for(let i=0;i<numWeeks;i++){
-        const ws = new Date(psDate.getTime()+i*7*86400000);
-        const we = new Date(ws.getTime()+6*86400000);
+        const ws = addDays(psDate, i*7);
+        const we = addDays(ws, 6);
         const isCurrent = today>=ws && today<=we;
         weeks.push({start:ws,end:we,num:i+1,current:isCurrent});
         html += `<th${isCurrent?' class="wk-current"':''}>W${i+1}<br><span class="wk-dates">${fmtShort(ws)} \u2192 ${fmtShort(we)}</span></th>`;
@@ -2439,7 +2441,7 @@ async function load(){
       html += `</tr></thead><tbody>`;
       const ratio = hasExpediting ? (stdWeeks - wksSaved) / stdWeeks : 1;
       const lastDiamIdx = sch.diameters.length - 1;
-      const DAY = 86400000;
+
 
       sch.diameters.forEach((dm, dmIdx) => {
         const fdi = fcDiams[dm.diameter] || {};
@@ -2462,8 +2464,12 @@ async function load(){
           const {s:phS, e:phE} = phaseDates[ph];
           let expS, expE;
           if(hasExpediting){
-            expS = new Date(Math.min(psDate.getTime() + (phS-psDate)*ratio, commitEnd.getTime()));
-            expE = new Date(Math.min(psDate.getTime() + (phE-psDate)*ratio, commitEnd.getTime()));
+            const daysDiffS = Math.round((phS-psDate)/86400000);
+            const daysDiffE = Math.round((phE-psDate)/86400000);
+            expS = addDays(psDate, Math.round(daysDiffS*ratio));
+            expE = addDays(psDate, Math.round(daysDiffE*ratio));
+            if(expE > commitEnd) expE = commitEnd;
+            if(expS > commitEnd) expS = commitEnd;
             if(prevExpEnd && expS < prevExpEnd) expS = prevExpEnd;
             if(expE < expS) expE = expS;
           } else { expS = phS; expE = phE; }
@@ -2552,8 +2558,8 @@ async function load(){
       </div>`;
 
       // Transit
-      const arrivalDate = fcEnd ? new Date(fcEnd.getTime()+transitDays*86400000) : null;
-      const commitArrival = hasExpediting ? new Date(commitEnd.getTime()+transitDays*86400000) : null;
+      const arrivalDate = fcEnd ? addDays(fcEnd, transitDays) : null;
+      const commitArrival = hasExpediting ? addDays(commitEnd, transitDays) : null;
       html += `<div class="transit-strip">
         <div style="display:flex;align-items:center;gap:6px"><span style="font-size:18px">\U0001f6a2</span><div><div style="font-size:10px;color:#888;text-transform:uppercase">Sea Transit / \u6d77\u8fd0</div><div style="font-size:14px;font-weight:700;color:#003366">~${transitDays} days</div></div></div>
         ${hasExpediting?`<div style="width:1px;height:28px;background:#e0e0e0"></div>

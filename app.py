@@ -2036,10 +2036,11 @@ async function load(){
   if(hasExpediting && schd && schd.diameters && schd.diameters.length){
     const starts = schd.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length){
-      const psDate = new Date(starts[0]);
+      const toLocal = s => new Date(s + 'T00:00:00');
+      const psDate = toLocal(starts[0]);
       const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
       const commitEnd = new Date(stdEnd.getTime() - totalSaved*86400000);
-      const fcEnd = fc.overall_forecast_end ? new Date(fc.overall_forecast_end) : null;
+      const fcEnd = fc.overall_forecast_end ? toLocal(fc.overall_forecast_end) : null;
       const today = new Date(); today.setHours(0,0,0,0);
       const daysToTarget = Math.ceil((commitEnd - today) / 86400000);
       const fcSaved = fcEnd ? Math.ceil((stdEnd - fcEnd) / 86400000) : 0;
@@ -2403,10 +2404,12 @@ async function load(){
     const starts = sch.diameters.map(x=>x.total_start).filter(x=>x).sort();
     if(starts.length) prodStart = starts[0];
     if(prodStart){
-      const psDate = new Date(prodStart);
+      // Parse dates as local time (append T00:00 to avoid UTC interpretation)
+      const toLocal = s => new Date(s + 'T00:00:00');
+      const psDate = toLocal(prodStart);
       const stdEnd = new Date(psDate.getTime() + stdWeeks*7*86400000 - 86400000);
       const commitEnd = hasExpediting ? new Date(stdEnd.getTime() - totalSaved*86400000) : stdEnd;
-      const fcEnd = fc.overall_forecast_end ? new Date(fc.overall_forecast_end) : null;
+      const fcEnd = fc.overall_forecast_end ? toLocal(fc.overall_forecast_end) : null;
       const today = new Date(); today.setHours(0,0,0,0);
 
       if(hasExpediting){
@@ -2442,14 +2445,14 @@ async function load(){
         const fdi = fcDiams[dm.diameter] || {};
         const dmPhaseAvgs = fdi.phase_avgs || dm.phase_avgs || {};
         const overallP = fdi.overall_pct||0;
-        const dmFcEnd = fdi.forecast_end ? new Date(fdi.forecast_end) : null;
+        const dmFcEnd = fdi.forecast_end ? toLocal(fdi.forecast_end) : null;
         const dmStarted = fdi.started;
         // Parse schedule dates from phase_dates
         const phaseDates = {};
         const dmPD = dm.phase_dates || {};
         phases.forEach(ph => {
           const pd = dmPD[ph];
-          if(pd && pd.start && pd.end) phaseDates[ph] = {s:new Date(pd.start), e:new Date(pd.end)};
+          if(pd && pd.start && pd.end) phaseDates[ph] = {s:toLocal(pd.start), e:toLocal(pd.end)};
         });
         // Compute expedited dates per phase
         const expDates = {};
@@ -2489,7 +2492,7 @@ async function load(){
               const isForecast = isLastPhase && dmStarted && dmFcEnd && overallP<100 && dmFcEnd>=w.start && dmFcEnd<=w.end;
               if(inExp){ content = `<div class="g-bar" style="background:${phColor};position:absolute;top:2px;left:2px;right:2px;bottom:2px;border-radius:3px"></div>`;
                 if(isToday) content += `<div class="g-today-line"></div><div class="g-pct">${phP}%</div>`;
-                else if(phP >= 100 && w.end < today) content += `<div class="g-pct" style="color:#fff">\u2713</div>`;
+                else if(w.end < today) content += `<div class="g-pct" style="color:#fff">\u2713</div>`;
               } else if(isSaved){ content = `<div class="g-bar g-saved"></div>`; }
               if(isForecast) content += `<div class="g-bar g-forecast"></div>`;
               if(isToday && !inExp){

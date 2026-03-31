@@ -1297,7 +1297,7 @@ def api_report_download(project):
                             elif is_saved_cell:
                                 cell.fill = saved_fill
                             elif is_forecast:
-                                cell.fill = forecast_fill; cell.value = '\u25c6'; cell.font = Font(size=8, color='C00000'); cell.alignment = center
+                                cell.border = Border(left=Side('medium',color='E74C3C'),right=Side('medium',color='E74C3C'),top=Side('medium',color='E74C3C'),bottom=Side('medium',color='E74C3C'))
                             if is_today_col: cell.border = today_bar_border if in_exp else today_border
                     else:
                         for i in range(len(weeks)):
@@ -1313,7 +1313,7 @@ def api_report_download(project):
             if has_expediting:
                 lg = ws.cell(row, legend_col, 'Saved \u2713'); lg.fill = saved_fill; lg.font = Font(size=8, color='A9D18E'); lg.alignment = center
                 legend_col += 1
-            lg = ws.cell(row, legend_col, '\u25c6 Forecast'); lg.fill = forecast_fill; lg.font = Font(size=8, color='C00000'); lg.alignment = center
+            lg = ws.cell(row, legend_col, '[ ] Forecast'); lg.font = Font(size=8, color='E74C3C'); lg.alignment = center; lg.border = Border(left=Side('medium',color='E74C3C'),right=Side('medium',color='E74C3C'),top=Side('medium',color='E74C3C'),bottom=Side('medium',color='E74C3C'))
             legend_col += 1
             ws.cell(row, legend_col, '| Today |').font = Font(bold=True, size=8, color='FF0000')
             row += 2
@@ -1706,15 +1706,12 @@ def api_report_pdf(project):
                                 cell_bg = LIGHT_GREEN
                             if is_forecast:
                                 if not in_exp: cell_bg = None
-                                cell_text = '\u25c6'
-                        # Text color: white on colored bg, green for forecast, dark otherwise
+                                # Mark for dashed border (applied via TableStyle below)
+                                if '_gantt_forecast' not in d: d['_gantt_forecast'] = []
+                                d['_gantt_forecast'].append((pi, wi))
+                        # Text color
                         if cell_text:
-                            if cell_text == '\u25c6':
-                                txt_color = '#1B7340'
-                            elif cell_bg and cell_bg != LIGHT_GREEN:
-                                txt_color = 'white'
-                            else:
-                                txt_color = '#333'
+                            txt_color = 'white' if cell_bg and cell_bg != LIGHT_GREEN else '#333'
                             row.append(p(f'<font color="{txt_color}" size="7"><b>{cell_text}</b></font>', s_cell))
                         else:
                             row.append(p('', s_cell))
@@ -1768,10 +1765,20 @@ def api_report_pdf(project):
                     first_row = data_row_idx - len(phases)
                     gantt_style.append(('SPAN', (0, first_row), (0, first_row + len(phases) - 1)))
 
+            # Apply forecast dashed red borders
+            data_row_idx = 1
+            for dm_idx, d in enumerate(sched['diameters']):
+                for pi, ph in enumerate(phases):
+                    for (fpi, fwi) in d.get('_gantt_forecast', []):
+                        if fpi == pi:
+                            gantt_style.append(('BOX', (fwi+2, data_row_idx), (fwi+2, data_row_idx), 1.5, RED))
+                    data_row_idx += 1
+
             gantt_t.setStyle(TableStyle(gantt_style))
-            # Clean up temp _gantt_bgs
+            # Clean up temp data
             for d in sched['diameters']:
                 d.pop('_gantt_bgs', None)
+                d.pop('_gantt_forecast', None)
 
             gantt_elems.append(gantt_t)
 
@@ -1781,7 +1788,7 @@ def api_report_pdf(project):
                 legend_items.append(f'<font color="{phase_colors[pi % len(phase_colors)]}">\u25a0</font> {ph.capitalize()}')
             if has_expediting:
                 legend_items.append('<font color="#A9D18E">\u25a0</font> Saved')
-            legend_items.append('<font color="#1B7340">\u25c6</font> Forecast')
+            legend_items.append('<font color="#E74C3C">[ ]</font> Forecast')
             legend_items.append('<font color="#E74C3C">|</font> Today')
             gantt_elems.append(p('&nbsp;&nbsp;&nbsp;'.join(legend_items), s_small))
             story.append(KeepTogether(gantt_elems))

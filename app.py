@@ -1230,7 +1230,7 @@ def api_report_download(project):
             row += 1
             phase_fills = [PatternFill(start_color=c, end_color=c, fill_type='solid') for c in phase_colors[:len(phases)]]
             saved_fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
-            forecast_fill = PatternFill(start_color='FFC000', end_color='FFC000', fill_type='solid')
+
             today_border = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('thin',color='C0C0C0'),bottom=Side('thin',color='C0C0C0'))
             today_bar_border = Border(left=Side('thick',color='FF0000'),right=Side('thick',color='FF0000'),top=Side('medium',color='333333'),bottom=Side('medium',color='333333'))
             for d in sched['diameters']:

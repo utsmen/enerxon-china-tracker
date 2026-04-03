@@ -147,6 +147,11 @@ def init_db():
             # Migrate legacy schedule task_type names to phase names
             "UPDATE schedule SET task_type = 'fab' WHERE task_type IN ('fabrication', 'Fabricacion')",
             "UPDATE schedule SET task_type = 'paint' WHERE task_type IN ('painting', 'Pintura')",
+            # QC Reporting tables
+            "CREATE TABLE IF NOT EXISTS qc_reports (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, report_subtype TEXT DEFAULT '', status TEXT DEFAULT 'draft', inspector_name TEXT DEFAULT '', inspector_date TEXT DEFAULT '', tpi_name TEXT DEFAULT '', tpi_date TEXT DEFAULT '', data TEXT DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW(), created_by TEXT DEFAULT '', UNIQUE(project, spool_id, report_type, report_subtype))",
+            "CREATE TABLE IF NOT EXISTS qc_images (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, image_data BYTEA NOT NULL, filename TEXT DEFAULT '', mime_type TEXT DEFAULT 'image/jpeg', caption TEXT DEFAULT '', uploaded_at TIMESTAMP DEFAULT NOW(), uploaded_by TEXT DEFAULT '')",
+            "CREATE INDEX IF NOT EXISTS idx_qc_reports_ps ON qc_reports(project, spool_id)",
+            "CREATE INDEX IF NOT EXISTS idx_qc_images_ps ON qc_images(project, spool_id, report_type)",
         ]
         for stmt in pg_statements:
             try: cur.execute(stmt)
@@ -165,7 +170,110 @@ def init_db():
             CREATE TABLE IF NOT EXISTS project_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', UNIQUE(project, step_number));
             UPDATE schedule SET task_type = 'fab' WHERE task_type IN ('fabrication', 'Fabricacion');
             UPDATE schedule SET task_type = 'paint' WHERE task_type IN ('painting', 'Pintura');
+            CREATE TABLE IF NOT EXISTS qc_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, report_subtype TEXT DEFAULT '', status TEXT DEFAULT 'draft', inspector_name TEXT DEFAULT '', inspector_date TEXT DEFAULT '', tpi_name TEXT DEFAULT '', tpi_date TEXT DEFAULT '', data TEXT DEFAULT '{}', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), created_by TEXT DEFAULT '', UNIQUE(project, spool_id, report_type, report_subtype));
+            CREATE TABLE IF NOT EXISTS qc_images (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, image_data BLOB NOT NULL, filename TEXT DEFAULT '', mime_type TEXT DEFAULT 'image/jpeg', caption TEXT DEFAULT '', uploaded_at TEXT DEFAULT (datetime('now')), uploaded_by TEXT DEFAULT '');
         """); c.close()
+
+# ── QC Report Type Registry ──────────────────────────────────────────────────
+# Defines all QC report types, which projects they apply to, and their categories.
+# 'per_weld' reports get one row per weld joint in the spool.
+# 'has_images' reports allow image upload (e.g., RT X-ray films).
+QC_REPORT_TYPES = {
+    'dimensional': {
+        'name_en': 'Dimensional Inspection', 'name_cn': '尺寸检验',
+        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'measurement',
+        'subtypes': {'ENJOB25012424': [('pre_paint','Pre-Painting / 喷漆前'),('post_paint','Post-Painting / 喷漆后')]},
+        'icon': '📐',
+    },
+    'fitup': {
+        'name_en': 'Fit-up Inspection', 'name_cn': '组对检验',
+        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'weld',
+        'per_weld': True, 'icon': '🔧',
+    },
+    'welding_log': {
+        'name_en': 'Welding Log', 'name_cn': '焊接记录',
+        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'weld',
+        'per_weld': True, 'icon': '🔥',
+    },
+    'vt': {
+        'name_en': 'Visual Testing (VT)', 'name_cn': '目视检验 (VT)',
+        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'ndt',
+        'per_weld': True, 'icon': '👁',
+    },
+    'rt': {
+        'name_en': 'Radiographic Testing (RT)', 'name_cn': '射线检测 (RT)',
+        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'ndt',
+        'per_weld': True, 'has_images': True, 'icon': '☢',
+    },
+    'pt': {
+        'name_en': 'Penetrant Testing (PT)', 'name_cn': '渗透检测 (PT)',
+        'projects': ['ENJOB25011423'], 'category': 'ndt',
+        'per_weld': True, 'icon': '🧪',
+    },
+    'mt': {
+        'name_en': 'Magnetic Particle (MT)', 'name_cn': '磁粉检测 (MT)',
+        'projects': ['ENJOB25012424'], 'category': 'ndt',
+        'per_weld': True, 'icon': '🧲',
+    },
+    'pmi': {
+        'name_en': 'PMI Report', 'name_cn': 'PMI检测报告',
+        'projects': ['ENJOB25011423'], 'category': 'material',
+        'icon': '🔬',
+    },
+    'ferrite': {
+        'name_en': 'Ferrite Content', 'name_cn': '铁素体含量',
+        'projects': ['ENJOB25011423'], 'category': 'material',
+        'per_weld': True, 'icon': '📊',
+    },
+    'cutting': {
+        'name_en': 'Cutting Inspection', 'name_cn': '切割检验',
+        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'fab',
+        'icon': '✂',
+    },
+    'weld_map': {
+        'name_en': 'Weld Map', 'name_cn': '焊缝图',
+        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'fab',
+        'has_images': True, 'icon': '🗺',
+    },
+    'passivation': {
+        'name_en': 'Passivation Record', 'name_cn': '钝化记录',
+        'projects': ['ENJOB25011423'], 'category': 'surface',
+        'icon': '🧴',
+    },
+    'ferroxyl': {
+        'name_en': 'Ferroxyl Test', 'name_cn': '铁离子检测',
+        'projects': ['ENJOB25011423'], 'category': 'surface',
+        'has_images': True, 'icon': '🧫',
+    },
+    'dft': {
+        'name_en': 'Coating Inspection (DFT)', 'name_cn': '涂层检验 (DFT)',
+        'projects': ['ENJOB25012424'], 'category': 'surface',
+        'icon': '🎨',
+    },
+}
+
+QC_CATEGORY_LABELS = {
+    'fab': ('Fabrication / 制造', '#2F5496'),
+    'weld': ('Welding / 焊接', '#C0392B'),
+    'ndt': ('NDT / 无损检测', '#8E44AD'),
+    'measurement': ('Measurement / 测量', '#27AE60'),
+    'material': ('Material / 材料', '#E67E22'),
+    'surface': ('Surface Treatment / 表面处理', '#16A085'),
+}
+
+def get_qc_reports_for_project(project):
+    """Return list of (report_type, config, subtype) tuples applicable to this project."""
+    result = []
+    for rtype, cfg in QC_REPORT_TYPES.items():
+        if project not in cfg['projects']:
+            continue
+        subtypes = cfg.get('subtypes', {}).get(project)
+        if subtypes:
+            for sub_key, sub_label in subtypes:
+                result.append((rtype, cfg, sub_key, sub_label))
+        else:
+            result.append((rtype, cfg, '', ''))
+    return result
 
 # ── Helpers: Project Steps & Settings ─────────────────────────────────────────
 def get_project_steps(project):
@@ -776,6 +884,139 @@ def api_update_step(project, spool_id, step):
         (project, spool_id, step, act, op, f"{sn}: {act} by {op}"))
     db_commit()
     return jsonify({'ok':True, 'progress_pct': spool_progress(project, spool_id)})
+
+# ── API: QC Reports ──────────────────────────────────────────────────────────
+@app.route('/project/<project>/spool/<spool_id>/qc/<report_type>')
+@login_required
+def qc_report_page(project, spool_id, report_type):
+    subtype = request.args.get('sub', '')
+    return render_template_string(QC_REPORT_HTML, project=project, spool_id=spool_id,
+                                  report_type=report_type, report_subtype=subtype)
+
+@app.route('/api/project/<project>/spool/<spool_id>/qc')
+@login_required
+def api_qc_list(project, spool_id):
+    """List all QC reports for a spool with status."""
+    reports = get_qc_reports_for_project(project)
+    existing = {}
+    rows = db_fetchall("SELECT report_type, report_subtype, status, inspector_name, tpi_name, updated_at FROM qc_reports WHERE project=? AND spool_id=?", (project, spool_id))
+    for r in rows:
+        key = f"{r['report_type']}|{r.get('report_subtype','')}"
+        existing[key] = {'status': r['status'], 'inspector': r.get('inspector_name',''), 'tpi': r.get('tpi_name',''), 'updated': r.get('updated_at','')}
+    result = []
+    for rtype, cfg, subtype, sub_label in reports:
+        key = f"{rtype}|{subtype}"
+        ex = existing.get(key, {})
+        result.append({
+            'type': rtype, 'subtype': subtype, 'sub_label': sub_label,
+            'name_en': cfg['name_en'], 'name_cn': cfg['name_cn'],
+            'category': cfg['category'], 'icon': cfg.get('icon',''),
+            'has_images': cfg.get('has_images', False),
+            'per_weld': cfg.get('per_weld', False),
+            'status': ex.get('status', 'not_started'),
+            'inspector': ex.get('inspector', ''),
+            'tpi': ex.get('tpi', ''),
+            'updated': ex.get('updated', ''),
+        })
+    return jsonify(result)
+
+@app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>', methods=['GET'])
+@login_required
+def api_qc_get(project, spool_id, report_type):
+    subtype = request.args.get('sub', '')
+    row = db_fetchone("SELECT * FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
+                      (project, spool_id, report_type, subtype))
+    if row:
+        r = dict(row)
+        r['data'] = json.loads(r.get('data','{}'))
+        # Count images
+        img_count = db_fetchone("SELECT COUNT(*) as cnt FROM qc_images WHERE project=? AND spool_id=? AND report_type=?",
+                                (project, spool_id, report_type))
+        r['image_count'] = img_count['cnt'] if img_count else 0
+        return jsonify(r)
+    # Return empty template
+    cfg = QC_REPORT_TYPES.get(report_type, {})
+    return jsonify({
+        'project': project, 'spool_id': spool_id, 'report_type': report_type,
+        'report_subtype': subtype, 'status': 'not_started',
+        'inspector_name': '', 'inspector_date': '', 'tpi_name': '', 'tpi_date': '',
+        'data': {}, 'image_count': 0,
+    })
+
+@app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>', methods=['POST'])
+@login_required
+def api_qc_save(project, spool_id, report_type):
+    d = request.get_json() or {}
+    subtype = d.get('report_subtype', '')
+    status = d.get('status', 'draft')
+    inspector = d.get('inspector_name', '')
+    inspector_date = d.get('inspector_date', '')
+    tpi = d.get('tpi_name', '')
+    tpi_date = d.get('tpi_date', '')
+    data_json = json.dumps(d.get('data', {}))
+    created_by = d.get('created_by', inspector)
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if USE_PG:
+        db_execute("""INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,inspector_name,inspector_date,tpi_name,tpi_date,data,created_by,updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (project,spool_id,report_type,report_subtype) DO UPDATE SET
+            status=EXCLUDED.status, inspector_name=EXCLUDED.inspector_name, inspector_date=EXCLUDED.inspector_date,
+            tpi_name=EXCLUDED.tpi_name, tpi_date=EXCLUDED.tpi_date, data=EXCLUDED.data, updated_at=EXCLUDED.updated_at""",
+            (project, spool_id, report_type, subtype, status, inspector, inspector_date, tpi, tpi_date, data_json, created_by, now))
+    else:
+        db_execute("""INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,inspector_name,inspector_date,tpi_name,tpi_date,data,created_by,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(project,spool_id,report_type,report_subtype) DO UPDATE SET
+            status=excluded.status, inspector_name=excluded.inspector_name, inspector_date=excluded.inspector_date,
+            tpi_name=excluded.tpi_name, tpi_date=excluded.tpi_date, data=excluded.data, updated_at=excluded.updated_at""",
+            (project, spool_id, report_type, subtype, status, inspector, inspector_date, tpi, tpi_date, data_json, created_by, now))
+    db_commit()
+    return jsonify({'ok': True})
+
+@app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>/image', methods=['POST'])
+@login_required
+def api_qc_image_upload(project, spool_id, report_type):
+    if 'file' in request.files:
+        f = request.files['file']
+        img_data = f.read()
+        fname = f.filename or 'image.jpg'
+        mime = f.content_type or 'image/jpeg'
+    else:
+        img_data = request.get_data()
+        fname = request.headers.get('X-Filename', 'image.jpg')
+        mime = request.content_type or 'image/jpeg'
+    if not img_data:
+        return jsonify({'error': 'No image data'}), 400
+    caption = request.form.get('caption', '') if 'file' in request.files else request.headers.get('X-Caption', '')
+    operator = request.form.get('operator', '') if 'file' in request.files else request.headers.get('X-Operator', '')
+    db_execute("INSERT INTO qc_images (project,spool_id,report_type,image_data,filename,mime_type,caption,uploaded_by) VALUES (?,?,?,?,?,?,?,?)",
+        (project, spool_id, report_type, img_data, fname, mime, caption, operator))
+    db_commit()
+    return jsonify({'ok': True, 'size_kb': round(len(img_data)/1024, 1)})
+
+@app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>/images')
+@login_required
+def api_qc_images_list(project, spool_id, report_type):
+    rows = db_fetchall("SELECT id, filename, mime_type, caption, uploaded_by, uploaded_at FROM qc_images WHERE project=? AND spool_id=? AND report_type=? ORDER BY id",
+        (project, spool_id, report_type))
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/project/<project>/qc/image/<int:image_id>')
+@login_required
+def api_qc_image_serve(project, image_id):
+    row = db_fetchone("SELECT image_data, mime_type, filename FROM qc_images WHERE id=? AND project=?", (image_id, project))
+    if not row:
+        return 'Not found', 404
+    from io import BytesIO
+    return send_file(BytesIO(row['image_data']), mimetype=row.get('mime_type','image/jpeg'),
+                     download_name=row.get('filename','image.jpg'))
+
+@app.route('/api/project/<project>/qc/image/<int:image_id>', methods=['DELETE'])
+@login_required
+def api_qc_image_delete(project, image_id):
+    db_execute("DELETE FROM qc_images WHERE id=? AND project=?", (image_id, project))
+    db_commit()
+    return jsonify({'ok': True})
 
 # ── API: Import & Export ──────────────────────────────────────────────────────
 @app.route('/api/import', methods=['POST'])
@@ -2187,6 +2428,19 @@ SPOOL_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
 .step-rem{padding:4px 16px 12px 56px}
 .step-rem input{width:100%;padding:6px 10px;border:1px solid #ddd;border-radius:6px;font-size:12px}
 .wbadge{font-size:10px;background:#f0f2f5;padding:2px 6px;border-radius:4px;color:#888}
+.tab-bar{display:flex;padding:0 16px;gap:4px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.tab-btn{flex:1;padding:12px;text-align:center;font-size:13px;font-weight:600;cursor:pointer;border-bottom:3px solid transparent;color:#888;transition:all .2s}
+.tab-btn.active{color:#2F5496;border-bottom-color:#2F5496}
+.tab-content{display:none}.tab-content.active{display:block}
+.qc-card{background:#fff;border-radius:10px;margin-bottom:8px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05);display:flex;align-items:center;gap:12px;cursor:pointer;text-decoration:none;color:inherit;border-left:4px solid #e8e8e8}
+.qc-card:hover{background:#f8f9fa}
+.qc-card.qc-draft{border-left-color:#f39c12}.qc-card.qc-submitted{border-left-color:#2F5496}.qc-card.qc-approved{border-left-color:#27ae60}
+.qc-icon{font-size:24px;width:36px;text-align:center;flex-shrink:0}
+.qc-info{flex:1}.qc-info .en{font-size:13px;font-weight:600}.qc-info .cn{font-size:11px;color:#888}
+.qc-info .sub-label{font-size:10px;color:#2F5496;font-weight:600}
+.qc-status{font-size:10px;padding:3px 8px;border-radius:10px;font-weight:600;white-space:nowrap}
+.qs-not_started{background:#f0f2f5;color:#888}.qs-draft{background:#FEF3CD;color:#856404}.qs-submitted{background:#D6E4F0;color:#2F5496}.qs-approved{background:#D5F5D5;color:#1B7A1B}
+.qc-cat-header{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:12px 16px 4px;color:#888}
 </style></head><body>
 <div class="header">
   <a class="back" href="/project/{{ project }}">\u2190 {{ project }}</a>
@@ -2201,7 +2455,16 @@ SPOOL_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
   <div class="pbar-bg" style="max-width:300px;margin:8px auto"><div class="pbar-fill" id="prog-bar" style="width:0%;background:#2F5496"></div></div>
 </div>
 <div class="op-input"><input id="operator" placeholder="Operator name / \u64cd\u4f5c\u5458\u59d3\u540d" value=""></div>
-<div class="checklist" id="steps"></div>
+<div class="tab-bar">
+  <div class="tab-btn active" onclick="switchTab('checklist')">Checklist / \u68c0\u67e5\u8868</div>
+  <div class="tab-btn" onclick="switchTab('qc')">QC Reports / \u8d28\u68c0\u62a5\u544a</div>
+</div>
+<div class="tab-content active" id="tab-checklist">
+  <div class="checklist" id="steps"></div>
+</div>
+<div class="tab-content" id="tab-qc">
+  <div class="checklist" id="qc-reports"></div>
+</div>
 <script>
 const P='{{project}}',S='{{spool_id}}';
 let stepDefs=[], stepMap={};
@@ -2265,7 +2528,604 @@ async function remark(n,val){
   await fetch(`/api/project/${P}/spool/${S}/step/${n}`,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({completed:st.completed?1:0,operator:st.completed_by||op,remarks:val})});
 }
+// ── Tab switching ──
+function switchTab(tab){
+  document.querySelectorAll('.tab-btn').forEach((b,i)=>b.classList.toggle('active', (tab==='checklist'?i===0:i===1)));
+  document.getElementById('tab-checklist').classList.toggle('active', tab==='checklist');
+  document.getElementById('tab-qc').classList.toggle('active', tab==='qc');
+  if(tab==='qc') loadQC();
+}
+const catLabels = {'fab':['Fabrication','\u5236\u9020'],'weld':['Welding','\u710a\u63a5'],'ndt':['NDT','\u65e0\u635f\u68c0\u6d4b'],'measurement':['Measurement','\u6d4b\u91cf'],'material':['Material','\u6750\u6599'],'surface':['Surface','\u8868\u9762\u5904\u7406']};
+const catColors = {'fab':'#2F5496','weld':'#C0392B','ndt':'#8E44AD','measurement':'#27AE60','material':'#E67E22','surface':'#16A085'};
+const statusLabels = {'not_started':'Not Started / \u672a\u5f00\u59cb','draft':'Draft / \u8349\u7a3f','submitted':'Submitted / \u5df2\u63d0\u4ea4','approved':'Approved / \u5df2\u6279\u51c6'};
+async function loadQC(){
+  const r = await fetch(`/api/project/${P}/spool/${S}/qc`);
+  const reports = await r.json();
+  if(!reports.length){document.getElementById('qc-reports').innerHTML='<p style="padding:20px;color:#888;text-align:center">No QC reports for this project / \u65e0\u8d28\u68c0\u62a5\u544a</p>';return;}
+  let html='';
+  let lastCat='';
+  reports.forEach(rp=>{
+    if(rp.category!==lastCat){
+      lastCat=rp.category;
+      const cl=catLabels[rp.category]||[rp.category,''];
+      html+=`<div class="qc-cat-header" style="color:${catColors[rp.category]||'#888'}">${cl[0]} / ${cl[1]}</div>`;
+    }
+    const statusCls = 'qc-'+rp.status.replace('not_started','');
+    const url = `/project/${P}/spool/${S}/qc/${rp.type}${rp.subtype?'?sub='+rp.subtype:''}`;
+    html+=`<a class="qc-card ${statusCls}" href="${url}">
+      <div class="qc-icon">${rp.icon}</div>
+      <div class="qc-info">
+        <div class="en">${rp.name_en}</div>
+        <div class="cn">${rp.name_cn}</div>
+        ${rp.sub_label?`<div class="sub-label">${rp.sub_label}</div>`:''}
+      </div>
+      <div class="qc-status qs-${rp.status}">${statusLabels[rp.status]||rp.status}</div>
+    </a>`;
+  });
+  document.getElementById('qc-reports').innerHTML=html;
+}
 load();
+</script></body></html>"""
+
+QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{{ spool_id }} — QC Report</title><style>""" + COMMON_CSS + """
+.qc-header{padding:12px 16px;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.qc-header h2{font-size:16px;margin:4px 0 2px}.qc-header .qc-sub{font-size:11px;color:#888}
+.inspector-bar{background:#fff;padding:12px 16px;display:grid;grid-template-columns:1fr 1fr;gap:8px;box-shadow:0 1px 2px rgba(0,0,0,.05);margin-bottom:8px}
+.inspector-bar label{font-size:10px;color:#888;display:block;margin-bottom:2px}
+.inspector-bar input{width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px}
+.qc-section{background:#fff;border-radius:10px;margin:8px 16px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.qc-section h3{font-size:13px;font-weight:700;color:#2F5496;margin-bottom:10px;border-bottom:2px solid #D6E4F0;padding-bottom:6px}
+.qc-row{display:grid;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #f0f2f5}
+.qc-row:last-child{border-bottom:none}
+.qc-label{font-size:12px;font-weight:600;color:#333}.qc-label .cn{font-size:10px;color:#888;font-weight:400}
+.qc-nominal{font-size:12px;color:#888;text-align:center}
+.qc-input{padding:8px;border:1px solid #ddd;border-radius:6px;font-size:14px;text-align:center;width:100%;background:#FFFDE7;font-weight:600;color:#2F5496}
+.qc-input:focus{border-color:#2F5496;outline:none;box-shadow:0 0 0 2px rgba(47,84,150,.15)}
+.qc-input.qc-readonly{background:#f8f9fa;color:#666;font-weight:400}
+.pass-fail{display:flex;gap:4px}
+.pf-btn{flex:1;padding:10px 8px;border:2px solid #ddd;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;text-align:center;background:#fff;transition:all .15s}
+.pf-btn.sel-pass{border-color:#27ae60;background:#e8f5e9;color:#1B7A1B}
+.pf-btn.sel-fail{border-color:#e74c3c;background:#fce4ec;color:#c0392b}
+.pf-btn:active{transform:scale(.97)}
+.overall-result{margin:8px 16px;padding:16px;background:#fff;border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,.05);text-align:center}
+.overall-result h3{font-size:14px;color:#333;margin-bottom:12px}
+.result-btns{display:flex;gap:8px;justify-content:center}
+.result-btns .pf-btn{padding:14px 24px;font-size:14px;min-width:100px}
+.save-status{position:fixed;bottom:20px;right:20px;padding:8px 16px;border-radius:20px;font-size:12px;font-weight:600;opacity:0;transition:opacity .3s;z-index:100}
+.save-ok{background:#27ae60;color:#fff}.save-err{background:#e74c3c;color:#fff}
+.img-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-top:8px}
+.img-thumb{position:relative;border-radius:8px;overflow:hidden;aspect-ratio:1;background:#f0f2f5}
+.img-thumb img{width:100%;height:100%;object-fit:cover}
+.img-thumb .del{position:absolute;top:4px;right:4px;background:rgba(0,0,0,.6);color:#fff;border:none;border-radius:50%;width:24px;height:24px;cursor:pointer;font-size:14px;line-height:24px;text-align:center}
+.upload-btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border:2px dashed #ccc;border-radius:8px;cursor:pointer;font-size:13px;color:#888;margin-top:8px}
+.upload-btn:active{background:#f8f9fa}
+.weld-card{background:#f8f9fa;border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid #8E44AD}
+.weld-card .weld-tag{font-size:14px;font-weight:700;color:#333}.weld-card .weld-size{font-size:11px;color:#888}
+.weld-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
+</style></head><body>
+<div class="header">
+  <a class="back" href="/project/{{ project }}/spool/{{ spool_id }}">\u2190 {{ spool_id }}</a>
+  <h1 id="rpt-title">QC Report</h1>
+  <div class="sub" id="rpt-sub">Loading...</div>
+</div>
+<div class="inspector-bar">
+  <div><label>Inspector / \u68c0\u9a8c\u5458</label><input id="inspector" placeholder="Name"></div>
+  <div><label>Date / \u65e5\u671f</label><input id="insp-date" type="date"></div>
+  <div><label>TPI / \u7b2c\u4e09\u65b9\u68c0\u9a8c</label><input id="tpi" placeholder="TPI name (if applicable)"></div>
+  <div><label>TPI Date / \u65e5\u671f</label><input id="tpi-date" type="date"></div>
+</div>
+<div id="report-body"></div>
+<div class="overall-result">
+  <h3>Overall Result / \u6700\u7ec8\u7ed3\u679c</h3>
+  <div class="result-btns">
+    <div class="pf-btn" onclick="setResult('PASS')" id="res-pass">\u2713 PASS / \u5408\u683c</div>
+    <div class="pf-btn" onclick="setResult('FAIL')" id="res-fail">\u2717 FAIL / \u4e0d\u5408\u683c</div>
+  </div>
+</div>
+<div class="save-status" id="save-status"></div>
+<script>
+const P='{{project}}',S='{{spool_id}}',RT='{{report_type}}',SUB='{{report_subtype}}';
+let reportData = {};
+let saveTimer = null;
+
+// ── Report type configs (field definitions) ──
+const REPORT_FIELDS = {
+  dimensional: {
+    title: 'Dimensional Inspection / \u5c3a\u5bf8\u68c0\u9a8c',
+    render: renderDimensional,
+  },
+  vt: {
+    title: 'Visual Testing (VT) / \u76ee\u89c6\u68c0\u9a8c',
+    render: renderWeldReport,
+    checks: [
+      {key:'undercut',en:'Undercut',cn:'\u54ac\u8fb9'},
+      {key:'porosity',en:'Porosity',cn:'\u6c14\u5b54'},
+      {key:'crack',en:'Crack',cn:'\u88c2\u7eb9'},
+      {key:'overlap',en:'Overlap',cn:'\u642d\u63a5'},
+      {key:'spatter',en:'Spatter',cn:'\u98de\u6e85'},
+      {key:'profile',en:'Weld Profile',cn:'\u7115\u7f1d\u6210\u578b'},
+    ]
+  },
+  rt: {
+    title: 'Radiographic Testing (RT) / \u5c04\u7ebf\u68c0\u6d4b',
+    render: renderWeldReport,
+    checks: [
+      {key:'film_id',en:'Film ID',cn:'\u7247\u53f7',type:'text'},
+      {key:'technique',en:'Technique',cn:'\u6280\u672f',type:'text',default:'SWSI'},
+      {key:'sensitivity',en:'Sensitivity',cn:'\u7075\u654f\u5ea6',type:'text'},
+      {key:'density',en:'Density',cn:'\u5bc6\u5ea6',type:'text'},
+    ],
+    hasImages: true,
+  },
+  pt: {
+    title: 'Penetrant Testing (PT) / \u6e17\u900f\u68c0\u6d4b',
+    render: renderWeldReport,
+    checks: [
+      {key:'dwell_time',en:'Dwell Time (min)',cn:'\u6e17\u900f\u65f6\u95f4',type:'number'},
+      {key:'indication',en:'Indication',cn:'\u663e\u793a',type:'text'},
+    ]
+  },
+  mt: {
+    title: 'Magnetic Particle (MT) / \u78c1\u7c89\u68c0\u6d4b',
+    render: renderWeldReport,
+    checks: [
+      {key:'method',en:'Method',cn:'\u65b9\u6cd5',type:'text',default:'Yoke'},
+      {key:'indication',en:'Indication',cn:'\u663e\u793a',type:'text'},
+    ]
+  },
+  pmi: {
+    title: 'PMI Report / PMI\u68c0\u6d4b\u62a5\u544a',
+    render: renderPMI,
+  },
+  ferrite: {
+    title: 'Ferrite Content / \u94c1\u7d20\u4f53\u542b\u91cf',
+    render: renderFerrite,
+  },
+  welding_log: {
+    title: 'Welding Log / \u710a\u63a5\u8bb0\u5f55',
+    render: renderWeldingLog,
+  },
+  fitup: {
+    title: 'Fit-up Inspection / \u7ec4\u5bf9\u68c0\u9a8c',
+    render: renderWeldReport,
+    checks: [
+      {key:'root_gap',en:'Root Gap (mm)',cn:'\u6839\u90e8\u95f4\u9699',type:'number'},
+      {key:'hi_lo',en:'Hi-Lo (mm)',cn:'\u9519\u53e3',type:'number'},
+      {key:'alignment',en:'Alignment',cn:'\u5bf9\u4e2d'},
+    ]
+  },
+  cutting: {
+    title: 'Cutting Inspection / \u5207\u5272\u68c0\u9a8c',
+    render: renderSimple,
+    fields: [
+      {key:'method',en:'Cutting Method',cn:'\u5207\u5272\u65b9\u6cd5',type:'text'},
+      {key:'squareness',en:'Squareness OK',cn:'\u5782\u76f4\u5ea6\u5408\u683c'},
+      {key:'surface',en:'Surface Condition',cn:'\u8868\u9762\u72b6\u6001'},
+    ]
+  },
+  weld_map: {
+    title: 'Weld Map / \u7115\u7f1d\u56fe',
+    render: renderSimple,
+    fields: [{key:'remarks',en:'Weld Map Remarks',cn:'\u7115\u7f1d\u56fe\u5907\u6ce8',type:'text'}],
+    hasImages: true,
+  },
+  passivation: {
+    title: 'Passivation Record / \u949d\u5316\u8bb0\u5f55',
+    render: renderSimple,
+    fields: [
+      {key:'method',en:'Method / Standard',cn:'\u65b9\u6cd5/\u6807\u51c6',type:'text',default:'ASTM A380 / A967'},
+      {key:'solution',en:'Solution / Concentration',cn:'\u6eb6\u6db2/\u6d53\u5ea6',type:'text'},
+      {key:'temp',en:'Temperature (\u00b0C)',cn:'\u6e29\u5ea6',type:'number'},
+      {key:'time',en:'Duration (min)',cn:'\u65f6\u95f4',type:'number'},
+    ]
+  },
+  ferroxyl: {
+    title: 'Ferroxyl Test / \u94c1\u79bb\u5b50\u68c0\u6d4b',
+    render: renderSimple,
+    fields: [
+      {key:'method',en:'Test Method',cn:'\u6d4b\u8bd5\u65b9\u6cd5',type:'text',default:'Copper Sulfate (ASTM A380)'},
+      {key:'free_iron',en:'Free Iron Detected',cn:'\u68c0\u6d4b\u5230\u6e38\u79bb\u94c1'},
+    ],
+    hasImages: true,
+  },
+  dft: {
+    title: 'Coating Inspection (DFT) / \u6d82\u5c42\u68c0\u9a8c',
+    render: renderDFT,
+  },
+};
+
+async function loadReport(){
+  const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}?sub=${SUB}`);
+  reportData = await r.json();
+  if(!reportData.data || typeof reportData.data !== 'object') reportData.data = {};
+  // Set inspector fields
+  document.getElementById('inspector').value = reportData.inspector_name || localStorage.getItem('qc_inspector') || '';
+  document.getElementById('insp-date').value = reportData.inspector_date || new Date().toISOString().slice(0,10);
+  document.getElementById('tpi').value = reportData.tpi_name || '';
+  document.getElementById('tpi-date').value = reportData.tpi_date || '';
+  // Title
+  const cfg = REPORT_FIELDS[RT];
+  if(cfg){
+    document.getElementById('rpt-title').textContent = cfg.title;
+    document.getElementById('rpt-sub').textContent = `${S} \u00b7 ${P}`;
+    cfg.render(reportData.data);
+  } else {
+    document.getElementById('report-body').innerHTML = '<p style="padding:20px;color:#888">Report type not configured / \u62a5\u544a\u7c7b\u578b\u672a\u914d\u7f6e</p>';
+  }
+  // Overall result
+  updateResult(reportData.data.overall_result || null);
+}
+
+function updateResult(val){
+  document.getElementById('res-pass').className = 'pf-btn' + (val==='PASS'?' sel-pass':'');
+  document.getElementById('res-fail').className = 'pf-btn' + (val==='FAIL'?' sel-fail':'');
+}
+function setResult(val){
+  const cur = reportData.data.overall_result;
+  reportData.data.overall_result = (cur===val) ? null : val;
+  updateResult(reportData.data.overall_result);
+  scheduleSave();
+}
+
+// ── Auto-save with debounce ──
+function scheduleSave(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(doSave, 600);
+}
+async function doSave(){
+  const insp = document.getElementById('inspector').value;
+  localStorage.setItem('qc_inspector', insp);
+  const body = {
+    report_subtype: SUB,
+    status: 'draft',
+    inspector_name: insp,
+    inspector_date: document.getElementById('insp-date').value,
+    tpi_name: document.getElementById('tpi').value,
+    tpi_date: document.getElementById('tpi-date').value,
+    data: reportData.data,
+  };
+  try{
+    const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+    });
+    const d = await r.json();
+    showSave(d.ok ? 'Saved / \u5df2\u4fdd\u5b58' : 'Error', d.ok);
+  }catch(e){ showSave('Error', false); }
+}
+function showSave(msg, ok){
+  const el = document.getElementById('save-status');
+  el.textContent = msg;
+  el.className = 'save-status ' + (ok ? 'save-ok' : 'save-err');
+  el.style.opacity = '1';
+  setTimeout(()=>{ el.style.opacity = '0'; }, 1500);
+}
+// Save on inspector field changes
+document.querySelectorAll('.inspector-bar input').forEach(el => el.addEventListener('change', scheduleSave));
+
+// ── DIMENSIONAL REPORT ──
+function renderDimensional(data){
+  const d = data;
+  const tol = (d.dim_tol || '\u00b15mm');
+  let html = `<div class="qc-section"><h3>Overall Dimensions / \u603b\u4f53\u5c3a\u5bf8 <span style="font-size:11px;font-weight:400;color:#888">(Tol: ${tol})</span></h3>`;
+  const dims = [
+    {key:'l', en:'Length / \u957f\u5ea6', nominal: d.nominal_l_mm},
+    {key:'w', en:'Width / \u5bbd\u5ea6', nominal: d.nominal_w_mm},
+    {key:'h', en:'Height / \u9ad8\u5ea6', nominal: d.nominal_h_mm},
+  ];
+  dims.forEach(dim => {
+    const nom = dim.nominal || '';
+    const act = d[`actual_${dim.key}_mm`] || '';
+    html += `<div class="qc-row" style="grid-template-columns:1fr 80px 100px">
+      <div class="qc-label">${dim.en}</div>
+      <div class="qc-nominal">${nom ? nom + ' mm' : '\u2014'}</div>
+      <input class="qc-input" type="number" inputmode="decimal" placeholder="Actual" value="${act}"
+        onchange="reportData.data['actual_${dim.key}_mm']=this.value?parseFloat(this.value):null;scheduleSave()">
+    </div>`;
+  });
+  html += '</div>';
+
+  // Flanges
+  const flanges = d.flanges || [];
+  if(flanges.length){
+    html += '<div class="qc-section"><h3>Flange Alignment / \u6cd5\u5170\u6821\u51c6 <span style="font-size:11px;font-weight:400;color:#888">(\u00b11.5mm bolt-hole, 0.5%OD max 2mm perp.)</span></h3>';
+    flanges.forEach((fl,i) => {
+      html += `<div class="qc-row" style="grid-template-columns:1fr 1fr 1fr">
+        <div class="qc-label">Flange #${i+1} <span class="cn">${fl.size||''}</span></div>
+        <div class="pass-fail">
+          <div class="pf-btn ${fl.bolt_hole_ok===true?'sel-pass':fl.bolt_hole_ok===false?'sel-fail':''}"
+            onclick="toggleFlange(${i},'bolt_hole_ok')">Bolt-Hole<br>\u87ba\u6813\u5b54</div>
+        </div>
+        <div class="pass-fail">
+          <div class="pf-btn ${fl.perp_ok===true?'sel-pass':fl.perp_ok===false?'sel-fail':''}"
+            onclick="toggleFlange(${i},'perp_ok')">Perp.<br>\u5782\u76f4\u5ea6</div>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+  }
+
+  // Angles
+  const angles = [...(d.elbows_90||[]), ...(d.elbows_45||[]), ...(d.tees||[])];
+  if(angles.length){
+    html += '<div class="qc-section"><h3>Fitting Angles / \u7ba1\u4ef6\u89d2\u5ea6</h3>';
+    angles.forEach((a,i) => {
+      html += `<div class="qc-row" style="grid-template-columns:1fr 60px 80px">
+        <div class="qc-label">${a.type} #${a.id} <span class="cn">${a.nominal||''}</span></div>
+        <div class="qc-nominal">${a.nominal||''}</div>
+        <div class="pass-fail">
+          <div class="pf-btn ${a.ok===true?'sel-pass':a.ok===false?'sel-fail':''}"
+            onclick="toggleAngle(${i})">OK</div>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+  }
+  document.getElementById('report-body').innerHTML = html;
+}
+function toggleFlange(i,field){
+  const fl = reportData.data.flanges[i];
+  fl[field] = fl[field]===true ? false : (fl[field]===false ? null : true);
+  renderDimensional(reportData.data);
+  scheduleSave();
+}
+function toggleAngle(i){
+  const all = [...(reportData.data.elbows_90||[]), ...(reportData.data.elbows_45||[]), ...(reportData.data.tees||[])];
+  const a = all[i];
+  a.ok = a.ok===true ? false : (a.ok===false ? null : true);
+  renderDimensional(reportData.data);
+  scheduleSave();
+}
+
+// ── WELD-BY-WELD REPORTS (VT, RT, PT, MT, Fit-up) ──
+function renderWeldReport(data){
+  const cfg = REPORT_FIELDS[RT];
+  const welds = data.welds || [];
+  if(!welds.length){
+    document.getElementById('report-body').innerHTML = '<div class="qc-section"><p style="color:#888;text-align:center">No weld data. Seed from DXF database first. / \u65e0\u7115\u7f1d\u6570\u636e</p></div>';
+    return;
+  }
+  let html = '';
+  welds.forEach((w,i) => {
+    html += `<div class="weld-card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><span class="weld-tag">${w.weld_tag||'W'+(i+1)}</span> <span class="weld-size">${w.size||''}</span></div>
+        <div class="pass-fail" style="width:140px">
+          <div class="pf-btn ${w.result==='PASS'?'sel-pass':''}" onclick="setWeldResult(${i},'PASS')" style="padding:6px">\u2713</div>
+          <div class="pf-btn ${w.result==='FAIL'?'sel-fail':''}" onclick="setWeldResult(${i},'FAIL')" style="padding:6px">\u2717</div>
+        </div>
+      </div>
+      <div class="weld-grid">`;
+    (cfg.checks||[]).forEach(ch => {
+      if(ch.type==='text'||ch.type==='number'){
+        html += `<div><label style="font-size:10px;color:#888">${ch.en} / ${ch.cn}</label>
+          <input class="qc-input" type="${ch.type}" value="${w[ch.key]||ch.default||''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.welds[${i}]['${ch.key}']=this.value;scheduleSave()"></div>`;
+      } else {
+        html += `<div class="pass-fail">
+          <div class="pf-btn ${w[ch.key]===true?'sel-pass':w[ch.key]===false?'sel-fail':''}" style="padding:6px;font-size:10px"
+            onclick="toggleWeldCheck(${i},'${ch.key}')">${ch.en}<br><span style="font-size:9px">${ch.cn}</span></div>
+        </div>`;
+      }
+    });
+    html += `</div>
+      <div style="margin-top:6px"><input class="qc-input" style="text-align:left;font-size:11px;font-weight:400;background:#fff" placeholder="Remarks / \u5907\u6ce8"
+        value="${w.remarks||''}" onchange="reportData.data.welds[${i}].remarks=this.value;scheduleSave()"></div>
+    </div>`;
+  });
+  // Image upload section for RT
+  if(cfg.hasImages){
+    html += `<div class="qc-section"><h3>X-Ray Images / \u5c04\u7ebf\u7247</h3>
+      <div class="img-grid" id="img-grid"></div>
+      <label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files)">\U0001f4f7 Upload Image / \u4e0a\u4f20\u56fe\u7247</label>
+    </div>`;
+  }
+  document.getElementById('report-body').innerHTML = html;
+  if(cfg.hasImages) loadImages();
+}
+function setWeldResult(i,val){
+  const w = reportData.data.welds[i];
+  w.result = w.result===val ? null : val;
+  renderWeldReport(reportData.data);
+  scheduleSave();
+}
+function toggleWeldCheck(i,key){
+  const w = reportData.data.welds[i];
+  w[key] = w[key]===true ? false : (w[key]===false ? null : true);
+  renderWeldReport(reportData.data);
+  scheduleSave();
+}
+
+// ── IMAGE UPLOAD (RT, Weld Map, Ferroxyl) ──
+async function loadImages(){
+  const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/images`);
+  const imgs = await r.json();
+  const grid = document.getElementById('img-grid');
+  if(!grid) return;
+  grid.innerHTML = imgs.map(img =>
+    `<div class="img-thumb">
+      <img src="/api/project/${P}/qc/image/${img.id}" loading="lazy">
+      <button class="del" onclick="delImage(${img.id})">\u00d7</button>
+    </div>`
+  ).join('');
+}
+async function uploadImages(files){
+  for(const f of files){
+    // Client-side compression
+    const compressed = await compressImage(f, 2000, 0.85);
+    const fd = new FormData();
+    fd.append('file', compressed, f.name);
+    fd.append('operator', document.getElementById('inspector').value);
+    await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`, {method:'POST', body:fd});
+  }
+  loadImages();
+}
+async function delImage(id){
+  if(!confirm('Delete image?')) return;
+  await fetch(`/api/project/${P}/qc/image/${id}`, {method:'DELETE'});
+  loadImages();
+}
+function compressImage(file, maxDim, quality){
+  return new Promise((resolve)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      let w = img.width, h = img.height;
+      if(w > maxDim || h > maxDim){
+        const ratio = Math.min(maxDim/w, maxDim/h);
+        w = Math.round(w*ratio); h = Math.round(h*ratio);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      canvas.toBlob(blob => resolve(blob), 'image/jpeg', quality);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// ── SIMPLE REPORTS (Cutting, Weld Map, Passivation, Ferroxyl) ──
+function renderSimple(data){
+  const cfg = REPORT_FIELDS[RT];
+  const fields = cfg.fields || [];
+  let html = '<div class="qc-section"><h3>' + cfg.title + '</h3>';
+  fields.forEach(f => {
+    if(f.type==='text'||f.type==='number'){
+      html += `<div class="qc-row" style="grid-template-columns:1fr 1fr">
+        <div class="qc-label">${f.en} <span class="cn">${f.cn}</span></div>
+        <input class="qc-input" type="${f.type}" value="${data[f.key]||f.default||''}" style="text-align:left"
+          onchange="reportData.data['${f.key}']=this.value;scheduleSave()">
+      </div>`;
+    } else {
+      html += `<div class="qc-row" style="grid-template-columns:1fr 1fr">
+        <div class="qc-label">${f.en} <span class="cn">${f.cn}</span></div>
+        <div class="pass-fail">
+          <div class="pf-btn ${data[f.key]===true?'sel-pass':data[f.key]===false?'sel-fail':''}"
+            onclick="reportData.data['${f.key}']=reportData.data['${f.key}']===true?false:(reportData.data['${f.key}']===false?null:true);renderSimple(reportData.data);scheduleSave()">OK</div>
+        </div>
+      </div>`;
+    }
+  });
+  // Image section
+  if(cfg.hasImages){
+    html += `<div style="margin-top:12px"><div class="img-grid" id="img-grid"></div>
+      <label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files)">\U0001f4f7 Upload / \u4e0a\u4f20</label></div>`;
+  }
+  html += '<div style="margin-top:10px"><textarea class="qc-input" style="text-align:left;font-weight:400;height:60px;resize:vertical;background:#fff" placeholder="General remarks / \u5907\u6ce8"'
+    + ` onchange="reportData.data.remarks=this.value;scheduleSave()">${data.remarks||''}</textarea></div>`;
+  html += '</div>';
+  document.getElementById('report-body').innerHTML = html;
+  if(cfg.hasImages) loadImages();
+}
+
+// ── PMI REPORT ──
+function renderPMI(data){
+  const items = data.items || [];
+  let html = '<div class="qc-section"><h3>PMI Verification / PMI\u9a8c\u8bc1</h3>';
+  if(!items.length){html+='<p style="color:#888">No items. Seed from DXF database. / \u65e0\u6570\u636e</p>';}
+  items.forEach((it,i) => {
+    html += `<div class="weld-card" style="border-left-color:#E67E22">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><span class="weld-tag">${it.item||'Item '+(i+1)}</span> <span class="weld-size">${it.expected_grade||''}</span></div>
+        <div class="pass-fail" style="width:140px">
+          <div class="pf-btn ${it.pass===true?'sel-pass':''}" onclick="reportData.data.items[${i}].pass=reportData.data.items[${i}].pass===true?null:true;renderPMI(reportData.data);scheduleSave()" style="padding:6px">\u2713</div>
+          <div class="pf-btn ${it.pass===false?'sel-fail':''}" onclick="reportData.data.items[${i}].pass=reportData.data.items[${i}].pass===false?null:false;renderPMI(reportData.data);scheduleSave()" style="padding:6px">\u2717</div>
+        </div>
+      </div>
+      <div class="weld-grid">
+        <div><label style="font-size:10px;color:#888">Heat No.</label>
+          <input class="qc-input" type="text" value="${it.heat_no||''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.items[${i}].heat_no=this.value;scheduleSave()"></div>
+        <div><label style="font-size:10px;color:#888">PMI Result</label>
+          <input class="qc-input" type="text" value="${it.pmi_result||''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.items[${i}].pmi_result=this.value;scheduleSave()"></div>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ── FERRITE REPORT ──
+function renderFerrite(data){
+  const readings = data.readings || [];
+  let html = '<div class="qc-section"><h3>Ferrite Content / \u94c1\u7d20\u4f53\u542b\u91cf <span style="font-size:11px;font-weight:400;color:#888">(30\u201365% acceptance)</span></h3>';
+  if(!readings.length){html+='<p style="color:#888">No weld data. Seed from DXF database. / \u65e0\u6570\u636e</p>';}
+  readings.forEach((rd,i) => {
+    const avg = (rd.reading_1!=null && rd.reading_2!=null && rd.reading_3!=null) ? ((rd.reading_1+rd.reading_2+rd.reading_3)/3).toFixed(1) : '';
+    const pass = avg ? (parseFloat(avg)>=30 && parseFloat(avg)<=65) : null;
+    html += `<div class="weld-card" style="border-left-color:#E67E22">
+      <div><span class="weld-tag">${rd.weld_tag||'W'+(i+1)}</span></div>
+      <div class="weld-grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
+        ${[1,2,3].map(n => `<div><label style="font-size:10px;color:#888">R${n} (%)</label>
+          <input class="qc-input" type="number" inputmode="decimal" step="0.1" value="${rd['reading_'+n]!=null?rd['reading_'+n]:''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.readings[${i}].reading_${n}=this.value?parseFloat(this.value):null;renderFerrite(reportData.data);scheduleSave()"></div>`).join('')}
+        <div><label style="font-size:10px;color:#888">Avg / \u5e73\u5747</label>
+          <div class="qc-input qc-readonly" style="font-size:12px;padding:6px;color:${pass===true?'#27ae60':pass===false?'#e74c3c':'#888'}">${avg||'\u2014'}%</div></div>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ── WELDING LOG ──
+function renderWeldingLog(data){
+  const welds = data.welds || [];
+  const trackInterpass = P.includes('423');
+  let html = '<div class="qc-section"><h3>Welding Log / \u710a\u63a5\u8bb0\u5f55' + (trackInterpass?' <span style="font-size:11px;font-weight:400;color:#e74c3c">(Interpass max 150\u00b0C)</span>':'') + '</h3>';
+  if(!welds.length){html+='<p style="color:#888">No weld data. Seed from DXF database. / \u65e0\u6570\u636e</p>';}
+  welds.forEach((w,i) => {
+    html += `<div class="weld-card" style="border-left-color:#C0392B">
+      <div><span class="weld-tag">${w.weld_tag||'W'+(i+1)}</span> <span class="weld-size">${w.size||''}</span></div>
+      <div class="weld-grid">
+        <div><label style="font-size:10px;color:#888">WPS</label>
+          <input class="qc-input" type="text" value="${w.wps||''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.welds[${i}].wps=this.value;scheduleSave()"></div>
+        <div><label style="font-size:10px;color:#888">Welder ID / \u710a\u5de5\u53f7</label>
+          <input class="qc-input" type="text" value="${w.welder_id||''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.welds[${i}].welder_id=this.value;scheduleSave()"></div>
+        <div><label style="font-size:10px;color:#888">Process / \u5de5\u827a</label>
+          <input class="qc-input" type="text" value="${w.process||''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.welds[${i}].process=this.value;scheduleSave()"></div>
+        <div><label style="font-size:10px;color:#888">Date / \u65e5\u671f</label>
+          <input class="qc-input" type="date" value="${w.date||''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.welds[${i}].date=this.value;scheduleSave()"></div>
+        ${trackInterpass ? `<div><label style="font-size:10px;color:#e74c3c;font-weight:600">Interpass \u00b0C</label>
+          <input class="qc-input" type="number" value="${w.interpass_temp!=null?w.interpass_temp:''}" style="font-size:12px;padding:6px;border-color:${(w.interpass_temp&&w.interpass_temp>150)?'#e74c3c':'#ddd'}"
+            onchange="reportData.data.welds[${i}].interpass_temp=this.value?parseFloat(this.value):null;renderWeldingLog(reportData.data);scheduleSave()"></div>
+        <div><label style="font-size:10px;color:#888">Heat Input (kJ/mm)</label>
+          <input class="qc-input" type="number" inputmode="decimal" step="0.01" value="${w.heat_input!=null?w.heat_input:''}" style="font-size:12px;padding:6px"
+            onchange="reportData.data.welds[${i}].heat_input=this.value?parseFloat(this.value):null;scheduleSave()"></div>` : ''}
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ── DFT / COATING ──
+function renderDFT(data){
+  const readings = data.readings || [{point:'Point 1',value:null},{point:'Point 2',value:null},{point:'Point 3',value:null},{point:'Point 4',value:null},{point:'Point 5',value:null}];
+  if(!data.readings) reportData.data.readings = readings;
+  const spec = data.spec_dft || '';
+  let html = `<div class="qc-section"><h3>Dry Film Thickness (DFT) / \u5e72\u819c\u539a\u5ea6</h3>
+    <div class="qc-row" style="grid-template-columns:1fr 1fr">
+      <div class="qc-label">Spec DFT (\u00b5m)</div>
+      <input class="qc-input" type="text" value="${spec}" placeholder="e.g. 250-350" style="text-align:left"
+        onchange="reportData.data.spec_dft=this.value;scheduleSave()">
+    </div>`;
+  readings.forEach((rd,i) => {
+    html += `<div class="qc-row" style="grid-template-columns:1fr 1fr">
+      <div class="qc-label">${rd.point}</div>
+      <input class="qc-input" type="number" inputmode="decimal" value="${rd.value!=null?rd.value:''}" placeholder="\u00b5m"
+        onchange="reportData.data.readings[${i}].value=this.value?parseFloat(this.value):null;scheduleSave()">
+    </div>`;
+  });
+  html += '</div>';
+  document.getElementById('report-body').innerHTML = html;
+}
+
+loadReport();
 </script></body></html>"""
 
 REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">

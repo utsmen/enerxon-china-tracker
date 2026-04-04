@@ -1020,8 +1020,9 @@ def api_qc_seed(project, spool_id):
     """Read DXF SQLite and pre-populate QC report data for this spool."""
     import sqlite3 as sqlite3_mod
     # Accept seed data via POST body (for remote seeding from local machine)
-    if request.get_json():
-        seed = request.get_json()
+    post_data = request.get_json(silent=True)
+    if post_data:
+        seed = post_data
         # Pre-populate report-specific data
         for d in get_qc_report_defs(project):
             rt = d['type']

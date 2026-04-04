@@ -3857,8 +3857,8 @@ async function onInspectorSelect(val){
     return;
   }
   if(val==='__delete__'){
-    const names=inspectorList.map(i=>`${i.id}: ${i.name}`).join('\n');
-    const id=prompt('Enter inspector number to delete / 输入要删除的检验员编号:\n'+names);
+    const names=inspectorList.map(i=>`${i.id}: ${i.name}`).join('\\n');
+    const id=prompt('Enter inspector number to delete / 输入要删除的检验员编号:\\n'+names);
     if(id){await fetch(`/api/inspectors/${parseInt(id)}`,{method:'DELETE'});}
     await loadInspectors();
     document.getElementById('inspector-select').value='';

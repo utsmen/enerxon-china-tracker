@@ -1231,6 +1231,13 @@ def api_inspector_signature(inspector_id):
         return jsonify({'signature_data': ''})
     return jsonify({'signature_data': row['signature_data']})
 
+@app.route('/api/inspectors/<int:inspector_id>', methods=['DELETE'])
+@login_required
+def api_inspector_delete(inspector_id):
+    db_execute("DELETE FROM qc_inspectors WHERE id=?", (inspector_id,))
+    db_commit()
+    return jsonify({'ok': True})
+
 # ── API: WPS Registry ────────────────────────────────────────────────────────
 @app.route('/api/project/<project>/wps')
 @login_required
@@ -3831,6 +3838,7 @@ async function loadInspectors(){
     sel.innerHTML+=`<option value="${ins.name}" ${ins.name===current?'selected':''}>${ins.name}${ins.role?' ('+ins.role+')':''}${ins.has_signature?' ✓':''}</option>`;
   });
   sel.innerHTML+='<option value="__new__">+ New inspector / 新增检验员</option>';
+  sel.innerHTML+='<option value="__delete__">- Delete inspector / 删除检验员</option>';
   if(current && !inspectorList.find(i=>i.name===current)){
     sel.innerHTML+=`<option value="${current}" selected>${current}</option>`;
   }
@@ -3845,6 +3853,14 @@ async function onInspectorSelect(val){
     document.getElementById('inspector-select').value=name;
     showSigPad(name);
     scheduleSave();
+    return;
+  }
+  if(val==='__delete__'){
+    const names=inspectorList.map(i=>`${i.id}: ${i.name}`).join('\n');
+    const id=prompt('Enter inspector number to delete / 输入要删除的检验员编号:\n'+names);
+    if(id){await fetch(`/api/inspectors/${parseInt(id)}`,{method:'DELETE'});}
+    await loadInspectors();
+    document.getElementById('inspector-select').value='';
     return;
   }
   document.getElementById('inspector').value=val;

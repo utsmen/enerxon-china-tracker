@@ -865,7 +865,7 @@ def api_qc_list(project, spool_id):
     step_dates = {}
     step_rows = db_fetchall("SELECT step_number, completed_at FROM progress WHERE project=? AND spool_id=? AND completed=1", (project, spool_id))
     for sr in step_rows:
-        step_dates[sr['step_number']] = (sr.get('completed_at','') or '')[:10]  # YYYY-MM-DD
+        step_dates[sr['step_number']] = str(sr.get('completed_at','') or '')[:10]  # YYYY-MM-DD
     result = []
     proj_info = get_qc_project_info(project)
     for d in report_defs:
@@ -913,7 +913,7 @@ def api_qc_get(project, spool_id, report_type):
     if itp_step:
         sr = db_fetchone("SELECT completed_at FROM progress WHERE project=? AND spool_id=? AND step_number=? AND completed=1", (project, spool_id, itp_step))
         if sr and sr.get('completed_at'):
-            step_date = (sr['completed_at'] or '')[:10]
+            step_date = str(sr['completed_at'] or '')[:10]
     row = db_fetchone("SELECT * FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
                       (project, spool_id, report_type, subtype))
     if row:
@@ -1542,7 +1542,7 @@ def api_qc_export(project, spool_id):
             itp_step = d.get('itp_step', 0)
             sr = db_fetchone("SELECT completed_at FROM progress WHERE project=? AND spool_id=? AND step_number=? AND completed=1",
                              (project, spool_id, itp_step)) if itp_step else None
-            step_date = (sr['completed_at'] or '')[:10] if sr and sr.get('completed_at') else ''
+            step_date = str(sr['completed_at'] or '')[:10] if sr and sr.get('completed_at') else ''
             try:
                 pdf_bytes = build_qc_pdf(project, spool_id, d, row, proj_info, step_date)
                 sub = f"_{d.get('sub_label','').split('/')[0].strip().replace(' ','_')}" if d.get('sub_label') else ''

@@ -85,7 +85,7 @@ _DEFAULT_STEPS = [
     {'step_number':12,'name_en':'Painting Application','name_cn':'\u6d82\u88c5\u65bd\u5de5\uff08\u5e95\u6f06/\u4e2d\u95f4\u6f06/\u9762\u6f06\uff09','weight':8,'category':'surface_treatment','hours_fixed':0,'hours_variable':'surface','spool_type':'ALL','display_order':13,'is_conditional':0,'is_hold_point':0,'is_release':0,'phase':'paint'},
     {'step_number':13,'name_en':'Coating Inspection \u2014 DFT','name_cn':'\u6d82\u5c42\u68c0\u9a8c \u2014 \u819c\u539a\u53ca\u9644\u7740\u529b','weight':4,'category':'paint_fixed','hours_fixed':2.0,'hours_variable':'','spool_type':'ALL','display_order':14,'is_conditional':0,'is_hold_point':0,'is_release':0,'phase':'paint'},
     {'step_number':14,'name_en':'Dimensional Inspection & Marking','name_cn':'\u5c3a\u5bf8\u68c0\u9a8c\u53ca\u6807\u8bc6','weight':5,'category':'paint_fixed','hours_fixed':2.0,'hours_variable':'','spool_type':'ALL','display_order':15,'is_conditional':0,'is_hold_point':0,'is_release':0,'phase':'paint'},
-    {'step_number':15,'name_en':'Final Inspection \u2014 Released','name_cn':'\u6700\u7ec8\u68c0\u9a8c \u2014 \u53d1\u8d27\u653e\u884c \u2605\u89c1\u8bc1','weight':3,'category':'packing','hours_fixed':3.0,'hours_variable':'','spool_type':'ALL','display_order':16,'is_conditional':0,'is_hold_point':0,'is_release':1,'phase':'paint'},
+    {'step_number':15,'name_en':'Final Inspection \u2014 Released','name_cn':'\u6700\u7ec8\u68c0\u9a8c \u2014 \u53d1\u8d27\u653e\u884c \u2605\u89c1\u8bc1','weight':3,'category':'packing','hours_fixed':3.0,'hours_variable':'','spool_type':'ALL','display_order':16,'is_conditional':0,'is_hold_point':0,'is_release':1,'phase':'paint','counts_for_production':0},
 ]
 
 # ── DB Layer ──────────────────────────────────────────────────────────────────
@@ -140,7 +140,8 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS schedule (id SERIAL PRIMARY KEY, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start DATE NOT NULL, planned_end DATE NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type))",
             "CREATE TABLE IF NOT EXISTS project_settings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key))",
             "CREATE TABLE IF NOT EXISTS drawings (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BYTEA NOT NULL, UNIQUE(project, spool_id))",
-            "CREATE TABLE IF NOT EXISTS project_steps (id SERIAL PRIMARY KEY, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', UNIQUE(project, step_number))",
+            "CREATE TABLE IF NOT EXISTS project_steps (id SERIAL PRIMARY KEY, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', counts_for_production INTEGER DEFAULT 1, UNIQUE(project, step_number))",
+            "ALTER TABLE project_steps ADD COLUMN counts_for_production INTEGER DEFAULT 1",
             # Ensure spool_type column exists on old spools tables and backfill NULLs
             "ALTER TABLE spools ADD COLUMN spool_type TEXT DEFAULT 'SPOOL'",
             "UPDATE spools SET spool_type = 'SPOOL' WHERE spool_type IS NULL",
@@ -152,6 +153,8 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS qc_images (id SERIAL PRIMARY KEY, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, image_data BYTEA NOT NULL, filename TEXT DEFAULT '', mime_type TEXT DEFAULT 'image/jpeg', caption TEXT DEFAULT '', uploaded_at TIMESTAMP DEFAULT NOW(), uploaded_by TEXT DEFAULT '')",
             "CREATE INDEX IF NOT EXISTS idx_qc_reports_ps ON qc_reports(project, spool_id)",
             "CREATE INDEX IF NOT EXISTS idx_qc_images_ps ON qc_images(project, spool_id, report_type)",
+            "CREATE TABLE IF NOT EXISTS qc_inspectors (id SERIAL PRIMARY KEY, name TEXT NOT NULL, role TEXT DEFAULT '', signature_data TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW(), UNIQUE(name))",
+            "CREATE TABLE IF NOT EXISTS shipments (id SERIAL PRIMARY KEY, project TEXT NOT NULL, shipment_number INTEGER NOT NULL, description TEXT DEFAULT '', etd DATE, transit_days INTEGER DEFAULT 45, notes TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW(), UNIQUE(project, shipment_number))",
         ]
         for stmt in pg_statements:
             try: cur.execute(stmt)
@@ -167,113 +170,61 @@ def init_db():
             CREATE TABLE IF NOT EXISTS schedule (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, diameter TEXT NOT NULL, task_type TEXT NOT NULL, description TEXT DEFAULT '', planned_start TEXT NOT NULL, planned_end TEXT NOT NULL, spool_count INTEGER DEFAULT 0, UNIQUE(project, diameter, task_type));
             CREATE TABLE IF NOT EXISTS project_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key));
             CREATE TABLE IF NOT EXISTS drawings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BLOB NOT NULL, UNIQUE(project, spool_id));
-            CREATE TABLE IF NOT EXISTS project_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', UNIQUE(project, step_number));
+            CREATE TABLE IF NOT EXISTS project_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', counts_for_production INTEGER DEFAULT 1, UNIQUE(project, step_number));
             UPDATE schedule SET task_type = 'fab' WHERE task_type IN ('fabrication', 'Fabricacion');
             UPDATE schedule SET task_type = 'paint' WHERE task_type IN ('painting', 'Pintura');
             CREATE TABLE IF NOT EXISTS qc_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, report_subtype TEXT DEFAULT '', status TEXT DEFAULT 'draft', inspector_name TEXT DEFAULT '', inspector_date TEXT DEFAULT '', tpi_name TEXT DEFAULT '', tpi_date TEXT DEFAULT '', data TEXT DEFAULT '{}', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), created_by TEXT DEFAULT '', UNIQUE(project, spool_id, report_type, report_subtype));
             CREATE TABLE IF NOT EXISTS qc_images (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, image_data BLOB NOT NULL, filename TEXT DEFAULT '', mime_type TEXT DEFAULT 'image/jpeg', caption TEXT DEFAULT '', uploaded_at TEXT DEFAULT (datetime('now')), uploaded_by TEXT DEFAULT '');
+            CREATE TABLE IF NOT EXISTS qc_inspectors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, role TEXT DEFAULT '', signature_data TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
+            CREATE TABLE IF NOT EXISTS shipments (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, shipment_number INTEGER NOT NULL, description TEXT DEFAULT '', etd TEXT, transit_days INTEGER DEFAULT 45, notes TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(project, shipment_number));
         """); c.close()
 
 # ── QC Report Type Registry ──────────────────────────────────────────────────
-# Defines all QC report types, which projects they apply to, and their categories.
-# 'per_weld' reports get one row per weld joint in the spool.
-# 'has_images' reports allow image upload (e.g., RT X-ray films).
-QC_REPORT_TYPES = {
-    'dimensional': {
-        'name_en': 'Dimensional Inspection', 'name_cn': '尺寸检验',
-        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'measurement',
-        'subtypes': {'ENJOB25012424': [('pre_paint','Pre-Painting / 喷漆前'),('post_paint','Post-Painting / 喷漆后')]},
-        'icon': '📐',
-    },
-    'fitup': {
-        'name_en': 'Fit-up Inspection', 'name_cn': '组对检验',
-        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'weld',
-        'per_weld': True, 'icon': '🔧',
-    },
-    'welding_log': {
-        'name_en': 'Welding Log', 'name_cn': '焊接记录',
-        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'weld',
-        'per_weld': True, 'icon': '🔥',
-    },
-    'vt': {
-        'name_en': 'Visual Testing (VT)', 'name_cn': '目视检验 (VT)',
-        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'ndt',
-        'per_weld': True, 'icon': '👁',
-    },
-    'rt': {
-        'name_en': 'Radiographic Testing (RT)', 'name_cn': '射线检测 (RT)',
-        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'ndt',
-        'per_weld': True, 'has_images': True, 'icon': '☢',
-    },
-    'pt': {
-        'name_en': 'Penetrant Testing (PT)', 'name_cn': '渗透检测 (PT)',
-        'projects': ['ENJOB25011423'], 'category': 'ndt',
-        'per_weld': True, 'icon': '🧪',
-    },
-    'mt': {
-        'name_en': 'Magnetic Particle (MT)', 'name_cn': '磁粉检测 (MT)',
-        'projects': ['ENJOB25012424'], 'category': 'ndt',
-        'per_weld': True, 'icon': '🧲',
-    },
-    'pmi': {
-        'name_en': 'PMI Report', 'name_cn': 'PMI检测报告',
-        'projects': ['ENJOB25011423'], 'category': 'material',
-        'icon': '🔬',
-    },
-    'ferrite': {
-        'name_en': 'Ferrite Content', 'name_cn': '铁素体含量',
-        'projects': ['ENJOB25011423'], 'category': 'material',
-        'per_weld': True, 'icon': '📊',
-    },
-    'cutting': {
-        'name_en': 'Cutting Inspection', 'name_cn': '切割检验',
-        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'fab',
-        'icon': '✂',
-    },
-    'weld_map': {
-        'name_en': 'Weld Map', 'name_cn': '焊缝图',
-        'projects': ['ENJOB25011423', 'ENJOB25012424'], 'category': 'fab',
-        'has_images': True, 'icon': '🗺',
-    },
-    'passivation': {
-        'name_en': 'Passivation Record', 'name_cn': '钝化记录',
-        'projects': ['ENJOB25011423'], 'category': 'surface',
-        'icon': '🧴',
-    },
-    'ferroxyl': {
-        'name_en': 'Ferroxyl Test', 'name_cn': '铁离子检测',
-        'projects': ['ENJOB25011423'], 'category': 'surface',
-        'has_images': True, 'icon': '🧫',
-    },
-    'dft': {
-        'name_en': 'Coating Inspection (DFT)', 'name_cn': '涂层检验 (DFT)',
-        'projects': ['ENJOB25012424'], 'category': 'surface',
-        'icon': '🎨',
-    },
-}
-
+# Each report maps to a specific ITP step. 'rec_seq' is the record number suffix.
+# 'spool_only' means the report only applies to welded spools (not straight pipes).
+# Reports are ordered by ITP step sequence within each project.
+# Print format: English-only EN 10204 3.1 certificate. Web forms: bilingual EN/CN.
+# QC category labels — universal, not project-specific
 QC_CATEGORY_LABELS = {
-    'fab': ('Fabrication / 制造', '#2F5496'),
-    'weld': ('Welding / 焊接', '#C0392B'),
-    'ndt': ('NDT / 无损检测', '#8E44AD'),
-    'measurement': ('Measurement / 测量', '#27AE60'),
-    'material': ('Material / 材料', '#E67E22'),
-    'surface': ('Surface Treatment / 表面处理', '#16A085'),
+    'fab': ('Fabrication / \u5236\u9020', '#2F5496'),
+    'weld': ('Welding / \u710a\u63a5', '#C0392B'),
+    'ndt': ('NDT / \u65e0\u635f\u68c0\u6d4b', '#8E44AD'),
+    'measurement': ('Measurement / \u6d4b\u91cf', '#27AE60'),
+    'material': ('Material / \u6750\u6599', '#E67E22'),
+    'surface': ('Surface Treatment / \u8868\u9762\u5904\u7406', '#16A085'),
 }
 
-def get_qc_reports_for_project(project):
-    """Return list of (report_type, config, subtype) tuples applicable to this project."""
-    result = []
-    for rtype, cfg in QC_REPORT_TYPES.items():
-        if project not in cfg['projects']:
-            continue
-        subtypes = cfg.get('subtypes', {}).get(project)
-        if subtypes:
-            for sub_key, sub_label in subtypes:
-                result.append((rtype, cfg, sub_key, sub_label))
-        else:
-            result.append((rtype, cfg, '', ''))
-    return result
+def get_qc_setting(project, key, default=None):
+    """Get a QC-related project setting, parsing JSON if needed."""
+    row = db_fetchone("SELECT value FROM project_settings WHERE project=? AND key=?", (project, key))
+    if not row:
+        return default
+    val = row['value']
+    if val and val.startswith(('[', '{')):
+        return json.loads(val)
+    return val
+
+def get_qc_report_defs(project):
+    """Load QC report definitions from project_settings."""
+    return get_qc_setting(project, 'qc_report_defs', [])
+
+def get_qc_project_info(project):
+    """Load QC project info (contract, client, material, ITP) from project_settings."""
+    return get_qc_setting(project, 'qc_project_info', {})
+
+def get_wps_registry(project):
+    """Load WPS registry from project_settings."""
+    return get_qc_setting(project, 'wps_registry', {})
+
+def get_qc_reports_for_spool(project, spool_type='SPOOL'):
+    """Return list of report defs applicable to this project+spool_type."""
+    defs = get_qc_report_defs(project)
+    is_straight = (spool_type or '').upper() == 'STRAIGHT'
+    return [d for d in defs if not (is_straight and d.get('spool_only', False))]
+
+def get_record_number(project, spool_id, rec_seq):
+    """Generate record number: ENJOB25011423-REC-SPL-001-001"""
+    return f"{project}-REC-{spool_id}-{rec_seq}"
 
 # ── Helpers: Project Steps & Settings ─────────────────────────────────────────
 def get_project_steps(project):
@@ -352,6 +303,7 @@ def spool_hours(spool_row, completed_steps, settings, steps_def):
         if step['is_conditional'] and not has_br: continue
         st = step.get('spool_type', 'ALL') or 'ALL'
         if st != 'ALL' and st != spool_type: continue
+        if not step.get('counts_for_production', 1): continue
 
         # Calculate hours for this step
         if step['hours_variable'] == 'welding':
@@ -854,11 +806,13 @@ def api_spool(project, spool_id):
     steps_def = get_project_steps(project)
     steps = fix_timestamps(db_fetchall("SELECT * FROM progress WHERE project=? AND spool_id=? ORDER BY step_number", (project, spool_id)))
     act = fix_timestamps(db_fetchall("SELECT * FROM activity_log WHERE project=? AND spool_id=? ORDER BY timestamp DESC LIMIT 10", (project, spool_id)))
+    spool_type = sp.get('spool_type', 'SPOOL') or 'SPOOL'
     step_definitions = [
         {'number':s['step_number'],'name_en':s['name_en'],'name_cn':s['name_cn'],'weight':s['weight'],
          'is_hold_point':s.get('is_hold_point',0),'is_release':s.get('is_release',0)}
         for s in steps_def
-        if not s['is_conditional'] or sp.get('has_branches')
+        if (not s['is_conditional'] or sp.get('has_branches'))
+        and ((s.get('spool_type','ALL') or 'ALL') in ('ALL', spool_type))
     ]
     return jsonify({'spool':sp, 'progress_pct': spool_progress(project, spool_id), 'steps':steps, 'activity':act,
         'step_definitions': step_definitions,
@@ -896,27 +850,49 @@ def qc_report_page(project, spool_id, report_type):
 @app.route('/api/project/<project>/spool/<spool_id>/qc')
 @login_required
 def api_qc_list(project, spool_id):
-    """List all QC reports for a spool with status."""
-    reports = get_qc_reports_for_project(project)
+    """List all QC reports for a spool with status, filtered by spool_type."""
+    # Get spool type (SPOOL or STRAIGHT)
+    sp = db_fetchone("SELECT spool_type FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
+    spool_type = sp.get('spool_type', 'SPOOL') if sp else 'SPOOL'
+    report_defs = get_qc_reports_for_spool(project, spool_type)
+    # Get existing report statuses
     existing = {}
     rows = db_fetchall("SELECT report_type, report_subtype, status, inspector_name, tpi_name, updated_at FROM qc_reports WHERE project=? AND spool_id=?", (project, spool_id))
     for r in rows:
         key = f"{r['report_type']}|{r.get('report_subtype','')}"
         existing[key] = {'status': r['status'], 'inspector': r.get('inspector_name',''), 'tpi': r.get('tpi_name',''), 'updated': r.get('updated_at','')}
+    # Get step completion dates from progress table (report date = step completion date)
+    step_dates = {}
+    step_rows = db_fetchall("SELECT step_number, completed_at FROM progress WHERE project=? AND spool_id=? AND completed=1", (project, spool_id))
+    for sr in step_rows:
+        step_dates[sr['step_number']] = (sr.get('completed_at','') or '')[:10]  # YYYY-MM-DD
     result = []
-    for rtype, cfg, subtype, sub_label in reports:
-        key = f"{rtype}|{subtype}"
+    proj_info = get_qc_project_info(project)
+    for d in report_defs:
+        subtype = d.get('report_subtype', '')
+        key = f"{d['type']}|{subtype}"
         ex = existing.get(key, {})
+        rec_no = get_record_number(project, spool_id, d['rec_seq'])
         result.append({
-            'type': rtype, 'subtype': subtype, 'sub_label': sub_label,
-            'name_en': cfg['name_en'], 'name_cn': cfg['name_cn'],
-            'category': cfg['category'], 'icon': cfg.get('icon',''),
-            'has_images': cfg.get('has_images', False),
-            'per_weld': cfg.get('per_weld', False),
+            'type': d['type'], 'subtype': subtype, 'sub_label': d.get('sub_label',''),
+            'rec_seq': d['rec_seq'], 'rec_no': rec_no,
+            'itp_step': d.get('itp_step',0),
+            'name_en': d['name_en'], 'name_cn': d['name_cn'],
+            'category': d['category'], 'icon': d.get('icon',''),
+            'standard': d.get('standard',''),
+            'insp_code': d.get('insp_code',''),
+            'is_hold': d.get('is_hold', False),
+            'has_images': d.get('has_images', False),
+            'per_weld': d.get('per_weld', False),
             'status': ex.get('status', 'not_started'),
             'inspector': ex.get('inspector', ''),
             'tpi': ex.get('tpi', ''),
             'updated': ex.get('updated', ''),
+            'step_date': step_dates.get(d.get('itp_step',0), ''),
+            'contract': proj_info.get('contract',''),
+            'client': proj_info.get('client',''),
+            'material': proj_info.get('material',''),
+            'itp': proj_info.get('itp',''),
         })
     return jsonify(result)
 
@@ -924,23 +900,42 @@ def api_qc_list(project, spool_id):
 @login_required
 def api_qc_get(project, spool_id, report_type):
     subtype = request.args.get('sub', '')
+    # Find the ITP step number for this report type to get step completion date
+    defs = get_qc_report_defs(project)
+    itp_step = 0
+    rec_no = ''
+    for d in defs:
+        if d['type'] == report_type and d.get('report_subtype','') == subtype:
+            itp_step = d.get('itp_step', 0)
+            rec_no = get_record_number(project, spool_id, d['rec_seq'])
+            break
+    step_date = ''
+    if itp_step:
+        sr = db_fetchone("SELECT completed_at FROM progress WHERE project=? AND spool_id=? AND step_number=? AND completed=1", (project, spool_id, itp_step))
+        if sr and sr.get('completed_at'):
+            step_date = (sr['completed_at'] or '')[:10]
     row = db_fetchone("SELECT * FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
                       (project, spool_id, report_type, subtype))
     if row:
         r = dict(row)
         r['data'] = json.loads(r.get('data','{}'))
-        # Count images
+        r['step_date'] = step_date
+        r['rec_no'] = rec_no
+        proj_info = get_qc_project_info(project)
+        r['itp'] = proj_info.get('itp', '')
+        r['material_type'] = proj_info.get('material_type', '')
         img_count = db_fetchone("SELECT COUNT(*) as cnt FROM qc_images WHERE project=? AND spool_id=? AND report_type=?",
                                 (project, spool_id, report_type))
         r['image_count'] = img_count['cnt'] if img_count else 0
         return jsonify(r)
     # Return empty template
-    cfg = QC_REPORT_TYPES.get(report_type, {})
     return jsonify({
         'project': project, 'spool_id': spool_id, 'report_type': report_type,
         'report_subtype': subtype, 'status': 'not_started',
         'inspector_name': '', 'inspector_date': '', 'tpi_name': '', 'tpi_date': '',
-        'data': {}, 'image_count': 0,
+        'data': {}, 'image_count': 0, 'step_date': step_date, 'rec_no': rec_no,
+        'itp': get_qc_project_info(project).get('itp', ''),
+        'material_type': get_qc_project_info(project).get('material_type', ''),
     })
 
 @app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>', methods=['POST'])
@@ -1017,6 +1012,548 @@ def api_qc_image_delete(project, image_id):
     db_execute("DELETE FROM qc_images WHERE id=? AND project=?", (image_id, project))
     db_commit()
     return jsonify({'ok': True})
+
+# ── API: QC Seed from DXF SQLite ─────────────────────────────────────────────
+@app.route('/api/project/<project>/spool/<spool_id>/qc/seed', methods=['POST'])
+@login_required
+def api_qc_seed(project, spool_id):
+    """Read DXF SQLite and pre-populate QC report data for this spool."""
+    import sqlite3 as sqlite3_mod
+    db_path = get_qc_setting(project, 'dxf_sqlite_path')
+    if not db_path or not os.path.exists(db_path):
+        return jsonify({'error': f'DXF database not found for {project}'}), 404
+    conn = sqlite3_mod.connect(db_path)
+    conn.row_factory = sqlite3_mod.Row
+    # Find spool
+    sp = conn.execute("SELECT * FROM spools WHERE spool_number=?", (spool_id,)).fetchone()
+    if not sp:
+        conn.close()
+        return jsonify({'error': f'Spool {spool_id} not found in DXF database'}), 404
+    sid = sp['spool_id']
+    attrs = json.loads(sp['attrs'] or '{}')
+    # Get welds
+    welds_raw = conn.execute("SELECT weld_tag, weld_type, size FROM welds WHERE spool_id=? ORDER BY weld_tag", (sid,)).fetchall()
+    welds = [{'weld_tag': w['weld_tag'], 'weld_type': w['weld_type'] or 'butt', 'size': w['size'] or ''} for w in welds_raw]
+    # Get parts (pipes, flanges, fittings)
+    parts_raw = [dict(r) for r in conn.execute("SELECT * FROM parts WHERE spool_id=? ORDER BY item_number", (sid,)).fetchall()]
+    pipes = [{'mark': f"Cut {p['item_number']}", 'description': p['description'], 'nominal': p['cut_length_mm'], 'size': p['nominal_size']}
+             for p in parts_raw if p['part_type'] == 'pipe' and p.get('cut_length_mm') and p['cut_length_mm'] > 0]
+    flanges = [{'size': p['nominal_size'], 'description': p['description'], 'rating': p.get('rating','')}
+               for p in parts_raw if p['part_type'] == 'flange']
+    fittings = [{'size': p['nominal_size'], 'description': p['description'], 'part_type': p['part_type']}
+                for p in parts_raw if p['part_type'] not in ('pipe', 'flange', 'repad')]
+    # Envelope dimensions
+    envelope = attrs.get('envelope', {})
+    conn.close()
+    # Build drawing reference
+    spool_data = db_fetchone("SELECT marking, iso_no FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
+    drawing_ref = f"{project}-{spool_id}"
+    marking = spool_data.get('marking', '') if spool_data else ''
+    # Build seed data per report type
+    seed = {
+        'welds': welds,
+        'pipes': pipes,
+        'flanges': flanges,
+        'fittings': fittings,
+        'envelope': envelope,
+        'drawing_ref': drawing_ref,
+        'marking': marking,
+        'wps_options': list((get_wps_registry(project)).keys()),
+    }
+    # Pre-populate report-specific data in qc_reports
+    for d in get_qc_report_defs(project):
+        rt = d['type']
+        subtype = d.get('report_subtype', '')
+        existing = db_fetchone("SELECT data FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
+                               (project, spool_id, rt, subtype))
+        if existing and existing.get('data','{}') != '{}':
+            continue  # Don't overwrite existing data
+        data = {}
+        if rt == 'cutting':
+            data = {'drawing_ref': drawing_ref, 'pieces': pipes}
+        elif rt in ('fitup', 'vt', 'pt', 'mt', 'rt', 'welding_log'):
+            data = {'welds': [dict(w) for w in welds]}
+        elif rt == 'ferrite':
+            data = {'readings': [{'weld_tag': w['weld_tag'], 'size': w['size']} for w in welds]}
+        elif rt == 'pmi':
+            all_items = [{'item': f"{p['description'][:30]} {p['nominal_size']}", 'location': 'Base metal'} for p in parts_raw if p['part_type'] in ('pipe','flange','elbow','tee')]
+            weld_items = [{'item': f"Weld {w['weld_tag']} ({w['size']})", 'location': 'Weld'} for w in welds]
+            data = {'items': all_items[:5] + weld_items[:5]}  # Sample of items
+        elif rt == 'dimensional':
+            data = {
+                'nominal_l_mm': envelope.get('length_mm'),
+                'nominal_w_mm': envelope.get('width_mm'),
+                'nominal_h_mm': envelope.get('height_mm'),
+                'flanges': [{'size': f['size'], 'description': f['description']} for f in flanges],
+                'fittings': fittings,
+                'drawing_ref': drawing_ref,
+            }
+        elif rt == 'ferroxyl':
+            areas = [{'location': f"Weld {w['weld_tag']} + HAZ / 焊缝{w['weld_tag']}+热影响区", 'copper_deposit': None} for w in welds]
+            areas.append({'location': 'Ground/repaired areas / 打磨/修复区域', 'copper_deposit': None})
+            data = {'areas': areas}
+        if data:
+            data_json = json.dumps(data)
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            if USE_PG:
+                db_execute("""INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,data,updated_at)
+                    VALUES (%s,%s,%s,%s,'not_started',%s,%s)
+                    ON CONFLICT (project,spool_id,report_type,report_subtype) DO UPDATE SET data=EXCLUDED.data, updated_at=EXCLUDED.updated_at
+                    WHERE qc_reports.data = '{}'""",
+                    (project, spool_id, rt, subtype, data_json, now))
+            else:
+                db_execute("""INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,data,updated_at)
+                    VALUES (?,?,?,?,'not_started',?,?)
+                    ON CONFLICT(project,spool_id,report_type,report_subtype) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+                    WHERE qc_reports.data = '{}'""",
+                    (project, spool_id, rt, subtype, data_json, now))
+    db_commit()
+    return jsonify({'ok': True, 'seed': seed})
+
+# ── API: Shipments ────────────────────────────────────────────────────────────
+@app.route('/api/project/<project>/shipments')
+@login_required
+def api_shipments_list(project):
+    """List all shipments for a project with calculated ETA."""
+    rows = db_fetchall("SELECT * FROM shipments WHERE project=? ORDER BY shipment_number", (project,))
+    result = []
+    for r in rows:
+        d = dict(r)
+        etd = d.get('etd', '')
+        transit = int(d.get('transit_days', 0) or 0)
+        eta = ''
+        if etd and transit:
+            try:
+                from datetime import timedelta
+                etd_dt = parse_date(etd) if callable(parse_date) else None
+                if etd_dt:
+                    eta = (etd_dt + timedelta(days=transit)).strftime('%Y-%m-%d')
+            except: pass
+        d['eta'] = eta
+        result.append(d)
+    return jsonify(result)
+
+@app.route('/api/project/<project>/shipments', methods=['POST'])
+@login_required
+def api_shipments_save(project):
+    """Add or update a shipment. Only updates fields present in the request."""
+    d = request.get_json() or {}
+    num = d.get('shipment_number')
+    if not num: return jsonify({'error': 'shipment_number required'}), 400
+    # Check if shipment exists
+    existing = db_fetchone("SELECT * FROM shipments WHERE project=? AND shipment_number=?", (project, num))
+    if existing:
+        # Update only fields that are in the request
+        updates = []
+        params = []
+        for col in ['description', 'etd', 'transit_days', 'notes']:
+            if col in d:
+                updates.append(f"{col}=?")
+                params.append(d[col] if d[col] != '' or col not in ('etd',) else None)
+        if updates:
+            params.extend([project, num])
+            q = f"UPDATE shipments SET {','.join(updates)} WHERE project=? AND shipment_number=?"
+            db_execute(q, tuple(params))
+    else:
+        # Insert new with defaults
+        desc = d.get('description', '')
+        etd = d.get('etd', '') or None
+        transit = d.get('transit_days', 45)
+        notes = d.get('notes', '')
+        db_execute("INSERT INTO shipments (project,shipment_number,description,etd,transit_days,notes) VALUES (?,?,?,?,?,?)",
+            (project, num, desc, etd, transit, notes))
+    db_commit()
+    return jsonify({'ok': True})
+
+@app.route('/api/project/<project>/shipments/<int:num>', methods=['DELETE'])
+@login_required
+def api_shipments_delete(project, num):
+    db_execute("DELETE FROM shipments WHERE project=? AND shipment_number=?", (project, num))
+    db_commit()
+    return jsonify({'ok': True})
+
+# ── API: Inspector Registry ───────────────────────────────────────────────────
+@app.route('/api/inspectors')
+@login_required
+def api_inspectors_list():
+    """List all saved inspectors with their roles (signature_data excluded for speed)."""
+    rows = db_fetchall("SELECT id, name, role, CASE WHEN signature_data != '' THEN 1 ELSE 0 END as has_signature FROM qc_inspectors ORDER BY name")
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/inspectors', methods=['POST'])
+@login_required
+def api_inspectors_save():
+    """Add or update an inspector. If name exists, update role/signature."""
+    d = request.get_json() or {}
+    name = (d.get('name','') or '').strip()
+    if not name: return jsonify({'error':'Name required'}), 400
+    role = d.get('role', '')
+    sig = d.get('signature_data', '')
+    if USE_PG:
+        db_execute("INSERT INTO qc_inspectors (name,role,signature_data) VALUES (%s,%s,%s) ON CONFLICT (name) DO UPDATE SET role=EXCLUDED.role, signature_data=CASE WHEN EXCLUDED.signature_data != '' THEN EXCLUDED.signature_data ELSE qc_inspectors.signature_data END",
+            (name, role, sig))
+    else:
+        db_execute("INSERT INTO qc_inspectors (name,role,signature_data) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET role=excluded.role, signature_data=CASE WHEN excluded.signature_data != '' THEN excluded.signature_data ELSE qc_inspectors.signature_data END",
+            (name, role, sig))
+    db_commit()
+    return jsonify({'ok': True})
+
+@app.route('/api/inspectors/<int:inspector_id>/signature')
+@login_required
+def api_inspector_signature(inspector_id):
+    """Get an inspector's signature as base64 data URI."""
+    row = db_fetchone("SELECT signature_data FROM qc_inspectors WHERE id=?", (inspector_id,))
+    if not row or not row.get('signature_data'):
+        return jsonify({'signature_data': ''})
+    return jsonify({'signature_data': row['signature_data']})
+
+# ── API: WPS Registry ────────────────────────────────────────────────────────
+@app.route('/api/project/<project>/wps')
+@login_required
+def api_wps_list(project):
+    """Return WPS options for this project."""
+    return jsonify(get_wps_registry(project))
+
+# ── QC PDF Generator (reportlab) — EN 10204 Type 3.1 Certificate ─────────────
+def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date):
+    """Generate a single QC report PDF. Returns bytes. Generalised — works for any report type."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.colors import HexColor, black, white
+    from reportlab.pdfgen import canvas as pdfcanvas
+    from io import BytesIO
+    buf = BytesIO()
+    W, H = A4
+    c = pdfcanvas.Canvas(buf, pagesize=A4)
+    margin = 20*mm
+    cw = W - 2*margin  # content width
+    y = H - 15*mm
+    blue = HexColor('#2F5496')
+    grey = HexColor('#666666')
+    light = HexColor('#f0f2f5')
+    green = HexColor('#27ae60')
+    red = HexColor('#e74c3c')
+    data = json.loads(report_row['data']) if report_row and report_row.get('data') else {}
+    rec_no = get_record_number(project, spool_id, report_def['rec_seq'])
+    sub_label = f" ({report_def.get('sub_label','')})" if report_def.get('sub_label') else ''
+    inspector = report_row.get('inspector_name', '') if report_row else ''
+    overall = data.get('overall_result', '')
+
+    def draw_text(x, yy, text, size=9, color=black, bold=False, align='left', max_w=None):
+        font = 'Helvetica-Bold' if bold else 'Helvetica'
+        c.setFont(font, size); c.setFillColor(color)
+        if align == 'center' and max_w:
+            tw = c.stringWidth(text, font, size)
+            x = x + (max_w - tw) / 2
+        elif align == 'right' and max_w:
+            tw = c.stringWidth(text, font, size)
+            x = x + max_w - tw
+        c.drawString(x, yy, str(text)[:120])
+
+    def draw_line(yy, color=black, width=0.5):
+        c.setStrokeColor(color); c.setLineWidth(width)
+        c.line(margin, yy, W-margin, yy)
+
+    def draw_rect(x, yy, w, h, fill=None, stroke=None):
+        if fill: c.setFillColor(fill)
+        if stroke: c.setStrokeColor(stroke)
+        c.rect(x, yy, w, h, fill=bool(fill), stroke=bool(stroke))
+
+    def new_page_if_needed(yy, need=40*mm):
+        if yy < margin + need:
+            draw_footer()
+            c.showPage()
+            return H - 15*mm
+        return yy
+
+    def draw_footer():
+        fy = margin - 5*mm
+        draw_line(fy + 8*mm, grey, 0.3)
+        draw_text(margin, fy + 2*mm, 'ENERXON (Cangzhou) Pipeline Co., Ltd. · ISO 9001:2015 · IQNet', 7, grey)
+        draw_text(margin, fy - 2*mm, 'EN 10204 Type 3.1 Inspection Certificate', 7, grey)
+        draw_text(W-margin, fy, '3.1', 8, grey, align='right', max_w=0)
+
+    # ── LOGO + TITLE ──
+    logo_path = os.path.join(os.path.expanduser('~'), 'Library', 'CloudStorage', 'Dropbox', 'OB', 'Logos', 'Enerxon Logo Especifications 1.png')
+    if os.path.exists(logo_path):
+        try: c.drawImage(logo_path, margin, y - 14*mm, width=35*mm, height=14*mm, preserveAspectRatio=True, mask='auto')
+        except: pass
+    draw_text(margin + 40*mm, y - 5*mm, report_def['name_en'] + ' Report' + sub_label, 13, blue, bold=True, align='center', max_w=cw - 80*mm)
+    draw_text(W - margin, y - 3*mm, 'Page 1 of 1', 8, grey, align='right', max_w=0)
+    y -= 18*mm
+    draw_line(y, black, 1.5)
+    y -= 3*mm
+
+    # ── INFO GRID ──
+    info_fields = [
+        ('Report No.', rec_no), ('Date', step_date),
+        ('Project', project), ('Contract', proj_info.get('contract', '')),
+        ('Client', proj_info.get('client', '')), ('ITP', proj_info.get('itp', '')),
+        ('Spool No.', spool_id), ('Material', proj_info.get('material', '')),
+    ]
+    col_w = cw / 2
+    for i, (label, val) in enumerate(info_fields):
+        col = i % 2
+        if col == 0 and i > 0: y -= 5*mm
+        x = margin + col * col_w
+        draw_text(x, y, label + ':', 8, grey, bold=True)
+        draw_text(x + 25*mm, y, str(val), 9, black)
+    y -= 8*mm
+    draw_line(y, grey, 0.3)
+    y -= 3*mm
+
+    # ── STANDARD / CRITERIA BOX ──
+    standard = report_def.get('standard', '')
+    if standard:
+        draw_rect(margin, y - 8*mm, cw, 8*mm, fill=light)
+        draw_text(margin + 3*mm, y - 5*mm, f"Standard: {standard}", 9, grey)
+        y -= 12*mm
+
+    # ── DATA SECTION — generalised table renderer ──
+    def draw_table(headers, rows, col_widths=None, yy=None):
+        if yy is None: yy = y
+        n = len(headers)
+        if not col_widths:
+            col_widths = [cw / n] * n
+        # Header
+        yy = new_page_if_needed(yy, 15*mm)
+        hx = margin
+        draw_rect(margin, yy - 5*mm, cw, 6*mm, fill=light)
+        for j, h in enumerate(headers):
+            draw_text(hx + 2*mm, yy - 3.5*mm, h, 7, black, bold=True)
+            hx += col_widths[j]
+        yy -= 7*mm
+        # Rows
+        for row in rows:
+            yy = new_page_if_needed(yy, 8*mm)
+            hx = margin
+            for j, cell in enumerate(row):
+                color = green if cell == 'ACC' else (red if cell == 'REJ' else black)
+                bold = cell in ('ACC', 'REJ')
+                draw_text(hx + 2*mm, yy - 3*mm, str(cell), 8, color, bold=bold)
+                hx += col_widths[j]
+            draw_line(yy - 5*mm, HexColor('#eeeeee'), 0.3)
+            yy -= 6*mm
+        return yy
+
+    def section_title(title, yy):
+        yy = new_page_if_needed(yy, 15*mm)
+        draw_text(margin, yy, title, 10, blue, bold=True)
+        yy -= 2*mm
+        draw_line(yy, blue, 0.5)
+        yy -= 4*mm
+        return yy
+
+    # Render data section based on report type
+    rt = report_def['type']
+    if rt == 'cutting':
+        y = section_title('Pipe Cut Inspection', y)
+        pieces = data.get('pieces', [])
+        rows = [[p.get('mark',''), p.get('size',''), str(int(p['nominal'])) if p.get('nominal') else '', str(int(p['actual'])) if p.get('actual') else '', 'ACC' if p.get('pass') else ('REJ' if p.get('pass') is False else '—')] for p in pieces]
+        y = draw_table(['Piece', 'Size', 'Nominal (mm)', 'Actual (mm)', 'Result'], rows, yy=y)
+
+    elif rt == 'fitup':
+        y = section_title('Joint Geometric Check', y)
+        welds = data.get('welds', [])
+        rows = [[w.get('weld_tag',''), w.get('size',''), w.get('weld_type',''), 'ACC' if w.get('geometric_ok') else ('REJ' if w.get('geometric_ok') is False else '—')] for w in welds]
+        y = draw_table(['Joint', 'Size', 'Type', 'Result'], rows, yy=y)
+
+    elif rt == 'welding_log':
+        y = section_title('WPS Applied', y)
+        wps_nums = data.get('wps_numbers', [])
+        wps_reg = get_wps_registry(project)
+        for wn in wps_nums:
+            wps = wps_reg.get(wn, {})
+            if wps:
+                draw_text(margin, y, f"{wn} — {wps.get('label','')}", 9, blue, bold=True); y -= 5*mm
+                for k in ['processes','filler','shielding','backing','preheat','interpass','heat_input']:
+                    if wps.get(k):
+                        draw_text(margin + 5*mm, y, f"{k.title()}: {wps[k]}", 8, grey); y -= 4*mm
+                y -= 2*mm
+        if data.get('wps_followed'):
+            draw_text(margin, y, 'WPS Followed: YES', 9, green, bold=True); y -= 6*mm
+        y = section_title('Weld Data', y)
+        welds = data.get('welds', [])
+        rows = [[w.get('weld_tag',''), w.get('size',''), w.get('welder_id',''), w.get('date',''), 'ACC' if w.get('done') else '—'] for w in welds]
+        y = draw_table(['Weld', 'Size', 'Welder ID', 'Date', 'Done'], rows, yy=y)
+
+    elif rt == 'vt':
+        y = section_title('VT Checklist', y)
+        vt_items = ['Identification correct','Surface condition suitable','Workmanship acceptable','Dimensions/alignment correct','Weld profile acceptable','No visible cracks','No incomplete fusion/penetration','No undercut/overlap/arc strikes','No surface defects','Attachments/end prep acceptable','ASME B31.3 Table 341.3.2 verified','VT per ASME V Art. 9 recorded']
+        for i, item in enumerate(vt_items):
+            y = new_page_if_needed(y, 7*mm)
+            key = ['id_correct','surface_suitable','workmanship','dimensions_align','weld_profile','no_cracks','no_fusion_defect','no_surface_defect','no_damage','attachments_ok','acceptance_verified','vt_recorded'][i]
+            val = data.get(key)
+            result = 'ACC' if val is True else ('REJ' if val is False else '—')
+            color = green if val is True else (red if val is False else grey)
+            draw_text(margin, y, f"{i+1}. {item}", 8, black)
+            draw_text(W - margin - 15*mm, y, result, 9, color, bold=True)
+            y -= 5*mm
+
+    elif rt == 'rt':
+        y = section_title('RT Equipment', y)
+        for k, label in [('instrument','Instrument'),('source_type','Source'),('focus_size','Focus'),('sfd','SFD'),('iqi_type','IQI'),('tube_voltage','Voltage (kV)'),('tube_current','Current (mA)'),('density_range','Density Range'),('technique','Technique')]:
+            if data.get(k):
+                draw_text(margin, y, f"{label}: {data[k]}", 8, grey); y -= 4*mm
+        y -= 2*mm
+        y = section_title('Film Results (3 films per weld)', y)
+        welds = data.get('welds', [])
+        headers = ['Weld','Film','Bar','Circ.','Crack','LOP','LOF','Density','Result']
+        for w in welds:
+            for fi, f in enumerate(w.get('films', [])):
+                y = new_page_if_needed(y, 6*mm)
+                tag = w.get('weld_tag','') if fi == 0 else ''
+                defects = ['X' if f.get(k) else '—' for k in ['bar','circular','crack','lop','lof']]
+                result = f.get('result', '—')
+                row_data = [tag, str(fi+1)] + defects + [str(f.get('density','')), result]
+                hx = margin
+                cws = [18*mm, 12*mm, 12*mm, 12*mm, 12*mm, 12*mm, 12*mm, 20*mm, 15*mm]
+                for j, cell in enumerate(row_data):
+                    color = green if cell == 'ACC' else (red if cell in ('REJ','X') else black)
+                    draw_text(hx + 1*mm, y, cell, 7, color, bold=(cell in ('ACC','REJ')))
+                    hx += cws[j]
+                draw_line(y - 2*mm, HexColor('#eee'), 0.2)
+                y -= 4*mm
+
+    elif rt in ('pt', 'mt'):
+        y = section_title('Weld Examination', y)
+        welds = data.get('welds', [])
+        rows = [[w.get('weld_tag',''), w.get('size',''), w.get('indication','NRI'), w.get('result','—')] for w in welds]
+        y = draw_table(['Weld', 'Size', 'Indication', 'Result'], rows, yy=y)
+
+    elif rt == 'pmi':
+        y = section_title('PMI Test Points', y)
+        items = data.get('items', [])
+        rows = [[it.get('item',''), it.get('location',''), str(it.get('cr','')), str(it.get('ni','')), str(it.get('mo','')), 'S32205' if it.get('grade_ok') else '—', it.get('result','—')] for it in items]
+        y = draw_table(['Item', 'Location', 'Cr%', 'Ni%', 'Mo%', 'Grade', 'Result'], rows, yy=y)
+
+    elif rt == 'ferrite':
+        y = section_title('Ferrite Readings', y)
+        readings = data.get('readings', [])
+        rows = []
+        for rd in readings:
+            r1, r2, r3 = rd.get('r1'), rd.get('r2'), rd.get('r3')
+            avg = f"{((r1+r2+r3)/3):.1f}%" if all(v is not None for v in [r1,r2,r3]) else '—'
+            avg_val = (r1+r2+r3)/3 if all(v is not None for v in [r1,r2,r3]) else None
+            result = 'ACC' if (avg_val and 30 <= avg_val <= 65) else ('REJ' if avg_val else '—')
+            rows.append([rd.get('weld_tag',''), str(r1 or ''), str(r2 or ''), str(r3 or ''), avg, result])
+        y = draw_table(['Weld', 'R1 (%)', 'R2 (%)', 'R3 (%)', 'Average', 'Result'], rows, yy=y)
+
+    elif rt == 'dimensional':
+        y = section_title('Overall Dimensions', y)
+        rows = []
+        for k, label in [('l','Length'),('w','Width'),('h','Height')]:
+            nom = data.get(f'nominal_{k}_mm')
+            act = data.get(f'actual_{k}_mm')
+            dev = f"{(act-nom):.1f}mm" if nom and act else '—'
+            ok = 'ACC' if (nom and act and abs(act-nom) <= 5) else ('REJ' if nom and act else '—')
+            rows.append([label, str(int(nom)) if nom else '—', str(int(act)) if act else '—', dev, ok])
+        y = draw_table(['Dimension', 'Nominal (mm)', 'Actual (mm)', 'Dev.', 'Result'], rows, yy=y)
+        flanges = data.get('flanges', [])
+        if flanges:
+            y = section_title('Flange Alignment', y)
+            rows = [[f.get('description',''), f.get('size',''), 'ACC' if f.get('bolt_hole_ok') else '—', 'ACC' if f.get('perp_ok') else '—'] for f in flanges]
+            y = draw_table(['Flange', 'Size', 'Bolt-Hole', 'Perp.'], rows, yy=y)
+
+    elif rt == 'ferroxyl':
+        y = section_title('Test Results', y)
+        areas = data.get('areas', [])
+        rows = [[a.get('location',''), a.get('surface_cond',''), 'No' if a.get('copper_deposit') is False else ('Yes' if a.get('copper_deposit') else '—'), 'ACC' if a.get('copper_deposit') is False else ('REJ' if a.get('copper_deposit') else '—')] for a in areas]
+        y = draw_table(['Area', 'Surface', 'Cu Deposit', 'Result'], rows, yy=y)
+
+    elif rt == 'dft':
+        y = section_title('DFT Readings', y)
+        readings = data.get('readings', [])
+        rows = [[r.get('point',''), str(r.get('value','')) + ' um' if r.get('value') else '—', '—'] for r in readings]
+        y = draw_table(['Point', 'Reading', 'Result'], rows, yy=y)
+
+    # ── REMARKS ──
+    remarks = data.get('remarks', '')
+    if remarks:
+        y -= 3*mm
+        y = new_page_if_needed(y, 15*mm)
+        draw_text(margin, y, 'Remarks:', 9, grey, bold=True); y -= 5*mm
+        draw_text(margin, y, remarks[:200], 8, black); y -= 6*mm
+
+    # ── OVERALL RESULT ──
+    y -= 3*mm
+    y = new_page_if_needed(y, 25*mm)
+    draw_line(y, black, 1.5); y -= 8*mm
+    draw_text(margin, y, 'Inspection Result:', 11, black, bold=True)
+    result_text = 'CONFORMING' if overall == 'ACC' else ('NON-CONFORMING' if overall == 'REJ' else 'PENDING')
+    result_color = green if overall == 'ACC' else (red if overall == 'REJ' else grey)
+    draw_text(W - margin - 50*mm, y, result_text, 12, result_color, bold=True)
+    y -= 10*mm
+
+    # ── SIGNATURES ──
+    y = new_page_if_needed(y, 30*mm)
+    sig_w = cw / 3 - 3*mm
+    # Load inspector signature if available
+    inspector_sig = None
+    if inspector:
+        sig_row = db_fetchone("SELECT signature_data FROM qc_inspectors WHERE name=?", (inspector,))
+        if sig_row and sig_row.get('signature_data','').startswith('data:image'):
+            inspector_sig = sig_row['signature_data']
+    for i, label in enumerate(['QC Inspector', 'QM', 'TPI']):
+        sx = margin + i * (sig_w + 4*mm)
+        draw_rect(sx, y - 22*mm, sig_w, 22*mm, stroke=grey)
+        draw_text(sx + 2*mm, y - 4*mm, label, 7, grey)
+        draw_line(y - 18*mm, grey, 0.3)
+        if i == 0 and inspector:
+            # Draw signature image if available
+            if inspector_sig:
+                try:
+                    import base64
+                    sig_b64 = inspector_sig.split(',')[1]
+                    sig_bytes = base64.b64decode(sig_b64)
+                    sig_buf = BytesIO(sig_bytes)
+                    from reportlab.lib.utils import ImageReader
+                    sig_img = ImageReader(sig_buf)
+                    c.drawImage(sig_img, sx + 5*mm, y - 17*mm, width=sig_w - 10*mm, height=10*mm, preserveAspectRatio=True, mask='auto')
+                except: pass
+            draw_text(sx + 5*mm, y - 15*mm, inspector, 9, blue)
+            draw_text(sx + 2*mm, y - 21*mm, step_date, 7, grey)
+
+    # ── FOOTER ──
+    draw_footer()
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+# ── API: QC Export (ZIP of all reports for a spool) ──────────────────────────
+@app.route('/api/project/<project>/spool/<spool_id>/qc/export')
+@login_required
+def api_qc_export(project, spool_id):
+    """Export all QC reports as PDFs in a ZIP, organized by spool folder."""
+    import zipfile
+    from io import BytesIO
+    sp = db_fetchone("SELECT spool_type FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
+    spool_type = sp.get('spool_type', 'SPOOL') if sp else 'SPOOL'
+    report_defs = get_qc_reports_for_spool(project, spool_type)
+    proj_info = get_qc_project_info(project)
+    buf = BytesIO()
+    folder = spool_id.replace('/', '-').replace(' ', '_')
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for d in report_defs:
+            rt = d['type']
+            subtype = d.get('report_subtype', '')
+            row = db_fetchone("SELECT * FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
+                              (project, spool_id, rt, subtype))
+            itp_step = d.get('itp_step', 0)
+            sr = db_fetchone("SELECT completed_at FROM progress WHERE project=? AND spool_id=? AND step_number=? AND completed=1",
+                             (project, spool_id, itp_step)) if itp_step else None
+            step_date = (sr['completed_at'] or '')[:10] if sr and sr.get('completed_at') else ''
+            try:
+                pdf_bytes = build_qc_pdf(project, spool_id, d, row, proj_info, step_date)
+                sub = f"_{d.get('sub_label','').split('/')[0].strip().replace(' ','_')}" if d.get('sub_label') else ''
+                fname = f"{d['rec_seq']}_{d['name_en'].replace(' ','_').replace('(','').replace(')','')}{sub}.pdf"
+                zf.writestr(f"{folder}/{fname}", pdf_bytes)
+            except Exception as e:
+                print(f"PDF error {d['type']}: {e}")
+                zf.writestr(f"{folder}/{d['rec_seq']}_{d['type']}_ERROR.txt", str(e))
+    buf.seek(0)
+    return send_file(buf, mimetype='application/zip',
+                     download_name=f"{project}_{folder}_QC_Reports.zip", as_attachment=True)
 
 # ── API: Import & Export ──────────────────────────────────────────────────────
 @app.route('/api/import', methods=['POST'])
@@ -2239,6 +2776,21 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
   <div style="display:flex;align-items:center;gap:12px">
     <a class="back" href="/">\u2190 Home</a>
     <div style="flex:1"><h1>{{ project }}</h1><div class="sub" id="subtitle">Loading... / \u52a0\u8f7d\u4e2d...</div></div>
+    <div onclick="toggleSettings()" style="cursor:pointer;font-size:20px;color:#aaa;padding:8px" title="Settings / \u8bbe\u7f6e">\u2699</div>
+  </div>
+</div>
+<div id="settings-panel" style="display:none;background:#fff;margin:0 16px 8px;border-radius:10px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.08);border-left:4px solid #888">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <h3 style="font-size:14px;color:#333;margin:0">Settings / \u8bbe\u7f6e</h3>
+    <div onclick="toggleSettings()" style="cursor:pointer;font-size:18px;color:#aaa">\u2715</div>
+  </div>
+  <div id="settings-fields"></div>
+  <div style="margin-top:16px;border-top:1px solid #eee;padding-top:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h4 style="font-size:12px;color:#333;margin:0">Shipments / \u53d1\u8fd0</h4>
+      <button onclick="addShipmentSetting()" style="padding:3px 10px;font-size:10px;border:1px solid #2F5496;border-radius:4px;background:#fff;color:#2F5496;cursor:pointer">+ Add / \u65b0\u589e</button>
+    </div>
+    <div id="settings-shipments"></div>
   </div>
 </div>
 <div class="toolbar">
@@ -2407,6 +2959,94 @@ function filter(){
     return true;
   }));
 }
+// ── Settings Panel ──
+const SETTINGS_SCHEMA = [
+  {key:'standard_weeks',        label_en:'Standard Delivery',label_cn:'标准交货',unit:'weeks / 周',type:'number',def:'9'},
+  {key:'committed_weeks_saved', label_en:'Weeks Expedited',  label_cn:'加急节省周数',unit:'weeks / 周',type:'number',def:'0'},
+  {key:'production_start',     label_en:'Production Start',  label_cn:'生产开始日期',unit:'',type:'date',def:''},
+  {key:'welding_capability_ipd',label_en:'Welding Capacity', label_cn:'焊接产能',unit:'inch-dia/day',type:'number',def:'552'},
+  {key:'surface_capability_m2d',label_en:'Surface Capacity', label_cn:'涂装产能',unit:'m²/day',type:'number',def:'91'},
+];
+let settingsOpen = false;
+function toggleSettings(){
+  settingsOpen = !settingsOpen;
+  document.getElementById('settings-panel').style.display = settingsOpen ? 'block' : 'none';
+  if(settingsOpen) loadSettings();
+}
+async function loadSettings(){
+  const r = await fetch(`/api/project/${P}/dashboard`);
+  const d = await r.json();
+  const sett = d.settings || {};
+  let h = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
+  SETTINGS_SCHEMA.forEach(s => {
+    const val = sett[s.key] || s.def;
+    h += `<div style="display:flex;align-items:center;gap:6px;padding:4px 0">
+      <div style="flex:1"><div style="font-size:11px;font-weight:600;color:#333">${s.label_en}</div><div style="font-size:9px;color:#888">${s.label_cn}</div></div>
+      <input type="${s.type}" value="${val}" style="width:70px;padding:4px 6px;border:1px solid #ddd;border-radius:4px;font-size:12px;text-align:center"
+        onchange="saveSetting('${s.key}',this.value)">
+      <span style="font-size:9px;color:#aaa;min-width:50px">${s.unit}</span>
+    </div>`;
+  });
+  h += '</div>';
+  document.getElementById('settings-fields').innerHTML = h;
+  const sr = await fetch(`/api/project/${P}/shipments`);
+  const ships = await sr.json();
+  let sh = '';
+  if(!ships.length) sh = '<div style="text-align:center;padding:8px;color:#aaa;font-size:11px">No shipments / 未配置发运</div>';
+  else {
+    sh = `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+      <th style="padding:4px;border:1px solid #ddd">#</th>
+      <th style="padding:4px;border:1px solid #ddd">Description / 描述</th>
+      <th style="padding:4px;border:1px solid #ddd">ETD / 离港</th>
+      <th style="padding:4px;border:1px solid #ddd">Transit / 运输</th>
+      <th style="padding:4px;border:1px solid #ddd">ETA / 到达</th>
+      <th style="padding:4px;border:1px solid #ddd"></th></tr>`;
+    ships.forEach(s => {
+      sh += `<tr data-ship="${s.shipment_number}">
+        <td style="padding:3px;border:1px solid #ddd;font-weight:700;color:#2F5496;text-align:center">${s.shipment_number}</td>
+        <td style="padding:3px;border:1px solid #ddd"><input value="${s.description||''}" style="width:100%;border:1px solid #eee;padding:2px 4px;font-size:11px;border-radius:3px" onchange="saveShipment(${s.shipment_number},{description:this.value})"></td>
+        <td style="padding:3px;border:1px solid #ddd"><input type="date" value="${(s.etd||'').substring(0,10)}" style="border:1px solid #eee;padding:2px;font-size:10px;border-radius:3px" onchange="saveShipment(${s.shipment_number},{etd:this.value})"></td>
+        <td style="padding:3px;border:1px solid #ddd"><input type="number" value="${s.transit_days||45}" style="width:50px;border:1px solid #eee;padding:2px;font-size:11px;text-align:center;border-radius:3px" onchange="saveShipment(${s.shipment_number},{transit_days:parseInt(this.value)})"></td>
+        <td class="eta-cell" style="padding:3px;border:1px solid #ddd;font-weight:700;color:#003366;text-align:center">${s.eta||'—'}</td>
+        <td style="padding:3px;border:1px solid #ddd;text-align:center"><span onclick="deleteShipmentS(${s.shipment_number})" style="color:#e74c3c;cursor:pointer;font-size:14px">×</span></td>
+      </tr>`;
+    });
+    sh += '</table>';
+  }
+  document.getElementById('settings-shipments').innerHTML = sh;
+}
+async function saveSetting(key, val){
+  await fetch(`/api/project/${P}/settings`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({[key]:val})});
+  load();
+}
+async function addShipmentSetting(){
+  const r = await fetch(`/api/project/${P}/shipments`);
+  const ships = await r.json();
+  const next = ships.length ? Math.max(...ships.map(s=>s.shipment_number)) + 1 : 1;
+  await fetch(`/api/project/${P}/shipments`, {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({shipment_number:next, description:'Shipment '+next, transit_days:45})});
+  loadSettings(); // full reload needed after add
+}
+async function saveShipment(num, fields){
+  fields.shipment_number = num;
+  await fetch(`/api/project/${P}/shipments`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(fields)});
+  refreshShipmentsOnly();
+}
+async function refreshShipmentsOnly(){
+  const sr = await fetch(`/api/project/${P}/shipments`);
+  const ships = await sr.json();
+  // Update only ETA cells without re-rendering inputs
+  ships.forEach(s => {
+    const row = document.querySelector(`[data-ship="${s.shipment_number}"]`);
+    if(row) { const eta = row.querySelector('.eta-cell'); if(eta) eta.textContent = s.eta || '—'; }
+  });
+}
+async function deleteShipmentS(num){
+  if(!confirm('Delete shipment '+num+'? / 删除批次'+num+'?')) return;
+  await fetch(`/api/project/${P}/shipments/${num}`, {method:'DELETE'});
+  loadSettings(); // full reload needed after delete
+}
+
 load(); setInterval(load,30000);
 </script></body></html>"""
 
@@ -2445,7 +3085,7 @@ SPOOL_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
 <div class="header">
   <a class="back" href="/project/{{ project }}">\u2190 {{ project }}</a>
   <h1>{{ spool_id }}</h1>
-  <div class="sub" id="sub-info">Loading...</div>
+  <div class="sub" id="sub-info">Loading... / 加载中...</div>
 </div>
 <div class="info-bar" id="info-bar"></div>
 <div style="padding:8px 16px;display:none" id="dwg-wrap">
@@ -2537,12 +3177,22 @@ function switchTab(tab){
 }
 const catLabels = {'fab':['Fabrication','\u5236\u9020'],'weld':['Welding','\u710a\u63a5'],'ndt':['NDT','\u65e0\u635f\u68c0\u6d4b'],'measurement':['Measurement','\u6d4b\u91cf'],'material':['Material','\u6750\u6599'],'surface':['Surface','\u8868\u9762\u5904\u7406']};
 const catColors = {'fab':'#2F5496','weld':'#C0392B','ndt':'#8E44AD','measurement':'#27AE60','material':'#E67E22','surface':'#16A085'};
-const statusLabels = {'not_started':'Not Started / \u672a\u5f00\u59cb','draft':'Draft / \u8349\u7a3f','submitted':'Submitted / \u5df2\u63d0\u4ea4','approved':'Approved / \u5df2\u6279\u51c6'};
+const statusLabels = {'not_started':'\u2014','draft':'Draft / \u8349\u7a3f','submitted':'Submitted / \u5df2\u63d0\u4ea4','approved':'Done / \u5b8c\u6210'};
+const statusCssMap = {'not_started':'qs-not_started','draft':'qs-draft','submitted':'qs-submitted','approved':'qs-approved'};
 async function loadQC(){
+  // Auto-seed from DXF on first load (no-op if already seeded)
+  await fetch(`/api/project/${P}/spool/${S}/qc/seed`,{method:'POST'});
   const r = await fetch(`/api/project/${P}/spool/${S}/qc`);
   const reports = await r.json();
   if(!reports.length){document.getElementById('qc-reports').innerHTML='<p style="padding:20px;color:#888;text-align:center">No QC reports for this project / \u65e0\u8d28\u68c0\u62a5\u544a</p>';return;}
-  let html='';
+  const total = reports.length;
+  const done = reports.filter(r=>r.status==='approved').length;
+  const draft = reports.filter(r=>r.status==='draft').length;
+  let html=`<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0">
+    <div style="font-size:11px;color:#888">${total} reports \u00b7 ${done} done \u00b7 ${draft} draft</div>
+    <div style="display:flex;gap:6px">
+      <a href="/api/project/${P}/spool/${S}/qc/export" style="padding:4px 10px;font-size:10px;border:1px solid #27ae60;border-radius:4px;background:#27ae60;color:#fff;text-decoration:none;cursor:pointer">Export PDF / \u5bfc\u51faPDF</a>
+    </div></div>`;
   let lastCat='';
   reports.forEach(rp=>{
     if(rp.category!==lastCat){
@@ -2550,21 +3200,29 @@ async function loadQC(){
       const cl=catLabels[rp.category]||[rp.category,''];
       html+=`<div class="qc-cat-header" style="color:${catColors[rp.category]||'#888'}">${cl[0]} / ${cl[1]}</div>`;
     }
-    const statusCls = 'qc-'+rp.status.replace('not_started','');
+    const cardCls = rp.status==='approved'?'s-done':rp.status==='draft'?'s-draft':'';
     const url = `/project/${P}/spool/${S}/qc/${rp.type}${rp.subtype?'?sub='+rp.subtype:''}`;
-    html+=`<a class="qc-card ${statusCls}" href="${url}">
+    const holdBadge = rp.is_hold ? ' <span style="background:#EDE7F6;color:#5E35B1;font-size:8px;font-weight:700;padding:1px 5px;border-radius:3px">HOLD</span>' : '';
+    html+=`<a class="qc-card ${cardCls}" href="${url}">
       <div class="qc-icon">${rp.icon}</div>
       <div class="qc-info">
-        <div class="en">${rp.name_en}</div>
-        <div class="cn">${rp.name_cn}</div>
-        ${rp.sub_label?`<div class="sub-label">${rp.sub_label}</div>`:''}
+        <div class="en">${rp.name_en}${holdBadge}</div>
+        <div class="cn">${rp.name_cn} \u00b7 ITP Step ${rp.itp_step}${rp.sub_label?' \u00b7 '+rp.sub_label:''}</div>
+        <div style="font-size:8px;color:#aaa;font-family:monospace;margin-top:1px">${rp.rec_no}</div>
       </div>
-      <div class="qc-status qs-${rp.status}">${statusLabels[rp.status]||rp.status}</div>
+      <div class="qc-status ${statusCssMap[rp.status]||'qs-not_started'}">${statusLabels[rp.status]||rp.status}</div>
     </a>`;
   });
   document.getElementById('qc-reports').innerHTML=html;
 }
+async function seedQC(){
+  const r=await fetch(`/api/project/${P}/spool/${S}/qc/seed`,{method:'POST'});
+  const d=await r.json();
+  if(d.ok) loadQC();
+  else alert(d.error||'Seed failed');
+}
 load();
+if(new URLSearchParams(window.location.search).get('tab')==='qc') switchTab('qc');
 </script></body></html>"""
 
 QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
@@ -2573,7 +3231,7 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 .qc-header h2{font-size:16px;margin:4px 0 2px}.qc-header .qc-sub{font-size:11px;color:#888}
 .inspector-bar{background:#fff;padding:12px 16px;display:grid;grid-template-columns:1fr 1fr;gap:8px;box-shadow:0 1px 2px rgba(0,0,0,.05);margin-bottom:8px}
 .inspector-bar label{font-size:10px;color:#888;display:block;margin-bottom:2px}
-.inspector-bar input{width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px}
+.inspector-bar input,.inspector-bar select{width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px}
 .qc-section{background:#fff;border-radius:10px;margin:8px 16px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
 .qc-section h3{font-size:13px;font-weight:700;color:#2F5496;margin-bottom:10px;border-bottom:2px solid #D6E4F0;padding-bottom:6px}
 .qc-row{display:grid;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #f0f2f5}
@@ -2605,22 +3263,39 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 .weld-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
 </style></head><body>
 <div class="header">
-  <a class="back" href="/project/{{ project }}/spool/{{ spool_id }}">\u2190 {{ spool_id }}</a>
+  <a class="back" href="/project/{{ project }}/spool/{{ spool_id }}?tab=qc">\u2190 {{ spool_id }}</a>
   <h1 id="rpt-title">QC Report</h1>
-  <div class="sub" id="rpt-sub">Loading...</div>
+  <div class="sub" id="rpt-sub">Loading... / 加载中...</div>
 </div>
 <div class="inspector-bar">
-  <div><label>Inspector / \u68c0\u9a8c\u5458</label><input id="inspector" placeholder="Name"></div>
+  <div>
+    <label>Inspector / \u68c0\u9a8c\u5458</label>
+    <select id="inspector-select" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px" onchange="onInspectorSelect(this.value)">
+      <option value="">— Select / \u9009\u62e9\u68c0\u9a8c\u5458 —</option>
+    </select>
+    <input id="inspector" type="hidden">
+  </div>
   <div><label>Date / \u65e5\u671f</label><input id="insp-date" type="date"></div>
-  <div><label>TPI / \u7b2c\u4e09\u65b9\u68c0\u9a8c</label><input id="tpi" placeholder="TPI name (if applicable)"></div>
-  <div><label>TPI Date / \u65e5\u671f</label><input id="tpi-date" type="date"></div>
+  <div style="grid-column:1/-1"><label>ITP</label><div id="itp-display" style="padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-weight:600;color:#8E44AD;background:#f8f5ff"></div></div>
+  <div style="grid-column:1/-1" id="sig-section" style="display:none">
+    <label>Signature / \u7b7e\u540d</label>
+    <div style="position:relative;border:1px solid #ddd;border-radius:6px;background:#fff;height:80px;touch-action:none" id="sig-container">
+      <canvas id="sig-canvas" style="width:100%;height:100%;cursor:crosshair"></canvas>
+      <div style="position:absolute;top:4px;right:4px;display:flex;gap:4px">
+        <button onclick="clearSig()" style="padding:2px 8px;font-size:10px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer">Clear / \u6e05\u9664</button>
+        <button onclick="saveSig()" style="padding:2px 8px;font-size:10px;border:1px solid #27ae60;border-radius:4px;background:#27ae60;color:#fff;cursor:pointer">Save / \u4fdd\u5b58</button>
+      </div>
+      <img id="sig-preview" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none">
+    </div>
+  </div>
 </div>
+<input type="hidden" id="tpi" value=""><input type="hidden" id="tpi-date" value="">
 <div id="report-body"></div>
 <div class="overall-result">
   <h3>Overall Result / \u6700\u7ec8\u7ed3\u679c</h3>
   <div class="result-btns">
-    <div class="pf-btn" onclick="setResult('PASS')" id="res-pass">\u2713 PASS / \u5408\u683c</div>
-    <div class="pf-btn" onclick="setResult('FAIL')" id="res-fail">\u2717 FAIL / \u4e0d\u5408\u683c</div>
+    <div class="pf-btn" onclick="setResult('ACC')" id="res-pass">✓ ACC 合格</div>
+    <div class="pf-btn" onclick="setResult('REJ')" id="res-fail">✗ REJ 不合格</div>
   </div>
 </div>
 <div class="save-status" id="save-status"></div>
@@ -2628,138 +3303,617 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 const P='{{project}}',S='{{spool_id}}',RT='{{report_type}}',SUB='{{report_subtype}}';
 let reportData = {};
 let saveTimer = null;
+let MATERIAL_TYPE = '';
 
-// ── Report type configs (field definitions) ──
+// ── Report type configs — per Danny's specs 2026-04-04 ──
 const REPORT_FIELDS = {
-  dimensional: {
-    title: 'Dimensional Inspection / \u5c3a\u5bf8\u68c0\u9a8c',
-    render: renderDimensional,
-  },
-  vt: {
-    title: 'Visual Testing (VT) / \u76ee\u89c6\u68c0\u9a8c',
-    render: renderWeldReport,
-    checks: [
-      {key:'undercut',en:'Undercut',cn:'\u54ac\u8fb9'},
-      {key:'porosity',en:'Porosity',cn:'\u6c14\u5b54'},
-      {key:'crack',en:'Crack',cn:'\u88c2\u7eb9'},
-      {key:'overlap',en:'Overlap',cn:'\u642d\u63a5'},
-      {key:'spatter',en:'Spatter',cn:'\u98de\u6e85'},
-      {key:'profile',en:'Weld Profile',cn:'\u7115\u7f1d\u6210\u578b'},
-    ]
-  },
-  rt: {
-    title: 'Radiographic Testing (RT) / \u5c04\u7ebf\u68c0\u6d4b',
-    render: renderWeldReport,
-    checks: [
-      {key:'film_id',en:'Film ID',cn:'\u7247\u53f7',type:'text'},
-      {key:'technique',en:'Technique',cn:'\u6280\u672f',type:'text',default:'SWSI'},
-      {key:'sensitivity',en:'Sensitivity',cn:'\u7075\u654f\u5ea6',type:'text'},
-      {key:'density',en:'Density',cn:'\u5bc6\u5ea6',type:'text'},
-    ],
-    hasImages: true,
-  },
-  pt: {
-    title: 'Penetrant Testing (PT) / \u6e17\u900f\u68c0\u6d4b',
-    render: renderWeldReport,
-    checks: [
-      {key:'dwell_time',en:'Dwell Time (min)',cn:'\u6e17\u900f\u65f6\u95f4',type:'number'},
-      {key:'indication',en:'Indication',cn:'\u663e\u793a',type:'text'},
-    ]
-  },
-  mt: {
-    title: 'Magnetic Particle (MT) / \u78c1\u7c89\u68c0\u6d4b',
-    render: renderWeldReport,
-    checks: [
-      {key:'method',en:'Method',cn:'\u65b9\u6cd5',type:'text',default:'Yoke'},
-      {key:'indication',en:'Indication',cn:'\u663e\u793a',type:'text'},
-    ]
-  },
-  pmi: {
-    title: 'PMI Report / PMI\u68c0\u6d4b\u62a5\u544a',
-    render: renderPMI,
-  },
-  ferrite: {
-    title: 'Ferrite Content / \u94c1\u7d20\u4f53\u542b\u91cf',
-    render: renderFerrite,
-  },
-  welding_log: {
-    title: 'Welding Log / \u710a\u63a5\u8bb0\u5f55',
-    render: renderWeldingLog,
-  },
-  fitup: {
-    title: 'Fit-up Inspection / \u7ec4\u5bf9\u68c0\u9a8c',
-    render: renderWeldReport,
-    checks: [
-      {key:'root_gap',en:'Root Gap (mm)',cn:'\u6839\u90e8\u95f4\u9699',type:'number'},
-      {key:'hi_lo',en:'Hi-Lo (mm)',cn:'\u9519\u53e3',type:'number'},
-      {key:'alignment',en:'Alignment',cn:'\u5bf9\u4e2d'},
-    ]
-  },
-  cutting: {
-    title: 'Cutting Inspection / \u5207\u5272\u68c0\u9a8c',
-    render: renderSimple,
-    fields: [
-      {key:'method',en:'Cutting Method',cn:'\u5207\u5272\u65b9\u6cd5',type:'text'},
-      {key:'squareness',en:'Squareness OK',cn:'\u5782\u76f4\u5ea6\u5408\u683c'},
-      {key:'surface',en:'Surface Condition',cn:'\u8868\u9762\u72b6\u6001'},
-    ]
-  },
-  weld_map: {
-    title: 'Weld Map / \u7115\u7f1d\u56fe',
-    render: renderSimple,
-    fields: [{key:'remarks',en:'Weld Map Remarks',cn:'\u7115\u7f1d\u56fe\u5907\u6ce8',type:'text'}],
-    hasImages: true,
-  },
-  passivation: {
-    title: 'Passivation Record / \u949d\u5316\u8bb0\u5f55',
-    render: renderSimple,
-    fields: [
-      {key:'method',en:'Method / Standard',cn:'\u65b9\u6cd5/\u6807\u51c6',type:'text',default:'ASTM A380 / A967'},
-      {key:'solution',en:'Solution / Concentration',cn:'\u6eb6\u6db2/\u6d53\u5ea6',type:'text'},
-      {key:'temp',en:'Temperature (\u00b0C)',cn:'\u6e29\u5ea6',type:'number'},
-      {key:'time',en:'Duration (min)',cn:'\u65f6\u95f4',type:'number'},
-    ]
-  },
-  ferroxyl: {
-    title: 'Ferroxyl Test / \u94c1\u79bb\u5b50\u68c0\u6d4b',
-    render: renderSimple,
-    fields: [
-      {key:'method',en:'Test Method',cn:'\u6d4b\u8bd5\u65b9\u6cd5',type:'text',default:'Copper Sulfate (ASTM A380)'},
-      {key:'free_iron',en:'Free Iron Detected',cn:'\u68c0\u6d4b\u5230\u6e38\u79bb\u94c1'},
-    ],
-    hasImages: true,
-  },
-  dft: {
-    title: 'Coating Inspection (DFT) / \u6d82\u5c42\u68c0\u9a8c',
-    render: renderDFT,
-  },
+  cutting:     { title:'Cutting Inspection / 切割检验', render: renderCutting },
+  fitup:       { title:'Fit-up Inspection / 组对检验', render: renderFitup },
+  welding_log: { title:'Welding Log / 焊接记录', render: renderWeldingLog },
+  vt:          { title:'Visual Testing (VT) / 目视检验', render: renderVT },
+  rt:          { title:'Radiographic Testing (RT) / 射线检测', render: renderRT },
+  pt:          { title:'Penetrant Testing (PT) / 渗透检测', render: renderPT },
+  mt:          { title:'Magnetic Particle (MT) / 磁粉检测', render: renderMT },
+  pmi:         { title:'PMI Report / PMI检测报告', render: renderPMI },
+  ferrite:     { title:'Ferrite Content / 铁素体含量', render: renderFerrite },
+  dimensional: { title:'Dimensional Inspection / 尺寸检验', render: renderDimensional },
+  ferroxyl:    { title:'Ferroxyl Test / 铁离子检测', render: renderFerroxyl, hasImages: true },
+  dft:         { title:'Coating Inspection (DFT) / 涂层检验', render: renderDFT },
 };
+
+// ── Shared helpers ──
+function inp(key,val,opts={}){const t=opts.type||'text',ph=opts.ph||'',st=opts.style||'';return `<input class="qc-input" type="${t}" ${t==='number'?'inputmode="decimal" step="any"':''} value="${val!=null?val:opts.def||''}" placeholder="${ph}" style="font-size:12px;padding:6px;${st}" onchange="setD('${key}',${t==='number'?"this.value?parseFloat(this.value):null":"this.value"});scheduleSave()">`;}
+function setD(path,val){let o=reportData.data,parts=path.split('.');for(let i=0;i<parts.length-1;i++){if(!o[parts[i]])o[parts[i]]={};o=o[parts[i]];}o[parts[parts.length-1]]=val;}
+function sH(t){return `<div class="qc-section"><h3>${t}</h3>`;}
+function reRender(){const cfg=REPORT_FIELDS[RT];if(cfg)cfg.render(reportData.data);scheduleSave();}
+function pfCell(key,val){const cls=val===true?'pass':val===false?'fail':'';const txt=val===true?'✓ ACC 合格':val===false?'✗ REJ 不合格':'—';return `<td style="padding:4px;border:1px solid #ddd;text-align:center;cursor:pointer;font-size:11px" class="${cls}" onclick="setD('${key}',${val===true?'false':(val===false?'null':'true')});reRender()">${txt}</td>`;}
+function accRejCell(key,val){const cls=val==='ACC'?'pass':val==='REJ'?'fail':'';const txt=val==='ACC'?'✓ ACC 合格':val==='REJ'?'✗ REJ 不合格':'—';return `<td style="padding:4px;border:1px solid #ddd;text-align:center;cursor:pointer;font-size:11px" class="${cls}" onclick="var c=getDV('${key}');setD('${key}',c==='ACC'?'REJ':(c==='REJ'?null:'ACC'));reRender()">${txt}</td>`;}
+function getDV(path){let o=reportData.data,parts=path.split('.');for(let i=0;i<parts.length;i++){if(!o)return null;o=o[parts[i]];}return o;}
+let seedData = null;
+async function seedIfNeeded(){
+  if(seedData) return;
+  try{const r=await fetch(`/api/project/${P}/spool/${S}/qc/seed`,{method:'POST'});seedData=await r.json();}catch(e){}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 1. CUTTING — Simple: cut lengths from DXF + pass/fail
+// ══════════════════════════════════════════════════════════════════════════════
+function renderCutting(data){
+  const ref = data.drawing_ref || `${P}-${S}`;
+  let html = sH('Drawing Reference / 图纸参考');
+  html += `<div style="font-size:13px;font-weight:600;color:#2F5496;padding:4px 0">${ref}</div></div>`;
+  const pieces = data.pieces || [];
+  html += sH('Pipe Cut Inspection / 管件切割检查');
+  if(!pieces.length){html += '<p style="color:#888;text-align:center;padding:12px">No cut data — Seed from DXF / 无切割数据，请从DXF导入</p>';}
+  else {
+    html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+      <th style="padding:6px;border:1px solid #ddd;text-align:left">Piece / 件号</th>
+      <th style="padding:6px;border:1px solid #ddd">Size / 尺寸</th>
+      <th style="padding:6px;border:1px solid #ddd">Nominal (mm) / 标称</th>
+      <th style="padding:6px;border:1px solid #ddd">Actual (mm) / 实测</th>
+      <th style="padding:6px;border:1px solid #ddd">Pass/Fail / 合格</th></tr>`;
+    pieces.forEach((p,i) => {
+      html += `<tr><td style="padding:4px 6px;border:1px solid #ddd;font-weight:600">${p.mark||'Cut '+(i+1)}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center;font-size:10px">${p.size||''}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center">${p.nominal?Math.round(p.nominal):''}</td>
+        <td style="padding:4px;border:1px solid #ddd">${inp('pieces.'+i+'.actual',p.actual,{type:'number',ph:'mm / 毫米'})}</td>
+        ${pfCell('pieces.'+i+'.pass',p.pass)}</tr>`;
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2. FIT-UP — Geometric check pass/fail per joint (details in dimensional)
+// ══════════════════════════════════════════════════════════════════════════════
+function renderFitup(data){
+  const welds = data.welds || [];
+  let html = sH('Fit-up & Alignment — Geometric Check / 组对校准—几何检查');
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME B16.25 + WPS<br>Detailed measurements in Dimensional Report / 详细测量见尺寸报告</div>`;
+  if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
+  else {
+    html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+      <th style="padding:6px;border:1px solid #ddd;text-align:left">Joint / 接头</th>
+      <th style="padding:6px;border:1px solid #ddd">Size / 尺寸</th><th style="padding:6px;border:1px solid #ddd">Type / 类型</th>
+      <th style="padding:6px;border:1px solid #ddd">Geometric Check<br>几何检查</th></tr>`;
+    welds.forEach((w,i) => {
+      html += `<tr><td style="padding:4px 6px;border:1px solid #ddd;font-weight:600">${w.weld_tag||'W'+(i+1)}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center">${w.size||''}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center">${w.weld_type||'BW'}</td>
+        ${pfCell('welds.'+i+'.geometric_ok',w.geometric_ok)}</tr>`;
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 3. WELDING LOG — WPS dropdown + tick that it was followed
+// ══════════════════════════════════════════════════════════════════════════════
+let wpsOptions = {};
+async function loadWPS(){try{const r=await fetch(`/api/project/${P}/wps`);wpsOptions=await r.json();}catch(e){}}
+function toggleWPS(k){
+  if(!reportData.data.wps_numbers) reportData.data.wps_numbers=[];
+  const idx=reportData.data.wps_numbers.indexOf(k);
+  if(idx>=0) reportData.data.wps_numbers.splice(idx,1);
+  else reportData.data.wps_numbers.push(k);
+  reRender();
+}
+function renderWeldingLog(data){
+  loadWPS().then(()=>renderWeldingLogInner(data));
+}
+function renderWeldingLogInner(data){
+  const welds = data.welds || [];
+  const isDuplex = MATERIAL_TYPE==='duplex';
+  const selectedList = data.wps_numbers || (data.wps_number ? [data.wps_number] : []);
+  if(!data.wps_numbers && data.wps_number) reportData.data.wps_numbers = [data.wps_number];
+  let html = sH('WPS Applied / 应用的焊接工艺 <span style="font-size:10px;font-weight:400;color:#888">(select all that apply / 选择所有适用的)</span>');
+  for(const [k,v] of Object.entries(wpsOptions)){
+    const checked = selectedList.includes(k);
+    html += `<div style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid #f0f0f0;cursor:pointer" onclick="toggleWPS('${k}')">
+      <div style="font-size:18px;min-width:24px;text-align:center">${checked?'☑':'☐'}</div>
+      <div style="flex:1">
+        <div style="font-size:12px;font-weight:600;color:${checked?'#2F5496':'#888'}">${k}</div>
+        <div style="font-size:10px;color:#888">${v.label} · ${v.thickness}</div>
+      </div></div>`;
+  }
+  // Show details for selected WPS
+  selectedList.forEach(sel => {
+    const wps = wpsOptions[sel];
+    if(!wps) return;
+    html += `<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:6px;padding:10px;margin-top:8px;font-size:11px;border-left:3px solid #2F5496">
+      <div style="font-weight:700;color:#2F5496;margin-bottom:4px">${sel}</div>
+      <div><strong>Process / 工艺:</strong> ${wps.processes} · <strong>Type / 类型:</strong> ${wps.type} · <strong>Thickness / 厚度:</strong> ${wps.thickness}</div>
+      <div><strong>Filler / 焊材:</strong> ${wps.filler} (${wps.filler_dia})</div>
+      <div><strong>Shielding / 保护气:</strong> ${wps.shielding} · <strong>Backing / 背面气:</strong> ${wps.backing}</div>
+      <div><strong>Preheat / 预热:</strong> ${wps.preheat} · <strong>Interpass / 层间:</strong> <span style="color:${isDuplex?'#e74c3c':'inherit'};font-weight:${isDuplex?'700':'400'}">${wps.interpass}</span></div>
+      <div><strong>Root / 根层:</strong> ${wps.root}</div>
+      <div><strong>Fill / 填充:</strong> ${wps.fill}</div>
+      <div><strong>Cap / 盖面:</strong> ${wps.cap}</div>
+      <div><strong>Heat Input / 热输入:</strong> ${wps.heat_input} · <strong>Position / 位置:</strong> ${wps.position}</div>
+    </div>`;
+  });
+  if(selectedList.length > 0){
+    html += `<div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+      <div class="pf-btn ${data.wps_followed?'sel-pass':''}" style="padding:10px 20px;font-size:13px" onclick="setD('wps_followed',!reportData.data.wps_followed);reRender()">
+        ${data.wps_followed?'✓ WPS Followed / 已遵循焊接工艺':'☐ Confirm WPS Followed / 确认遵循焊接工艺'}</div></div>`;
+  }
+  html += '</div>';
+  html += sH('Welds / 焊缝');
+  if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
+  else {
+    html += `<table style="width:100%;border-collapse:collapse;font-size:10px"><tr style="background:#f0f2f5">
+      <th style="padding:4px;border:1px solid #ddd;text-align:left">Weld / 焊缝</th><th style="padding:4px;border:1px solid #ddd">Size / 尺寸</th>
+      <th style="padding:4px;border:1px solid #ddd">Welder ID / 焊工号</th><th style="padding:4px;border:1px solid #ddd">Date / 日期</th>
+      <th style="padding:4px;border:1px solid #ddd">Completed / 完成</th></tr>`;
+    welds.forEach((w,i) => {
+      html += `<tr><td style="padding:4px;border:1px solid #ddd;font-weight:600">${w.weld_tag||'W'+(i+1)}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center">${w.size||''}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('welds.'+i+'.welder_id',w.welder_id,{style:'padding:3px;font-size:10px'})}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('welds.'+i+'.date',w.date,{type:'date',style:'padding:3px;font-size:10px'})}</td>
+        ${pfCell('welds.'+i+'.done',w.done)}</tr>`;
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 4. VT — 12-item checklist per Danny's spec
+// ══════════════════════════════════════════════════════════════════════════════
+const VT_CHECKS = [
+  {key:'id_correct',en:'Identification correct: spool no., line no., material, size, rating per drawing',cn:'标识正确：管段号、管线号、材料、尺寸、等级按图纸'},
+  {key:'surface_suitable',en:'Surface condition suitable for VT: clean, accessible, adequate lighting',cn:'表面状况适合VT：清洁、可达、充足照明'},
+  {key:'workmanship',en:'Workmanship acceptable: welds and base metal free from visible damage',cn:'工艺合格：焊缝和母材无可见损伤'},
+  {key:'dimensions_align',en:'Dimensions / alignment correct: fit-up, orientation, flange alignment, branch location',cn:'尺寸/对中正确：组对、方向、法兰对中、支管位置'},
+  {key:'weld_profile',en:'Weld profile acceptable: reinforcement, contour, transition, fillet size',cn:'焊缝轮廓合格：余高、轮廓、过渡、角焊缝尺寸'},
+  {key:'no_cracks',en:'No visible cracks in weld or HAZ',cn:'焊缝或HAZ无可见裂纹'},
+  {key:'no_fusion_defect',en:'No incomplete fusion / incomplete penetration where visible',cn:'无可见未熔合/未焊透'},
+  {key:'no_surface_defect',en:'No undercut, overlap, arc strikes, craters, or excessive porosity',cn:'无咬边、搭接、弧击、弧坑或过量气孔'},
+  {key:'no_damage',en:'No surface defects: gouges, dents, spatter, mechanical damage',cn:'无表面缺陷：刻痕、凹坑、飞溅、机械损伤'},
+  {key:'attachments_ok',en:'Attachments / end prep acceptable: bevels, sockets, temporary attachments removed',cn:'附件/端口准备合格：坡口、承插口、临时附件已拆除'},
+  {key:'acceptance_verified',en:'Acceptance verified to ASME B31.3 Table 341.3.2',cn:'按ASME B31.3表341.3.2验收合格'},
+  {key:'vt_recorded',en:'VT performed per ASME Section V, Article 9 and results recorded',cn:'VT按ASME第V卷第9条执行并记录'},
+];
+function renderVT(data){
+  let html = sH('Visual Testing Checklist / 目视检验清单');
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME B31.3 Table 341.3.2 / ASME Section V Art. 9</div>`;
+  html += '<table style="width:100%;border-collapse:collapse;font-size:11px">';
+  VT_CHECKS.forEach((c,i) => {
+    const val = data[c.key];
+    html += `<tr style="background:${i%2?'#fafafa':'#fff'}">
+      <td style="padding:6px 8px;border:1px solid #eee;font-size:11px">${i+1}. ${c.en}<br><span style="font-size:10px;color:#888">${c.cn}</span></td>
+      ${pfCell(c.key,val)}</tr>`;
+  });
+  html += '</table></div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 5. RT — Full equipment + per-weld × 3 films with defects + density
+// ══════════════════════════════════════════════════════════════════════════════
+function renderRT(data){
+  const welds = data.welds || [];
+  let html = sH('RT Equipment & Parameters / 射线设备及参数');
+  html += `<div class="weld-grid" style="grid-template-columns:1fr 1fr">
+    <div><label style="font-size:10px;color:#888">Instrument / 仪器型号</label>${inp('instrument',data.instrument,{ph:'XXGHz-1605 / 仪器型号'})}</div>
+    <div><label style="font-size:10px;color:#888">Source Type / 射源</label>${inp('source_type',data.source_type,{def:'Ir-192'})}</div>
+    <div><label style="font-size:10px;color:#888">Focus Size (mm) / 焦点尺寸</label>${inp('focus_size',data.focus_size,{ph:'1.0×2.4 / 焦点尺寸'})}</div>
+    <div><label style="font-size:10px;color:#888">SFD (mm) / 焦距</label>${inp('sfd',data.sfd)}</div>
+    <div><label style="font-size:10px;color:#888">IQI Type / 透度计</label>${inp('iqi_type',data.iqi_type,{def:'ASTM'})}</div>
+    <div><label style="font-size:10px;color:#888">Required Sensitivity / 应识别丝号</label>${inp('iqi_required',data.iqi_required)}</div>
+    <div><label style="font-size:10px;color:#888">Tube Voltage (kV) / 管电压</label>${inp('tube_voltage',data.tube_voltage,{type:'number'})}</div>
+    <div><label style="font-size:10px;color:#888">Tube Current (mA) / 管电流</label>${inp('tube_current',data.tube_current,{type:'number'})}</div>
+    <div><label style="font-size:10px;color:#888">Exposure Time / 曝光时间</label>${inp('exposure_time',data.exposure_time)}</div>
+    <div><label style="font-size:10px;color:#888">Film Brand / 胶片</label>${inp('film_brand',data.film_brand)}</div>
+    <div><label style="font-size:10px;color:#888">Density Range / 黑度范围</label>${inp('density_range',data.density_range,{def:'1.8-4.0'})}</div>
+    <div><label style="font-size:10px;color:#888">Technique / 透照方式</label>${inp('technique',data.technique,{def:'SWSI'})}</div>
+  </div>
+  <div class="acc-box" style="margin-top:8px"><strong>Exam Standard / 检验标准:</strong> Art.2 of ASME V<br><strong>Acceptance / 验收标准:</strong> ASME B31.3</div>`;
+  html += '</div>';
+  html += sH('Film Results / 底片检查结果 <span style="font-size:10px;font-weight:400;color:#888">(3 films per weld)</span>');
+  if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入<br><small>Hugo will upload RT results / Hugo将上传RT结果</small></p>';}
+  else {
+    welds.forEach(w=>{if(!w.films||w.films.length<3)w.films=[0,1,2].map(fi=>(w.films&&w.films[fi])||{film_id:'',density:'',bar:false,circular:false,crack:false,lop:false,lof:false,result:null});});
+    const dc=[{k:'bar',en:'Bar',cn:'条缺'},{k:'circular',en:'Circ.',cn:'圆缺'},{k:'crack',en:'Crack',cn:'裂纹'},{k:'lop',en:'LOP',cn:'未焊透'},{k:'lof',en:'LOF',cn:'未熔合'}];
+    html += `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:10px"><tr style="background:#f0f2f5">
+      <th style="padding:4px;border:1px solid #ddd" rowspan="2">Weld / 焊缝</th><th style="padding:4px;border:1px solid #ddd" rowspan="2">Film / 底片</th>
+      <th style="padding:4px;border:1px solid #ddd" colspan="5">Defects / 缺陷</th>
+      <th style="padding:4px;border:1px solid #ddd" rowspan="2">Density / 黑度</th><th style="padding:4px;border:1px solid #ddd" rowspan="2">Acc/Rej / 合格</th></tr>
+      <tr style="background:#f0f2f5">${dc.map(d=>`<th style="padding:3px;border:1px solid #ddd;font-size:8px">${d.en}<br>${d.cn}</th>`).join('')}</tr>`;
+    welds.forEach((w,wi)=>{
+      w.films.forEach((f,fi)=>{
+        html+=`<tr>${fi===0?`<td style="padding:4px;border:1px solid #ddd;font-weight:700;vertical-align:top" rowspan="3">${w.weld_tag||'W'+(wi+1)}<br><span style="font-size:9px;font-weight:400;color:#888">${w.size||''}</span></td>`:''}
+          <td style="padding:3px;border:1px solid #ddd"><input class="qc-input" style="padding:2px;font-size:10px;width:45px" value="${f.film_id||''}" placeholder="${fi+1}" onchange="reportData.data.welds[${wi}].films[${fi}].film_id=this.value;scheduleSave()"></td>`;
+        dc.forEach(d=>{const v=f[d.k];html+=`<td style="padding:2px;border:1px solid #ddd;text-align:center;cursor:pointer" class="${v?'fail':''}" onclick="reportData.data.welds[${wi}].films[${fi}].${d.k}=!reportData.data.welds[${wi}].films[${fi}].${d.k};reRender()">${v?'✗':'—'}</td>`;});
+        html+=`<td style="padding:2px;border:1px solid #ddd"><input class="qc-input" style="padding:2px;font-size:10px;width:55px" value="${f.density||''}" placeholder="2.0-4.0 / 黑度" onchange="reportData.data.welds[${wi}].films[${fi}].density=this.value;scheduleSave()"></td>
+          <td style="padding:2px;border:1px solid #ddd;text-align:center;cursor:pointer" class="${f.result==='ACC'?'pass':f.result==='REJ'?'fail':''}" onclick="var r=reportData.data.welds[${wi}].films[${fi}];r.result=r.result==='ACC'?'REJ':(r.result==='REJ'?null:'ACC');reRender()">${f.result==='ACC'?'✓ ACC':(f.result==='REJ'?'✗ REJ':'—')}</td></tr>`;
+      });
+    });
+    html += '</table></div>';
+  }
+  html += '</div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 6. PT — Per weld pass/fail (ASME V Art. 6, chloride-free for Duplex)
+// ══════════════════════════════════════════════════════════════════════════════
+function renderPT(data){
+  const welds = data.welds || [];
+  const isDuplex = MATERIAL_TYPE==='duplex';
+  let html = sH('PT Procedure / 渗透检测规程');
+  if(isDuplex) html += `<div class="warn-box">⚠ Chloride-free penetrant mandatory for Duplex SS / 双相不锈钢必须使用无氯渗透剂 / 双相不锈钢必须使用无氯渗透剂</div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME Section V, Article 6<br><strong>Acceptance / 验收:</strong> ASME B31.3 Table 341.3.2</div></div>`;
+  html += sH('Weld Examination / 焊缝检查');
+  if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
+  else {
+    html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+      <th style="padding:6px;border:1px solid #ddd;text-align:left">Weld / 焊缝</th><th style="padding:6px;border:1px solid #ddd">Size / 尺寸</th>
+      <th style="padding:6px;border:1px solid #ddd">Indication<br>显示</th><th style="padding:6px;border:1px solid #ddd">Acc/Rej / 合格</th></tr>`;
+    welds.forEach((w,i) => {
+      html += `<tr><td style="padding:4px 6px;border:1px solid #ddd;font-weight:600">${w.weld_tag||'W'+(i+1)}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center">${w.size||''}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('welds.'+i+'.indication',w.indication,{def:'NRI',ph:'NRI 无可报告显示',style:'padding:3px;font-size:10px'})}</td>
+        ${accRejCell('welds.'+i+'.result',w.result)}</tr>`;
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 7. MT — Per weld pass/fail (ASME V Art. 7, 424 CS only)
+// ══════════════════════════════════════════════════════════════════════════════
+function renderMT(data){
+  const welds = data.welds || [];
+  let html = sH('MT Procedure / 磁粉检测规程');
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME Section V, Article 7<br><strong>Acceptance / 验收:</strong> ASME B31.3 Table 341.3.2</div></div>`;
+  html += sH('Weld Examination / 焊缝检查');
+  if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
+  else {
+    html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+      <th style="padding:6px;border:1px solid #ddd;text-align:left">Weld / 焊缝</th><th style="padding:6px;border:1px solid #ddd">Size / 尺寸</th>
+      <th style="padding:6px;border:1px solid #ddd">Indication<br>显示</th><th style="padding:6px;border:1px solid #ddd">Acc/Rej / 合格</th></tr>`;
+    welds.forEach((w,i) => {
+      html += `<tr><td style="padding:4px 6px;border:1px solid #ddd;font-weight:600">${w.weld_tag||'W'+(i+1)}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center">${w.size||''}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('welds.'+i+'.indication',w.indication,{ph:'NRI 无显示',style:'padding:3px;font-size:10px'})}</td>
+        ${accRejCell('welds.'+i+'.result',w.result)}</tr>`;
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 8. PMI (ASME B31.3 Sec 323.2.4) — 423 Duplex only
+// ══════════════════════════════════════════════════════════════════════════════
+function renderPMI(data){
+  const items = data.items || [];
+  let html = sH('PMI Instrument / PMI设备');
+  html += `<div class="weld-grid" style="grid-template-columns:1fr 1fr">
+    <div><label style="font-size:10px;color:#888">Instrument / 仪器</label>${inp('instrument_model',data.instrument_model)}</div>
+    <div><label style="font-size:10px;color:#888">Serial No. / Cal. Date / 序列号/校准日期</label>${inp('instrument_serial',data.instrument_serial)}</div>
+  </div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME B31.3 Sec 323.2.4<br><strong>Expected Grade / 期望牌号:</strong> UNS S32205 (22Cr-5Ni-3Mo)</div></div>`;
+  html += sH('PMI Test Points / PMI检测点');
+  if(!items.length){html += '<p style="color:#888;text-align:center;padding:12px">No data — Seed from DXF / 无数据</p>';}
+  else {
+    html += `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:10px"><tr style="background:#f0f2f5">
+      <th style="padding:4px;border:1px solid #ddd;text-align:left">Item / 项目</th><th style="padding:4px;border:1px solid #ddd">Location / 位置</th>
+      <th style="padding:4px;border:1px solid #ddd">Cr%</th><th style="padding:4px;border:1px solid #ddd">Ni%</th><th style="padding:4px;border:1px solid #ddd">Mo%</th>
+      <th style="padding:4px;border:1px solid #ddd">Grade OK / 牌号确认</th><th style="padding:4px;border:1px solid #ddd">Result / 结果</th></tr>`;
+    items.forEach((it,i) => {
+      html += `<tr><td style="padding:3px;border:1px solid #ddd;font-size:9px;font-weight:600">${it.item||'Point '+(i+1)}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('items.'+i+'.location',it.location,{ph:'Base/Weld/HAZ 母材/焊缝/热影响区',style:'padding:2px;font-size:9px;width:65px'})}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('items.'+i+'.cr',it.cr,{type:'number',style:'padding:2px;font-size:9px;width:45px'})}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('items.'+i+'.ni',it.ni,{type:'number',style:'padding:2px;font-size:9px;width:45px'})}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('items.'+i+'.mo',it.mo,{type:'number',style:'padding:2px;font-size:9px;width:45px'})}</td>
+        ${pfCell('items.'+i+'.grade_ok',it.grade_ok)}
+        ${accRejCell('items.'+i+'.result',it.result)}</tr>`;
+    });
+    html += '</table></div>';
+  }
+  html += '</div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 9. FERRITE — 3 readings per weld, auto average, auto pass/fail 30-65%
+// ══════════════════════════════════════════════════════════════════════════════
+function renderFerrite(data){
+  const readings = data.readings || [];
+  let html = sH('Ferrite Instrument / 铁素体测量设备');
+  html += `<div class="weld-grid" style="grid-template-columns:1fr 1fr">
+    <div><label style="font-size:10px;color:#888">Instrument / 仪器</label>${inp('instrument_model',data.instrument_model)}</div>
+    <div><label style="font-size:10px;color:#888">Serial No. / Cal. Date / 序列号/校准日期</label>${inp('instrument_serial',data.instrument_serial)}</div>
+  </div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASTM A799/A800, AWS A4.2<br><strong>Acceptance Range / 验收范围:</strong> 30% – 65% (3 readings per weld → average)</div></div>`;
+  html += sH('Ferrite Readings / 铁素体读数');
+  if(!readings.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
+  else {
+    html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+      <th style="padding:4px;border:1px solid #ddd;text-align:left">Weld / 焊缝</th>
+      <th style="padding:4px;border:1px solid #ddd">R1 (%) / 读数1</th><th style="padding:4px;border:1px solid #ddd">R2 (%) / 读数2</th><th style="padding:4px;border:1px solid #ddd">R3 (%) / 读数3</th>
+      <th style="padding:4px;border:1px solid #ddd">Average<br>平均</th><th style="padding:4px;border:1px solid #ddd">Result / 结果</th></tr>`;
+    readings.forEach((rd,i) => {
+      const avg = (rd.r1!=null&&rd.r2!=null&&rd.r3!=null)?((rd.r1+rd.r2+rd.r3)/3).toFixed(1):'';
+      const pass = avg?(parseFloat(avg)>=30&&parseFloat(avg)<=65):null;
+      html += `<tr><td style="padding:4px 6px;border:1px solid #ddd;font-weight:600">${rd.weld_tag||'W'+(i+1)} <span style="font-size:9px;color:#888">${rd.size||''}</span></td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('readings.'+i+'.r1',rd.r1,{type:'number',style:'padding:3px;font-size:10px;width:55px'})}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('readings.'+i+'.r2',rd.r2,{type:'number',style:'padding:3px;font-size:10px;width:55px'})}</td>
+        <td style="padding:3px;border:1px solid #ddd">${inp('readings.'+i+'.r3',rd.r3,{type:'number',style:'padding:3px;font-size:10px;width:55px'})}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center;font-weight:700;color:${pass===true?'#27ae60':pass===false?'#e74c3c':'#888'}">${avg?avg+'%':'—'}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center" class="${pass===true?'pass':pass===false?'fail':''}">${pass===true?'ACC':pass===false?'REJ':'—'}</td></tr>`;
+    });
+    html += '</table>';
+  }
+  html += '</div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 10. DIMENSIONAL — Auto-fill from DXF, editable, flanges + fittings
+// ══════════════════════════════════════════════════════════════════════════════
+function renderDimensional(data){
+  const ref = data.drawing_ref || `${P}-${S}`;
+  let html = sH(`Overall Dimensions / 总体尺寸 <span style="font-size:10px;font-weight:400;color:#888">${ref}</span>`);
+  const dims = [{k:'l',en:'Length / 长度'},{k:'w',en:'Width / 宽度'},{k:'h',en:'Height / 高度'}];
+  html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+    <th style="padding:6px;border:1px solid #ddd;text-align:left">Dimension / 尺寸</th><th style="padding:6px;border:1px solid #ddd">Nominal (mm) / 标称</th>
+    <th style="padding:6px;border:1px solid #ddd">Actual (mm) / 实测</th><th style="padding:6px;border:1px solid #ddd">Dev. / 偏差</th><th style="padding:6px;border:1px solid #ddd">OK / 合格</th></tr>`;
+  dims.forEach(dim=>{
+    const nom=data['nominal_'+dim.k+'_mm']||'';const act=data['actual_'+dim.k+'_mm']||'';
+    const dev=(nom&&act)?(parseFloat(act)-parseFloat(nom)).toFixed(1):'';
+    const ok=dev?Math.abs(parseFloat(dev))<=5:null;
+    html += `<tr><td style="padding:4px 8px;border:1px solid #ddd;font-weight:600">${dim.en}</td>
+      <td style="padding:4px;border:1px solid #ddd">${inp('nominal_'+dim.k+'_mm',nom,{type:'number',ph:'From drawing / 图纸标称'})}</td>
+      <td style="padding:4px;border:1px solid #ddd">${inp('actual_'+dim.k+'_mm',act,{type:'number',ph:'Measured / 实测'})}</td>
+      <td style="padding:4px;border:1px solid #ddd;text-align:center;color:${ok===false?'#e74c3c':'#333'}">${dev?dev+'mm':'—'}</td>
+      <td style="padding:4px;border:1px solid #ddd;text-align:center" class="${ok===true?'pass':ok===false?'fail':''}">${ok===true?'✓':ok===false?'✗':'—'}</td></tr>`;
+  });
+  html += '</table></div>';
+  const flanges = data.flanges||[];
+  if(flanges.length){
+    html += sH('Flange Alignment / 法兰校准 <span style="font-size:10px;font-weight:400">(±1.5mm bolt-hole, 0.5%OD max 2mm perp.)</span>');
+    html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+      <th style="padding:6px;border:1px solid #ddd;text-align:left">Flange / 法兰</th><th style="padding:6px;border:1px solid #ddd">Size / 尺寸</th>
+      <th style="padding:6px;border:1px solid #ddd">Bolt-Hole<br>螺栓孔</th><th style="padding:6px;border:1px solid #ddd">Perp.<br>垂直度</th></tr>`;
+    flanges.forEach((fl,i)=>{
+      html += `<tr><td style="padding:4px 8px;border:1px solid #ddd;font-size:10px">${fl.description||'Flange #'+(i+1)}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center">${fl.size||''}</td>
+        ${pfCell('flanges.'+i+'.bolt_hole_ok',fl.bolt_hole_ok)}
+        ${pfCell('flanges.'+i+'.perp_ok',fl.perp_ok)}</tr>`;
+    });
+    html += '</table></div>';
+  }
+  const fittings = data.fittings||[];
+  if(fittings.length){
+    html += sH('Fittings Orientation / 管件方向');
+    html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+      <th style="padding:6px;border:1px solid #ddd;text-align:left">Fitting / 管件</th><th style="padding:6px;border:1px solid #ddd">Size / 尺寸</th>
+      <th style="padding:6px;border:1px solid #ddd">Direction OK<br>方向正确</th></tr>`;
+    fittings.forEach((ft,i)=>{
+      html += `<tr><td style="padding:4px 8px;border:1px solid #ddd;font-size:10px">${ft.description||ft.part_type||'Fitting'}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center">${ft.size||''}</td>
+        ${pfCell('fittings.'+i+'.direction_ok',ft.direction_ok)}</tr>`;
+    });
+    html += '</table></div>';
+  }
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 11. FERROXYL — Full duplex scope per Danny's spec
+// ══════════════════════════════════════════════════════════════════════════════
+function renderFerroxyl(data){
+  let html = sH('Ferroxyl Test — Duplex S32205 / 铁离子检测');
+  html += `<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:6px;padding:10px;font-size:11px;margin-bottom:8px">
+    <div><strong>Material / 材料:</strong> UNS S32205 / Duplex 2205</div>
+    <div><strong>Standard / 标准:</strong> ASTM A380/A380M-2017</div>
+    <div><strong>Method / 方法:</strong> Copper Sulfate Test / 硫酸铜试验 (Para 7.3.4)</div>
+    <div><strong>Contact Time / 接触时间:</strong> Minimum 6 minutes / 最少6分钟</div>
+    <div><strong>Acceptance / 验收:</strong> No copper deposition / 无铜沉积 / no copper plating</div>
+    <div style="margin-top:6px;color:#8E44AD"><strong>Scope / 范围:</strong> 100% weld seams + adjacent HAZ + ground/brushed/repaired areas (post-pickling)</div>
+  </div></div>`;
+  const areas = data.areas || [{location:'Weld area + HAZ',copper_deposit:null},{location:'Ground/repaired areas',copper_deposit:null}];
+  if(!data.areas) reportData.data.areas = areas;
+  html += sH('Test Results / 检测结果');
+  html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+    <th style="padding:6px;border:1px solid #ddd;text-align:left">Area / 检测区域</th>
+    <th style="padding:6px;border:1px solid #ddd">Surface Condition<br>表面状态</th>
+    <th style="padding:6px;border:1px solid #ddd">Copper Deposit<br>铜沉积</th>
+    <th style="padding:6px;border:1px solid #ddd">Result / 结果</th></tr>`;
+  areas.forEach((a,i)=>{
+    const pass=a.copper_deposit===false;const fail=a.copper_deposit===true;
+    html += `<tr><td style="padding:4px 8px;border:1px solid #ddd">${inp('areas.'+i+'.location',a.location,{style:'font-size:10px;padding:3px'})}</td>
+      <td style="padding:3px;border:1px solid #ddd">${inp('areas.'+i+'.surface_cond',a.surface_cond,{ph:'Pickled/Passivated / 酸洗/钝化',style:'font-size:10px;padding:3px'})}</td>
+      <td style="padding:4px;border:1px solid #ddd;text-align:center;cursor:pointer" class="${fail?'fail':pass?'pass':''}" onclick="var v=reportData.data.areas[${i}].copper_deposit;reportData.data.areas[${i}].copper_deposit=v===false?true:(v===true?null:false);reRender()">${pass?'✓ No / 无铜沉积':fail?'✗ Yes / 有铜沉积':'—'}</td>
+      <td style="padding:4px;border:1px solid #ddd;text-align:center;font-size:11px" class="${pass?'pass':fail?'fail':''}">${pass?'✓ ACC 合格':fail?'✗ REJ 不合格':'—'}</td></tr>`;
+  });
+  html += '</table>';
+  html += `<div style="margin-top:8px"><div class="img-grid" id="img-grid"></div>
+    <label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files)">📷 Upload Test Photos / 上传检测照片</label></div>`;
+  html += '</div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+  loadImages();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 12. DFT — Coating inspection (ISO 19840, 424 CS only)
+// ══════════════════════════════════════════════════════════════════════════════
+function renderDFT(data){
+  let html = sH('Coating System / 涂层体系');
+  html += `<div class="weld-grid" style="grid-template-columns:1fr 1fr">
+    <div><label style="font-size:10px;color:#888">Coat Description / 涂层</label>${inp('coat_desc',data.coat_desc,{ph:'底漆/中间漆/面漆 Primer/Inter./Topcoat'})}</div>
+    <div><label style="font-size:10px;color:#888">Product & Batch / 产品批号</label>${inp('product_batch',data.product_batch)}</div>
+    <div><label style="font-size:10px;color:#888">Specified NDFT (µm) / 规定干膜厚度</label>${inp('spec_dft',data.spec_dft,{ph:'250-350 / 规定厚度'})}</div>
+    <div><label style="font-size:10px;color:#888">Surface Prep / 表面处理</label>${inp('surface_prep',data.surface_prep,{ph:'ISO 8501-1 Sa 2.5 / 表面处理标准'})}</div>
+  </div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ISO 19840 / ISO 4624 / ISO 8501<br><strong>Rule / 规则:</strong> No reading / 无读数 &lt; 80% NDFT, average ≥ NDFT</div></div>`;
+  const readings = data.readings||[{point:'Spot 1',value:null},{point:'Spot 2',value:null},{point:'Spot 3',value:null},{point:'Spot 4',value:null},{point:'Spot 5',value:null}];
+  if(!data.readings)reportData.data.readings=readings;
+  html += sH('DFT Readings / 干膜厚度读数');
+  html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
+    <th style="padding:6px;border:1px solid #ddd;text-align:left">Point / 测点</th><th style="padding:6px;border:1px solid #ddd">Reading (µm) / 读数</th><th style="padding:6px;border:1px solid #ddd">Pass / 合格</th></tr>`;
+  const specMin=data.spec_dft?parseFloat(data.spec_dft.split('-')[0])*0.8:null;
+  const specNom=data.spec_dft?parseFloat(data.spec_dft.split('-')[0]):null;
+  readings.forEach((rd,i)=>{
+    const ok=(rd.value!=null&&specMin!=null)?rd.value>=specMin:null;
+    html += `<tr><td style="padding:4px 8px;border:1px solid #ddd">${rd.point}</td>
+      <td style="padding:3px;border:1px solid #ddd">${inp('readings.'+i+'.value',rd.value,{type:'number',ph:'µm / 微米'})}</td>
+      <td style="padding:4px;border:1px solid #ddd;text-align:center" class="${ok===true?'pass':ok===false?'fail':''}">${ok===true?'ACC':ok===false?'REJ':'—'}</td></tr>`;
+  });
+  const vals=readings.filter(r=>r.value!=null).map(r=>r.value);
+  const avg=vals.length?(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(0):'';
+  const avgOk=(avg&&specNom)?parseFloat(avg)>=specNom:null;
+  html += `<tr style="background:#f0f2f5;font-weight:700"><td style="padding:4px 8px;border:1px solid #ddd">Avg / Min / Max / 平均/最小/最大</td>
+    <td style="padding:4px;border:1px solid #ddd;text-align:center">${avg?avg+' / '+Math.min(...vals)+' / '+Math.max(...vals)+' µm':'—'}</td>
+    <td style="padding:4px;border:1px solid #ddd;text-align:center" class="${avgOk===true?'pass':avgOk===false?'fail':''}">${avgOk===true?'ACC':avgOk===false?'REJ':'—'}</td></tr>`;
+  html += '</table></div>';
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ── IMAGE UPLOAD (Ferroxyl only) ──
+async function loadImages(){const r=await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/images`);const imgs=await r.json();const grid=document.getElementById('img-grid');if(!grid)return;grid.innerHTML=imgs.map(img=>`<div class="img-thumb"><img src="/api/project/${P}/qc/image/${img.id}" loading="lazy"><button class="del" onclick="delImage(${img.id})">×</button></div>`).join('');}
+async function uploadImages(files){for(const f of files){const c=await compressImage(f,2000,0.85);const fd=new FormData();fd.append('file',c,f.name);fd.append('operator',document.getElementById('inspector').value);await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`,{method:'POST',body:fd});}loadImages();}
+async function delImage(id){if(!confirm('Delete? / 删除？'))return;await fetch(`/api/project/${P}/qc/image/${id}`,{method:'DELETE'});loadImages();}
+function compressImage(file,maxDim,quality){return new Promise(r=>{const img=new Image();img.onload=()=>{let w=img.width,h=img.height;if(w>maxDim||h>maxDim){const ratio=Math.min(maxDim/w,maxDim/h);w=Math.round(w*ratio);h=Math.round(h*ratio);}const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h);c.toBlob(b=>r(b),'image/jpeg',quality);};img.src=URL.createObjectURL(file);});}
+
+
+// ── Inspector Registry + Signature Pad ──
+let inspectorList = [];
+let sigCtx = null, sigDrawing = false;
+async function loadInspectors(){
+  try{const r=await fetch('/api/inspectors');inspectorList=await r.json();}catch(e){}
+  const sel=document.getElementById('inspector-select');
+  const current=document.getElementById('inspector').value;
+  sel.innerHTML='<option value="">— Select / 选择检验员 —</option>';
+  inspectorList.forEach(ins=>{
+    sel.innerHTML+=`<option value="${ins.name}" ${ins.name===current?'selected':''}>${ins.name}${ins.role?' ('+ins.role+')':''}${ins.has_signature?' ✓':''}</option>`;
+  });
+  sel.innerHTML+='<option value="__new__">+ New inspector / 新增检验员</option>';
+  if(current && !inspectorList.find(i=>i.name===current)){
+    sel.innerHTML+=`<option value="${current}" selected>${current}</option>`;
+  }
+}
+async function onInspectorSelect(val){
+  if(val==='__new__'){
+    const name=prompt('Inspector name / 检验员姓名:');
+    if(!name){document.getElementById('inspector-select').value='';return;}
+    await fetch('/api/inspectors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})});
+    document.getElementById('inspector').value=name;
+    await loadInspectors();
+    document.getElementById('inspector-select').value=name;
+    showSigPad(name);
+    scheduleSave();
+    return;
+  }
+  document.getElementById('inspector').value=val;
+  if(val) showSigPad(val);
+  else document.getElementById('sig-section').style.display='none';
+  scheduleSave();
+}
+async function showSigPad(name){
+  const section=document.getElementById('sig-section');
+  section.style.display='block';
+  const ins=inspectorList.find(i=>i.name===name);
+  if(ins && ins.has_signature){
+    // Load existing signature
+    const r=await fetch(`/api/inspectors/${ins.id}/signature`);
+    const d=await r.json();
+    if(d.signature_data){
+      document.getElementById('sig-preview').src=d.signature_data;
+      document.getElementById('sig-preview').style.display='block';
+      document.getElementById('sig-canvas').style.display='none';
+      return;
+    }
+  }
+  // Show canvas for new signature
+  document.getElementById('sig-preview').style.display='none';
+  document.getElementById('sig-canvas').style.display='block';
+  initSigCanvas();
+}
+function initSigCanvas(){
+  const canvas=document.getElementById('sig-canvas');
+  const container=document.getElementById('sig-container');
+  canvas.width=container.clientWidth;
+  canvas.height=container.clientHeight;
+  sigCtx=canvas.getContext('2d');
+  sigCtx.strokeStyle='#2F5496';sigCtx.lineWidth=2;sigCtx.lineCap='round';
+  canvas.onpointerdown=e=>{sigDrawing=true;sigCtx.beginPath();sigCtx.moveTo(e.offsetX,e.offsetY);};
+  canvas.onpointermove=e=>{if(!sigDrawing)return;sigCtx.lineTo(e.offsetX,e.offsetY);sigCtx.stroke();};
+  canvas.onpointerup=()=>{sigDrawing=false;};
+  canvas.onpointerleave=()=>{sigDrawing=false;};
+}
+function clearSig(){
+  const canvas=document.getElementById('sig-canvas');
+  sigCtx.clearRect(0,0,canvas.width,canvas.height);
+  document.getElementById('sig-preview').style.display='none';
+  canvas.style.display='block';
+}
+async function saveSig(){
+  const canvas=document.getElementById('sig-canvas');
+  const dataUrl=canvas.toDataURL('image/png');
+  const name=document.getElementById('inspector').value;
+  if(!name){alert('Select inspector first / 先选择检验员');return;}
+  await fetch('/api/inspectors',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name:name,signature_data:dataUrl})});
+  document.getElementById('sig-preview').src=dataUrl;
+  document.getElementById('sig-preview').style.display='block';
+  canvas.style.display='none';
+  await loadInspectors();
+  showSave('Signature saved / 签名已保存',true);
+}
 
 async function loadReport(){
   const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}?sub=${SUB}`);
   reportData = await r.json();
   if(!reportData.data || typeof reportData.data !== 'object') reportData.data = {};
-  // Set inspector fields
-  document.getElementById('inspector').value = reportData.inspector_name || localStorage.getItem('qc_inspector') || '';
-  document.getElementById('insp-date').value = reportData.inspector_date || new Date().toISOString().slice(0,10);
+  const inspName = reportData.inspector_name || localStorage.getItem('qc_inspector') || '';
+  document.getElementById('inspector').value = inspName;
+  // Report date = checklist step completion date, NOT today
+  document.getElementById('insp-date').value = reportData.inspector_date || reportData.step_date || '';
   document.getElementById('tpi').value = reportData.tpi_name || '';
   document.getElementById('tpi-date').value = reportData.tpi_date || '';
-  // Title
+  await loadInspectors();
+  if(inspName) showSigPad(inspName);
   const cfg = REPORT_FIELDS[RT];
   if(cfg){
     document.getElementById('rpt-title').textContent = cfg.title;
-    document.getElementById('rpt-sub').textContent = `${S} \u00b7 ${P}`;
+    const recNo = reportData.rec_no || '';
+    const stepDate = reportData.step_date || '';
+    const itpDoc = reportData.itp || P+'-ITP-SPL-001';
+    MATERIAL_TYPE = reportData.material_type || '';
+    document.getElementById('rpt-sub').innerHTML = `${S} · ${P}${recNo ? ' · <span style="font-family:monospace;font-size:10px;color:#2F5496">'+recNo+'</span>' : ''}${stepDate ? ' · <span style="font-size:10px">Date / 日期: '+stepDate+'</span>' : ''}`;
+    document.getElementById('itp-display').textContent = itpDoc;
     cfg.render(reportData.data);
   } else {
-    document.getElementById('report-body').innerHTML = '<p style="padding:20px;color:#888">Report type not configured / \u62a5\u544a\u7c7b\u578b\u672a\u914d\u7f6e</p>';
+    document.getElementById('report-body').innerHTML = '<p style="padding:20px;color:#888">Report type not configured</p>';
   }
-  // Overall result
   updateResult(reportData.data.overall_result || null);
 }
-
 function updateResult(val){
-  document.getElementById('res-pass').className = 'pf-btn' + (val==='PASS'?' sel-pass':'');
-  document.getElementById('res-fail').className = 'pf-btn' + (val==='FAIL'?' sel-fail':'');
+  document.getElementById('res-pass').className = 'pf-btn' + (val==='ACC'?' sel-pass':'');
+  document.getElementById('res-fail').className = 'pf-btn' + (val==='REJ'?' sel-fail':'');
 }
 function setResult(val){
   const cur = reportData.data.overall_result;
@@ -2767,363 +3921,28 @@ function setResult(val){
   updateResult(reportData.data.overall_result);
   scheduleSave();
 }
-
-// ── Auto-save with debounce ──
-function scheduleSave(){
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(doSave, 600);
-}
+function scheduleSave(){ clearTimeout(saveTimer); saveTimer = setTimeout(doSave, 600); }
 async function doSave(){
   const insp = document.getElementById('inspector').value;
   localStorage.setItem('qc_inspector', insp);
   const body = {
-    report_subtype: SUB,
-    status: 'draft',
-    inspector_name: insp,
-    inspector_date: document.getElementById('insp-date').value,
-    tpi_name: document.getElementById('tpi').value,
-    tpi_date: document.getElementById('tpi-date').value,
+    report_subtype: SUB, status: 'draft',
+    inspector_name: insp, inspector_date: document.getElementById('insp-date').value,
+    tpi_name: document.getElementById('tpi').value, tpi_date: document.getElementById('tpi-date').value,
     data: reportData.data,
   };
   try{
-    const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}`, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
-    });
+    const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     const d = await r.json();
-    showSave(d.ok ? 'Saved / \u5df2\u4fdd\u5b58' : 'Error', d.ok);
+    showSave(d.ok ? 'Saved / 已保存' : 'Error', d.ok);
   }catch(e){ showSave('Error', false); }
 }
 function showSave(msg, ok){
   const el = document.getElementById('save-status');
-  el.textContent = msg;
-  el.className = 'save-status ' + (ok ? 'save-ok' : 'save-err');
-  el.style.opacity = '1';
-  setTimeout(()=>{ el.style.opacity = '0'; }, 1500);
+  el.textContent = msg; el.className = 'save-status ' + (ok ? 'save-ok' : 'save-err');
+  el.style.opacity = '1'; setTimeout(()=>{ el.style.opacity = '0'; }, 1500);
 }
-// Save on inspector field changes
 document.querySelectorAll('.inspector-bar input').forEach(el => el.addEventListener('change', scheduleSave));
-
-// ── DIMENSIONAL REPORT ──
-function renderDimensional(data){
-  const d = data;
-  const tol = (d.dim_tol || '\u00b15mm');
-  let html = `<div class="qc-section"><h3>Overall Dimensions / \u603b\u4f53\u5c3a\u5bf8 <span style="font-size:11px;font-weight:400;color:#888">(Tol: ${tol})</span></h3>`;
-  const dims = [
-    {key:'l', en:'Length / \u957f\u5ea6', nominal: d.nominal_l_mm},
-    {key:'w', en:'Width / \u5bbd\u5ea6', nominal: d.nominal_w_mm},
-    {key:'h', en:'Height / \u9ad8\u5ea6', nominal: d.nominal_h_mm},
-  ];
-  dims.forEach(dim => {
-    const nom = dim.nominal || '';
-    const act = d[`actual_${dim.key}_mm`] || '';
-    html += `<div class="qc-row" style="grid-template-columns:1fr 80px 100px">
-      <div class="qc-label">${dim.en}</div>
-      <div class="qc-nominal">${nom ? nom + ' mm' : '\u2014'}</div>
-      <input class="qc-input" type="number" inputmode="decimal" placeholder="Actual" value="${act}"
-        onchange="reportData.data['actual_${dim.key}_mm']=this.value?parseFloat(this.value):null;scheduleSave()">
-    </div>`;
-  });
-  html += '</div>';
-
-  // Flanges
-  const flanges = d.flanges || [];
-  if(flanges.length){
-    html += '<div class="qc-section"><h3>Flange Alignment / \u6cd5\u5170\u6821\u51c6 <span style="font-size:11px;font-weight:400;color:#888">(\u00b11.5mm bolt-hole, 0.5%OD max 2mm perp.)</span></h3>';
-    flanges.forEach((fl,i) => {
-      html += `<div class="qc-row" style="grid-template-columns:1fr 1fr 1fr">
-        <div class="qc-label">Flange #${i+1} <span class="cn">${fl.size||''}</span></div>
-        <div class="pass-fail">
-          <div class="pf-btn ${fl.bolt_hole_ok===true?'sel-pass':fl.bolt_hole_ok===false?'sel-fail':''}"
-            onclick="toggleFlange(${i},'bolt_hole_ok')">Bolt-Hole<br>\u87ba\u6813\u5b54</div>
-        </div>
-        <div class="pass-fail">
-          <div class="pf-btn ${fl.perp_ok===true?'sel-pass':fl.perp_ok===false?'sel-fail':''}"
-            onclick="toggleFlange(${i},'perp_ok')">Perp.<br>\u5782\u76f4\u5ea6</div>
-        </div>
-      </div>`;
-    });
-    html += '</div>';
-  }
-
-  // Angles
-  const angles = [...(d.elbows_90||[]), ...(d.elbows_45||[]), ...(d.tees||[])];
-  if(angles.length){
-    html += '<div class="qc-section"><h3>Fitting Angles / \u7ba1\u4ef6\u89d2\u5ea6</h3>';
-    angles.forEach((a,i) => {
-      html += `<div class="qc-row" style="grid-template-columns:1fr 60px 80px">
-        <div class="qc-label">${a.type} #${a.id} <span class="cn">${a.nominal||''}</span></div>
-        <div class="qc-nominal">${a.nominal||''}</div>
-        <div class="pass-fail">
-          <div class="pf-btn ${a.ok===true?'sel-pass':a.ok===false?'sel-fail':''}"
-            onclick="toggleAngle(${i})">OK</div>
-        </div>
-      </div>`;
-    });
-    html += '</div>';
-  }
-  document.getElementById('report-body').innerHTML = html;
-}
-function toggleFlange(i,field){
-  const fl = reportData.data.flanges[i];
-  fl[field] = fl[field]===true ? false : (fl[field]===false ? null : true);
-  renderDimensional(reportData.data);
-  scheduleSave();
-}
-function toggleAngle(i){
-  const all = [...(reportData.data.elbows_90||[]), ...(reportData.data.elbows_45||[]), ...(reportData.data.tees||[])];
-  const a = all[i];
-  a.ok = a.ok===true ? false : (a.ok===false ? null : true);
-  renderDimensional(reportData.data);
-  scheduleSave();
-}
-
-// ── WELD-BY-WELD REPORTS (VT, RT, PT, MT, Fit-up) ──
-function renderWeldReport(data){
-  const cfg = REPORT_FIELDS[RT];
-  const welds = data.welds || [];
-  if(!welds.length){
-    document.getElementById('report-body').innerHTML = '<div class="qc-section"><p style="color:#888;text-align:center">No weld data. Seed from DXF database first. / \u65e0\u7115\u7f1d\u6570\u636e</p></div>';
-    return;
-  }
-  let html = '';
-  welds.forEach((w,i) => {
-    html += `<div class="weld-card">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div><span class="weld-tag">${w.weld_tag||'W'+(i+1)}</span> <span class="weld-size">${w.size||''}</span></div>
-        <div class="pass-fail" style="width:140px">
-          <div class="pf-btn ${w.result==='PASS'?'sel-pass':''}" onclick="setWeldResult(${i},'PASS')" style="padding:6px">\u2713</div>
-          <div class="pf-btn ${w.result==='FAIL'?'sel-fail':''}" onclick="setWeldResult(${i},'FAIL')" style="padding:6px">\u2717</div>
-        </div>
-      </div>
-      <div class="weld-grid">`;
-    (cfg.checks||[]).forEach(ch => {
-      if(ch.type==='text'||ch.type==='number'){
-        html += `<div><label style="font-size:10px;color:#888">${ch.en} / ${ch.cn}</label>
-          <input class="qc-input" type="${ch.type}" value="${w[ch.key]||ch.default||''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.welds[${i}]['${ch.key}']=this.value;scheduleSave()"></div>`;
-      } else {
-        html += `<div class="pass-fail">
-          <div class="pf-btn ${w[ch.key]===true?'sel-pass':w[ch.key]===false?'sel-fail':''}" style="padding:6px;font-size:10px"
-            onclick="toggleWeldCheck(${i},'${ch.key}')">${ch.en}<br><span style="font-size:9px">${ch.cn}</span></div>
-        </div>`;
-      }
-    });
-    html += `</div>
-      <div style="margin-top:6px"><input class="qc-input" style="text-align:left;font-size:11px;font-weight:400;background:#fff" placeholder="Remarks / \u5907\u6ce8"
-        value="${w.remarks||''}" onchange="reportData.data.welds[${i}].remarks=this.value;scheduleSave()"></div>
-    </div>`;
-  });
-  // Image upload section for RT
-  if(cfg.hasImages){
-    html += `<div class="qc-section"><h3>X-Ray Images / \u5c04\u7ebf\u7247</h3>
-      <div class="img-grid" id="img-grid"></div>
-      <label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files)">\U0001f4f7 Upload Image / \u4e0a\u4f20\u56fe\u7247</label>
-    </div>`;
-  }
-  document.getElementById('report-body').innerHTML = html;
-  if(cfg.hasImages) loadImages();
-}
-function setWeldResult(i,val){
-  const w = reportData.data.welds[i];
-  w.result = w.result===val ? null : val;
-  renderWeldReport(reportData.data);
-  scheduleSave();
-}
-function toggleWeldCheck(i,key){
-  const w = reportData.data.welds[i];
-  w[key] = w[key]===true ? false : (w[key]===false ? null : true);
-  renderWeldReport(reportData.data);
-  scheduleSave();
-}
-
-// ── IMAGE UPLOAD (RT, Weld Map, Ferroxyl) ──
-async function loadImages(){
-  const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/images`);
-  const imgs = await r.json();
-  const grid = document.getElementById('img-grid');
-  if(!grid) return;
-  grid.innerHTML = imgs.map(img =>
-    `<div class="img-thumb">
-      <img src="/api/project/${P}/qc/image/${img.id}" loading="lazy">
-      <button class="del" onclick="delImage(${img.id})">\u00d7</button>
-    </div>`
-  ).join('');
-}
-async function uploadImages(files){
-  for(const f of files){
-    // Client-side compression
-    const compressed = await compressImage(f, 2000, 0.85);
-    const fd = new FormData();
-    fd.append('file', compressed, f.name);
-    fd.append('operator', document.getElementById('inspector').value);
-    await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`, {method:'POST', body:fd});
-  }
-  loadImages();
-}
-async function delImage(id){
-  if(!confirm('Delete image?')) return;
-  await fetch(`/api/project/${P}/qc/image/${id}`, {method:'DELETE'});
-  loadImages();
-}
-function compressImage(file, maxDim, quality){
-  return new Promise((resolve)=>{
-    const img = new Image();
-    img.onload = ()=>{
-      let w = img.width, h = img.height;
-      if(w > maxDim || h > maxDim){
-        const ratio = Math.min(maxDim/w, maxDim/h);
-        w = Math.round(w*ratio); h = Math.round(h*ratio);
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = w; canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      canvas.toBlob(blob => resolve(blob), 'image/jpeg', quality);
-    };
-    img.src = URL.createObjectURL(file);
-  });
-}
-
-// ── SIMPLE REPORTS (Cutting, Weld Map, Passivation, Ferroxyl) ──
-function renderSimple(data){
-  const cfg = REPORT_FIELDS[RT];
-  const fields = cfg.fields || [];
-  let html = '<div class="qc-section"><h3>' + cfg.title + '</h3>';
-  fields.forEach(f => {
-    if(f.type==='text'||f.type==='number'){
-      html += `<div class="qc-row" style="grid-template-columns:1fr 1fr">
-        <div class="qc-label">${f.en} <span class="cn">${f.cn}</span></div>
-        <input class="qc-input" type="${f.type}" value="${data[f.key]||f.default||''}" style="text-align:left"
-          onchange="reportData.data['${f.key}']=this.value;scheduleSave()">
-      </div>`;
-    } else {
-      html += `<div class="qc-row" style="grid-template-columns:1fr 1fr">
-        <div class="qc-label">${f.en} <span class="cn">${f.cn}</span></div>
-        <div class="pass-fail">
-          <div class="pf-btn ${data[f.key]===true?'sel-pass':data[f.key]===false?'sel-fail':''}"
-            onclick="reportData.data['${f.key}']=reportData.data['${f.key}']===true?false:(reportData.data['${f.key}']===false?null:true);renderSimple(reportData.data);scheduleSave()">OK</div>
-        </div>
-      </div>`;
-    }
-  });
-  // Image section
-  if(cfg.hasImages){
-    html += `<div style="margin-top:12px"><div class="img-grid" id="img-grid"></div>
-      <label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files)">\U0001f4f7 Upload / \u4e0a\u4f20</label></div>`;
-  }
-  html += '<div style="margin-top:10px"><textarea class="qc-input" style="text-align:left;font-weight:400;height:60px;resize:vertical;background:#fff" placeholder="General remarks / \u5907\u6ce8"'
-    + ` onchange="reportData.data.remarks=this.value;scheduleSave()">${data.remarks||''}</textarea></div>`;
-  html += '</div>';
-  document.getElementById('report-body').innerHTML = html;
-  if(cfg.hasImages) loadImages();
-}
-
-// ── PMI REPORT ──
-function renderPMI(data){
-  const items = data.items || [];
-  let html = '<div class="qc-section"><h3>PMI Verification / PMI\u9a8c\u8bc1</h3>';
-  if(!items.length){html+='<p style="color:#888">No items. Seed from DXF database. / \u65e0\u6570\u636e</p>';}
-  items.forEach((it,i) => {
-    html += `<div class="weld-card" style="border-left-color:#E67E22">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div><span class="weld-tag">${it.item||'Item '+(i+1)}</span> <span class="weld-size">${it.expected_grade||''}</span></div>
-        <div class="pass-fail" style="width:140px">
-          <div class="pf-btn ${it.pass===true?'sel-pass':''}" onclick="reportData.data.items[${i}].pass=reportData.data.items[${i}].pass===true?null:true;renderPMI(reportData.data);scheduleSave()" style="padding:6px">\u2713</div>
-          <div class="pf-btn ${it.pass===false?'sel-fail':''}" onclick="reportData.data.items[${i}].pass=reportData.data.items[${i}].pass===false?null:false;renderPMI(reportData.data);scheduleSave()" style="padding:6px">\u2717</div>
-        </div>
-      </div>
-      <div class="weld-grid">
-        <div><label style="font-size:10px;color:#888">Heat No.</label>
-          <input class="qc-input" type="text" value="${it.heat_no||''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.items[${i}].heat_no=this.value;scheduleSave()"></div>
-        <div><label style="font-size:10px;color:#888">PMI Result</label>
-          <input class="qc-input" type="text" value="${it.pmi_result||''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.items[${i}].pmi_result=this.value;scheduleSave()"></div>
-      </div>
-    </div>`;
-  });
-  html += '</div>';
-  document.getElementById('report-body').innerHTML = html;
-}
-
-// ── FERRITE REPORT ──
-function renderFerrite(data){
-  const readings = data.readings || [];
-  let html = '<div class="qc-section"><h3>Ferrite Content / \u94c1\u7d20\u4f53\u542b\u91cf <span style="font-size:11px;font-weight:400;color:#888">(30\u201365% acceptance)</span></h3>';
-  if(!readings.length){html+='<p style="color:#888">No weld data. Seed from DXF database. / \u65e0\u6570\u636e</p>';}
-  readings.forEach((rd,i) => {
-    const avg = (rd.reading_1!=null && rd.reading_2!=null && rd.reading_3!=null) ? ((rd.reading_1+rd.reading_2+rd.reading_3)/3).toFixed(1) : '';
-    const pass = avg ? (parseFloat(avg)>=30 && parseFloat(avg)<=65) : null;
-    html += `<div class="weld-card" style="border-left-color:#E67E22">
-      <div><span class="weld-tag">${rd.weld_tag||'W'+(i+1)}</span></div>
-      <div class="weld-grid" style="grid-template-columns:1fr 1fr 1fr 1fr">
-        ${[1,2,3].map(n => `<div><label style="font-size:10px;color:#888">R${n} (%)</label>
-          <input class="qc-input" type="number" inputmode="decimal" step="0.1" value="${rd['reading_'+n]!=null?rd['reading_'+n]:''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.readings[${i}].reading_${n}=this.value?parseFloat(this.value):null;renderFerrite(reportData.data);scheduleSave()"></div>`).join('')}
-        <div><label style="font-size:10px;color:#888">Avg / \u5e73\u5747</label>
-          <div class="qc-input qc-readonly" style="font-size:12px;padding:6px;color:${pass===true?'#27ae60':pass===false?'#e74c3c':'#888'}">${avg||'\u2014'}%</div></div>
-      </div>
-    </div>`;
-  });
-  html += '</div>';
-  document.getElementById('report-body').innerHTML = html;
-}
-
-// ── WELDING LOG ──
-function renderWeldingLog(data){
-  const welds = data.welds || [];
-  const trackInterpass = P.includes('423');
-  let html = '<div class="qc-section"><h3>Welding Log / \u710a\u63a5\u8bb0\u5f55' + (trackInterpass?' <span style="font-size:11px;font-weight:400;color:#e74c3c">(Interpass max 150\u00b0C)</span>':'') + '</h3>';
-  if(!welds.length){html+='<p style="color:#888">No weld data. Seed from DXF database. / \u65e0\u6570\u636e</p>';}
-  welds.forEach((w,i) => {
-    html += `<div class="weld-card" style="border-left-color:#C0392B">
-      <div><span class="weld-tag">${w.weld_tag||'W'+(i+1)}</span> <span class="weld-size">${w.size||''}</span></div>
-      <div class="weld-grid">
-        <div><label style="font-size:10px;color:#888">WPS</label>
-          <input class="qc-input" type="text" value="${w.wps||''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.welds[${i}].wps=this.value;scheduleSave()"></div>
-        <div><label style="font-size:10px;color:#888">Welder ID / \u710a\u5de5\u53f7</label>
-          <input class="qc-input" type="text" value="${w.welder_id||''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.welds[${i}].welder_id=this.value;scheduleSave()"></div>
-        <div><label style="font-size:10px;color:#888">Process / \u5de5\u827a</label>
-          <input class="qc-input" type="text" value="${w.process||''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.welds[${i}].process=this.value;scheduleSave()"></div>
-        <div><label style="font-size:10px;color:#888">Date / \u65e5\u671f</label>
-          <input class="qc-input" type="date" value="${w.date||''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.welds[${i}].date=this.value;scheduleSave()"></div>
-        ${trackInterpass ? `<div><label style="font-size:10px;color:#e74c3c;font-weight:600">Interpass \u00b0C</label>
-          <input class="qc-input" type="number" value="${w.interpass_temp!=null?w.interpass_temp:''}" style="font-size:12px;padding:6px;border-color:${(w.interpass_temp&&w.interpass_temp>150)?'#e74c3c':'#ddd'}"
-            onchange="reportData.data.welds[${i}].interpass_temp=this.value?parseFloat(this.value):null;renderWeldingLog(reportData.data);scheduleSave()"></div>
-        <div><label style="font-size:10px;color:#888">Heat Input (kJ/mm)</label>
-          <input class="qc-input" type="number" inputmode="decimal" step="0.01" value="${w.heat_input!=null?w.heat_input:''}" style="font-size:12px;padding:6px"
-            onchange="reportData.data.welds[${i}].heat_input=this.value?parseFloat(this.value):null;scheduleSave()"></div>` : ''}
-      </div>
-    </div>`;
-  });
-  html += '</div>';
-  document.getElementById('report-body').innerHTML = html;
-}
-
-// ── DFT / COATING ──
-function renderDFT(data){
-  const readings = data.readings || [{point:'Point 1',value:null},{point:'Point 2',value:null},{point:'Point 3',value:null},{point:'Point 4',value:null},{point:'Point 5',value:null}];
-  if(!data.readings) reportData.data.readings = readings;
-  const spec = data.spec_dft || '';
-  let html = `<div class="qc-section"><h3>Dry Film Thickness (DFT) / \u5e72\u819c\u539a\u5ea6</h3>
-    <div class="qc-row" style="grid-template-columns:1fr 1fr">
-      <div class="qc-label">Spec DFT (\u00b5m)</div>
-      <input class="qc-input" type="text" value="${spec}" placeholder="e.g. 250-350" style="text-align:left"
-        onchange="reportData.data.spec_dft=this.value;scheduleSave()">
-    </div>`;
-  readings.forEach((rd,i) => {
-    html += `<div class="qc-row" style="grid-template-columns:1fr 1fr">
-      <div class="qc-label">${rd.point}</div>
-      <input class="qc-input" type="number" inputmode="decimal" value="${rd.value!=null?rd.value:''}" placeholder="\u00b5m"
-        onchange="reportData.data.readings[${i}].value=this.value?parseFloat(this.value):null;scheduleSave()">
-    </div>`;
-  });
-  html += '</div>';
-  document.getElementById('report-body').innerHTML = html;
-}
 
 loadReport();
 </script></body></html>"""
@@ -3439,6 +4258,10 @@ async function load(){
       <p style="color:#888;padding:20px 0">No schedule configured.<br><code>POST /api/project/${P}/schedule</code></p></div>`;
   }
 
+  // ── Shipments section (read-only — edit in project settings ⚙) ──
+  html += `<div class="report-card"><h3>Shipments / \u53d1\u8fd0 <span style="font-size:10px;font-weight:400;color:#888">(edit in \u2699 Settings)</span></h3>`;
+  html += `<div id="shipments-list"></div></div>`;
+
   // Today's activity — grouped by spool, using dynamic hold/release
   const completed = (d.today_activity||[]).filter(a=>a.action==='completed');
   const stepNames = d.step_names||{};
@@ -3489,6 +4312,36 @@ async function load(){
   }
   html += `</div>`;
   document.getElementById('rpt-content').innerHTML = html;
+  loadShipments();
+}
+async function loadShipments(){
+  const el = document.getElementById('shipments-list');
+  if(!el) return;
+  try {
+    const r = await fetch(`/api/project/${P}/shipments`);
+    const ships = await r.json();
+    if(!ships.length){
+      el.innerHTML = '<div style="text-align:center;padding:12px;color:#aaa;font-size:12px">No shipments configured / \u672a\u914d\u7f6e\u53d1\u8fd0</div>';
+      return;
+    }
+    let h = `<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:8px">
+      <tr style="background:#f0f2f5"><th style="padding:6px;border:1px solid #ddd;text-align:left"># / \u6279\u6b21</th>
+      <th style="padding:6px;border:1px solid #ddd">Description / \u63cf\u8ff0</th>
+      <th style="padding:6px;border:1px solid #ddd">ETD / \u79bb\u6e2f</th>
+      <th style="padding:6px;border:1px solid #ddd">Transit / \u8fd0\u8f93</th>
+      <th style="padding:6px;border:1px solid #ddd">ETA / \u5230\u8fbe</th></tr>`;
+    ships.forEach(s => {
+      h += `<tr>
+        <td style="padding:6px 8px;border:1px solid #ddd;font-weight:700;color:#2F5496;text-align:center">${s.shipment_number}</td>
+        <td style="padding:6px;border:1px solid #ddd">${s.description||''}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:center">${(s.etd||'').substring(0,10)||'\u2014'}</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:center">${s.transit_days||''} days</td>
+        <td style="padding:6px;border:1px solid #ddd;text-align:center;font-weight:700;color:#003366">${s.eta||'\u2014'}</td>
+      </tr>`;
+    });
+    h += '</table>';
+    el.innerHTML = h;
+  } catch(e) { el.innerHTML = '<div style="color:red">Error loading shipments</div>'; }
 }
 load();
 </script></body></html>"""

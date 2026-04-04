@@ -1019,9 +1019,33 @@ def api_qc_image_delete(project, image_id):
 def api_qc_seed(project, spool_id):
     """Read DXF SQLite and pre-populate QC report data for this spool."""
     import sqlite3 as sqlite3_mod
+    # Accept seed data via POST body (for remote seeding from local machine)
+    if request.get_json():
+        seed = request.get_json()
+        # Pre-populate report-specific data
+        for d in get_qc_report_defs(project):
+            rt = d['type']
+            subtype = d.get('report_subtype', '')
+            existing = db_fetchone("SELECT data FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
+                                   (project, spool_id, rt, subtype))
+            if existing and existing.get('data','{}') != '{}':
+                continue
+            data = seed.get(rt, {})
+            if data:
+                data_json = json.dumps(data)
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                if USE_PG:
+                    db_execute("INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,data,updated_at) VALUES (%s,%s,%s,%s,'not_started',%s,%s) ON CONFLICT (project,spool_id,report_type,report_subtype) DO UPDATE SET data=EXCLUDED.data, updated_at=EXCLUDED.updated_at WHERE qc_reports.data = '{}'",
+                        (project, spool_id, rt, subtype, data_json, now))
+                else:
+                    db_execute("INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,data,updated_at) VALUES (?,?,?,?,'not_started',?,?) ON CONFLICT(project,spool_id,report_type,report_subtype) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at WHERE qc_reports.data = '{}'",
+                        (project, spool_id, rt, subtype, data_json, now))
+        db_commit()
+        return jsonify({'ok': True, 'source': 'post_body'})
+    # Fall back to DXF file (local only)
     db_path = get_qc_setting(project, 'dxf_sqlite_path')
     if not db_path or not os.path.exists(db_path):
-        return jsonify({'error': f'DXF database not found for {project}'}), 404
+        return jsonify({'ok': True, 'source': 'no_dxf', 'seed': {}})
     conn = sqlite3_mod.connect(db_path)
     conn.row_factory = sqlite3_mod.Row
     # Find spool
@@ -4029,8 +4053,9 @@ const P='{{project}}';
 const STATUS_LABELS = {on_time:'ON TIME / \u6309\u65f6',at_risk:'AT RISK / \u6709\u5ef6\u8fdf\u98ce\u9669',delayed:'DELAYED / \u5df2\u5ef6\u8fdf',not_started:'NOT STARTED / \u672a\u5f00\u59cb'};
 const STATUS_COLORS = {on_time:'#27ae60',at_risk:'#f39c12',delayed:'#e74c3c',not_started:'#95a5a6'};
 async function load(){
-  const r = await fetch(`/api/project/${P}/report`);
+  const [r, shipR] = await Promise.all([fetch(`/api/project/${P}/report`), fetch(`/api/project/${P}/shipments`)]);
   const d = await r.json();
+  const shipments = await shipR.json();
   document.getElementById('rpt-date').textContent = d.date;
   // Dynamic hold/release step detection from API
   const holdStepSet = new Set(d.hold_steps || []);
@@ -4238,15 +4263,19 @@ async function load(){
         <div class="res-card rc-dark res-full"><h5>Actual End / \u5b9e\u9645\u5b8c\u5de5</h5><div class="rv" style="color:#2F5496">${st.completed>=st.total?fmtShort(new Date()):'\u2014'}</div><div class="rs">${st.completed>=st.total?'Production complete / \u751f\u4ea7\u5b8c\u6210':'Shown when production completes / \u751f\u4ea7\u5b8c\u6210\u540e\u663e\u793a'}</div></div>
       </div>`;
 
-      // Transit
-      const arrivalDate = fcEnd ? addDays(fcEnd, transitDays) : null;
-      const commitArrival = hasExpediting ? addDays(commitEnd, transitDays) : null;
+      // Transit — from shipments table (last shipment ETA)
+      const lastShip = shipments.length ? shipments[shipments.length - 1] : null;
+      const lastETA = lastShip ? lastShip.eta : null;
+      const lastTransit = lastShip ? lastShip.transit_days : transitDays;
+      const lastETD = lastShip && lastShip.etd ? lastShip.etd.substring(0,10) : null;
       html += `<div class="transit-strip">
-        <div style="display:flex;align-items:center;gap:6px"><span style="font-size:18px">\U0001f6a2</span><div><div style="font-size:10px;color:#888;text-transform:uppercase">Sea Transit / \u6d77\u8fd0</div><div style="font-size:14px;font-weight:700;color:#003366">~${transitDays} days</div></div></div>
-        ${hasExpediting?`<div style="width:1px;height:28px;background:#e0e0e0"></div>
-        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Expected Arrival Chile / \u9884\u8ba1\u5230\u8fbe\u667a\u5229</div><div style="font-size:14px;font-weight:700;color:#003366">${fmt(commitArrival)}</div><div style="font-size:9px;color:#999">Based on committed production end (${fmtShort(commitEnd)}) + ${transitDays} days</div></div>`:''}
+        <div style="display:flex;align-items:center;gap:6px"><span style="font-size:18px">\U0001f6a2</span><div><div style="font-size:10px;color:#888;text-transform:uppercase">Last Shipment / \u6700\u540e\u4e00\u6279</div><div style="font-size:14px;font-weight:700;color:#003366">${shipments.length ? 'Shipment '+lastShip.shipment_number : '\u2014'}</div></div></div>
         <div style="width:1px;height:28px;background:#e0e0e0"></div>
-        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Forecast Arrival Last Shipment / \u9884\u6d4b\u6700\u540e\u4e00\u6279\u5230\u8fbe</div><div style="font-size:14px;font-weight:700;color:#27ae60">${arrivalDate?fmt(arrivalDate):'\u2014'}</div><div style="font-size:9px;color:#999">Based on forecast production end${fcEnd?' ('+fmtShort(fcEnd)+')':''} + ${transitDays} days</div></div>
+        <div><div style="font-size:10px;color:#888;text-transform:uppercase">ETD / \u79bb\u6e2f</div><div style="font-size:14px;font-weight:700;color:#003366">${lastETD||'\u2014'}</div></div>
+        <div style="width:1px;height:28px;background:#e0e0e0"></div>
+        <div><div style="font-size:10px;color:#888;text-transform:uppercase">Transit / \u8fd0\u8f93</div><div style="font-size:14px;font-weight:700;color:#003366">${lastTransit} days</div></div>
+        <div style="width:1px;height:28px;background:#e0e0e0"></div>
+        <div><div style="font-size:10px;color:#888;text-transform:uppercase">ETA Destination / \u9884\u8ba1\u5230\u8fbe</div><div style="font-size:14px;font-weight:700;color:#27ae60">${lastETA||'\u2014'}</div></div>
       </div>`;
     }
   } else {

@@ -1744,16 +1744,12 @@ def api_project_steps(project):
     if not data or not isinstance(data, list): return jsonify({'error': 'Expected JSON array of step definitions'}), 400
     db_execute("DELETE FROM project_steps WHERE project=?", (project,))
     for s in data:
-        if USE_PG:
-            db_execute("INSERT INTO project_steps (project,step_number,name_en,name_cn,weight,category,hours_fixed,hours_variable,spool_type,display_order,is_conditional,is_hold_point,is_release,phase) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (project, s['step_number'], s['name_en'], s.get('name_cn',''), s.get('weight',5), s['category'],
-                 s.get('hours_fixed',2.0), s.get('hours_variable',''), s.get('spool_type','ALL'),
-                 s['display_order'], s.get('is_conditional',0), s.get('is_hold_point',0), s.get('is_release',0), s.get('phase','fab')))
-        else:
-            db_execute("INSERT INTO project_steps (project,step_number,name_en,name_cn,weight,category,hours_fixed,hours_variable,spool_type,display_order,is_conditional,is_hold_point,is_release,phase) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (project, s['step_number'], s['name_en'], s.get('name_cn',''), s.get('weight',5), s['category'],
-                 s.get('hours_fixed',2.0), s.get('hours_variable',''), s.get('spool_type','ALL'),
-                 s['display_order'], s.get('is_conditional',0), s.get('is_hold_point',0), s.get('is_release',0), s.get('phase','fab')))
+        cols = 'project,step_number,name_en,name_cn,weight,category,hours_fixed,hours_variable,spool_type,display_order,is_conditional,is_hold_point,is_release,phase,counts_for_production'
+        vals = (project, s['step_number'], s['name_en'], s.get('name_cn',''), s.get('weight',5), s['category'],
+                s.get('hours_fixed',2.0), s.get('hours_variable',''), s.get('spool_type','ALL'),
+                s['display_order'], s.get('is_conditional',0), s.get('is_hold_point',0), s.get('is_release',0), s.get('phase','fab'), s.get('counts_for_production',1))
+        ph = ','.join(['%s']*15) if USE_PG else ','.join(['?']*15)
+        db_execute(f"INSERT INTO project_steps ({cols}) VALUES ({ph})", vals)
     db_commit()
     # Clear cache
     cache_key = f'_steps_{project}'

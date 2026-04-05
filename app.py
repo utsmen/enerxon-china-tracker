@@ -909,16 +909,39 @@ def generate_report_data(project):
 
 _KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'knowledge')
 
-def _load_knowledge_file(project):
-    """Load the project's QC knowledge markdown file. Returns None if not present."""
-    path = os.path.join(_KNOWLEDGE_DIR, f'{project}_qc_knowledge.md')
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
-    except Exception:
-        return None
+def _load_knowledge_file(project, lang='en'):
+    """Load the project's QC knowledge markdown file(s).
+
+    Generalised bilingual loader:
+    - For lang='zh', try `{project}_qc_knowledge_cn.md` first, then append
+      `{project}_qc_knowledge.md` as fallback for sections not yet translated.
+    - For lang='en' (default), load only `{project}_qc_knowledge.md`.
+    - Returns None if no file exists for the project.
+
+    Any project can add a `_cn.md` file at any time with zero code change.
+    Untranslated sections automatically fall back to the English file, so a
+    partial translation is always better than none.
+    """
+    def _read(path):
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception:
+            return None
+
+    en_path = os.path.join(_KNOWLEDGE_DIR, f'{project}_qc_knowledge.md')
+    if lang == 'zh':
+        cn_path = os.path.join(_KNOWLEDGE_DIR, f'{project}_qc_knowledge_cn.md')
+        cn = _read(cn_path)
+        en = _read(en_path)
+        # Put CN first so keyword search returns Chinese sections before
+        # falling through to the English equivalents.
+        if cn and en:
+            return cn + '\n\n' + en
+        return cn or en
+    return _read(en_path)
 
 def _split_sections(md):
     """Split a markdown string into (heading, body) tuples at every ## or ### heading."""
@@ -941,8 +964,12 @@ def _split_sections(md):
 
 def _knowledge_section(project, *keywords, limit=3):
     """Return sections of the project knowledge file whose heading contains any keyword.
-    Case-insensitive substring match. Limits to `limit` sections to keep token use low."""
-    md = _load_knowledge_file(project)
+    Case-insensitive substring match. Limits to `limit` sections to keep token use low.
+    Language for the knowledge file is read from Flask request-local g.chat_lang
+    (set by _run_chat_turn). Defaults to 'en' if not set (e.g. when called outside
+    a chat request)."""
+    lang = getattr(g, 'chat_lang', 'en')
+    md = _load_knowledge_file(project, lang=lang)
     if md is None:
         return f"No QC knowledge base is configured for project {project}. Ask the QC manager to add knowledge/{project}_qc_knowledge.md."
     sections = _split_sections(md)
@@ -1218,16 +1245,18 @@ def _run_chat_turn(project, message, history):
 
     tool_schemas = [schema for (_fn, schema) in CHAT_TOOLS.values()]
 
-    # Deterministic per-turn language instruction. Embedded in the user message
-    # (not the system prompt) because testing showed system-prompt language
-    # directives get drowned out by Chinese context in the system prompt, tool
-    # responses, and historical turns. Instructions at the top of the user
-    # message itself are respected by both Haiku 4.5 and Sonnet 4.5.
+    # Detect language and make it available to the knowledge tools via g.
+    # With pre-localised knowledge files (<project>_qc_knowledge_cn.md),
+    # tool responses come back in the correct language already, so we only
+    # need a light language instruction to nudge the model; the heavy
+    # strip-Chinese + strong-directive machinery is kept as a fallback for
+    # projects that have not added a CN file yet.
     lang = _detect_language(message)
+    g.chat_lang = lang
     if lang == 'en':
-        lang_instruction = "[Reply in ENGLISH ONLY. Do not use any Chinese characters in your answer, not even a single CJK character. English only.]"
+        lang_instruction = "[Reply in ENGLISH ONLY. Do not use any Chinese characters. English only.]"
     else:
-        lang_instruction = "[Reply in Simplified Chinese only.]"
+        lang_instruction = "[使用简体中文回答。]"
 
     # Build message list: trimmed history + project-tagged user message
     msgs = []

@@ -285,11 +285,33 @@ def get_phase_order(steps_def):
         if p not in seen: seen.add(p); phases.append(p)
     return phases
 
+def step_applies_to_spool(step, spool):
+    """Single applicability rule — does this step definition apply to this spool?
+    Used by every consumer of steps_def to decide inclusion. The rule is:
+      - If step.spool_type != 'ALL', must match spool.spool_type
+      - If step.is_conditional, spool must have branches
+    No project-specific logic. Any consumer that wants a step-per-spool
+    filter MUST call this helper instead of duplicating the rule."""
+    st_type = step.get('spool_type', 'ALL') or 'ALL'
+    if st_type != 'ALL' and (spool.get('spool_type', 'SPOOL') or 'SPOOL') != st_type:
+        return False
+    if step.get('is_conditional') and not spool.get('has_branches'):
+        return False
+    return True
+
+def get_post_production_steps(steps_def):
+    """Return post-production steps (counts_for_production=0) sorted by display_order.
+    The single authoritative definition of post-production ordering. Every consumer
+    that needs post-production steps MUST call this helper instead of filtering
+    and sorting independently."""
+    return sorted(
+        [s for s in steps_def if not s.get('counts_for_production', 1)],
+        key=lambda s: s.get('display_order') or s.get('step_number', 0))
+
 def spool_hours(spool_row, completed_steps, settings, steps_def):
     """Calculate hours-based progress for a single spool. Phases are dynamic — derived from step definitions."""
     raf = float(spool_row.get('raf_inches') or 0)
     surface = float(spool_row.get('surface_m2') or 0)
-    has_br = spool_row.get('has_branches', 0)
     spool_type = spool_row.get('spool_type', 'SPOOL') or 'SPOOL'
     weld_cap = float(settings.get('welding_capability_ipd', '552'))
     surface_cap = float(settings.get('surface_capability_m2d', '91'))
@@ -307,9 +329,7 @@ def spool_hours(spool_row, completed_steps, settings, steps_def):
     for step in steps_def:
         sn = step['step_number']
         phase = step['phase']
-        if step['is_conditional'] and not has_br: continue
-        st = step.get('spool_type', 'ALL') or 'ALL'
-        if st != 'ALL' and st != spool_type: continue
+        if not step_applies_to_spool(step, spool_row): continue
         if not step.get('counts_for_production', 1): continue
 
         # Calculate hours for this step
@@ -711,19 +731,11 @@ def post_production_status(project, bulk=None, steps_def=None):
     step numbers or names. Returns list ordered by display_order."""
     if bulk is None: bulk = bulk_spool_progress(project)
     if steps_def is None: steps_def = get_project_steps(project)
-    pp_steps = [s for s in steps_def if not s.get('counts_for_production', 1)]
-    pp_steps = sorted(pp_steps, key=lambda s: s.get('display_order') or s.get('step_number', 0))
     result = []
-    for step in pp_steps:
+    for step in get_post_production_steps(steps_def):
         sn = step['step_number']
-        st_type = step.get('spool_type', 'ALL') or 'ALL'
-        is_cond = step.get('is_conditional', 0)
-        applicable = []
-        for sid, info in bulk.items():
-            sp = info.get('spool', {})
-            if st_type != 'ALL' and (sp.get('spool_type', 'SPOOL') or 'SPOOL') != st_type: continue
-            if is_cond and not sp.get('has_branches'): continue
-            applicable.append(sid)
+        applicable = [sid for sid, info in bulk.items()
+                      if step_applies_to_spool(step, info.get('spool', {}))]
         done_ids = [sid for sid in applicable if sn in bulk.get(sid, {}).get('done_steps', set())]
         last_date = None
         if done_ids:
@@ -753,15 +765,14 @@ def shipment_status(project, bulk=None, steps_def=None):
     step numbers or names. Empty list if no shipments configured."""
     if bulk is None: bulk = bulk_spool_progress(project)
     if steps_def is None: steps_def = get_project_steps(project)
-    pp_steps = sorted(
-        [s for s in steps_def if not s.get('counts_for_production', 1)],
-        key=lambda s: s.get('display_order') or s.get('step_number', 0))
+    pp_steps = get_post_production_steps(steps_def)
     shipments = db_fetchall("SELECT * FROM shipments WHERE project=? ORDER BY shipment_number", (project,))
     if not shipments: return []
-    # Last pp step = "shipped" gate; all prior pp steps = "packed" gates
+    # Last pp step = "shipped" gate; all prior pp steps = "packed" gates.
+    # When only one pp step exists, it serves as both pack and ship (a single gate).
     shipped_step = pp_steps[-1]['step_number'] if pp_steps else None
-    pack_steps = [s['step_number'] for s in pp_steps[:-1]] if len(pp_steps) > 1 else (
-        [s['step_number'] for s in pp_steps] if pp_steps else [])
+    pack_steps = ([s['step_number'] for s in pp_steps[:-1]] if len(pp_steps) > 1
+                  else [s['step_number'] for s in pp_steps])
     result = []
     for ship in shipments:
         num = ship.get('shipment_number')
@@ -1148,7 +1159,7 @@ CHAT_TOOLS = {
     }),
 }
 
-CHAT_SYSTEM_PROMPT = """You are the ENERXON Production & Quality Assistant (ENERXON 生产与质量助手) for the ENERXON China Tracker website.
+CHAT_SYSTEM_PROMPT = """You are the ENERXON Production and Quality Assistant for the ENERXON China Tracker website.
 
 YOU HELP with:
 - Production progress (spools, diameters, phase progress, recent activity)
@@ -1158,25 +1169,14 @@ YOU HELP with:
 
 RULES:
 1. ONLY use the provided tools to answer. Never invent data, numbers, or procedures.
-2. For standards, procedures, acceptance criteria, welding, NDT, materials, ITP, finishing — CALL a knowledge tool (get_material_and_metallurgy, get_welding_procedure, get_ndt_procedure, get_acceptance_criteria, get_itp_flow, get_finishing_process, get_cutting_and_fitup, get_report_requirements, get_standards_and_codes, or get_qc_knowledge as fallback).
-3. For live progress, spools, QC report status, or recent activity — CALL a data tool (get_project_stats, get_spool_status, get_qc_report_status, get_recent_activity).
+2. For standards, procedures, acceptance criteria, welding, NDT, materials, ITP, finishing - CALL a knowledge tool (get_material_and_metallurgy, get_welding_procedure, get_ndt_procedure, get_acceptance_criteria, get_itp_flow, get_finishing_process, get_cutting_and_fitup, get_report_requirements, get_standards_and_codes, or get_qc_knowledge as fallback).
+3. For live progress, spools, QC report status, or recent activity - CALL a data tool (get_project_stats, get_spool_status, get_qc_report_status, get_recent_activity).
 4. Always pass the current project ID to every tool call. The project ID is provided in the first user message.
 5. Be CONCISE. Cite spool IDs, report types, ITP steps, or standards when relevant.
-6. If a tool returns empty, "No section matching...", or "No QC knowledge base...", you MUST tell the user that no data is available in the project knowledge base. Do NOT guess, do NOT provide values from general engineering knowledge, do NOT cite typical industry ranges. The user needs to know whether the answer came from their project documents or not. If the knowledge base is missing, tell them to contact the QC manager and stop.
-7. If the question is outside production or quality (pricing, contracts, suppliers, customers, HR, logistics costs), reply in the user's language with: "Sorry, I can only answer production and quality questions." / "抱歉，我只能回答生产和质量相关的问题。"
+6. If a tool returns empty, "No section matching...", or "No QC knowledge base...", you MUST tell the user that no data is available in the project knowledge base. Do NOT guess, do NOT provide values from general engineering knowledge, do NOT cite typical industry ranges. If the knowledge base is missing, tell them to contact the QC manager and stop.
+7. If the question is outside production or quality (pricing, contracts, suppliers, customers, HR, logistics costs), politely decline in the same language the user used and explain you only answer production and quality questions.
 8. Do not expose internal tool names to the user in the answer text.
-
-═══════════════════════════════════════════════════════════════════
-LANGUAGE RULE — THIS OVERRIDES EVERY OTHER INSTRUCTION:
-
-Detect the language of the user's MOST RECENT message and reply in THAT SAME LANGUAGE ONLY.
-
-- User wrote Chinese (contains 汉字) → reply 100% in Simplified Chinese. No English words except proper nouns (WPS-001, SPL-045, ASME, GTAW, etc).
-- User wrote English (Latin letters only, no 汉字) → reply 100% in English. No Chinese characters at all.
-- Mixed or ambiguous input → reply in Simplified Chinese.
-
-This rule applies EVEN THOUGH the primary audience is Chinese staff. If an English speaker asks a question, answer them in English. Do not translate the reply to Chinese. Do not append a Chinese version. Match the user's language exactly, every single time.
-═══════════════════════════════════════════════════════════════════"""
+9. Match the exact language of the user's most recent message. A language instruction is embedded at the top of each user message - follow it exactly."""
 
 def _detect_language(text):
     """Return 'zh' if the text contains any CJK character, else 'en'. Deterministic, no LLM."""
@@ -1186,6 +1186,22 @@ def _detect_language(text):
         if '\u4e00' <= ch <= '\u9fff':
             return 'zh'
     return 'en'
+
+def _strip_chinese(text):
+    """Remove CJK characters from text and clean up stray punctuation/whitespace left by
+    bilingual labels like 'Ferrite Measurement (铁素体测量)'. Used to remove Chinese
+    anchoring context from tool responses when the user wrote in English, so the model
+    doesn't drift to Chinese. Pure string operation, no cost."""
+    if not text:
+        return text
+    import re
+    s = re.sub(r'[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+', '', text)  # CJK + fullwidth
+    s = re.sub(r'\(\s*[,，、]?\s*\)', '', s)      # empty parens left by bilingual labels
+    s = re.sub(r'（\s*[,，、]?\s*）', '', s)       # empty fullwidth parens
+    s = re.sub(r'[ \t]+', ' ', s)                 # collapse horizontal whitespace
+    s = re.sub(r' +\n', '\n', s)                  # trailing spaces on lines
+    s = re.sub(r'\n{3,}', '\n\n', s)              # collapse blank lines
+    return s.strip()
 
 def _run_chat_turn(project, message, history):
     """Run one chat turn through Anthropic with tool use. Returns (reply_text, tools_used_list)."""
@@ -1202,14 +1218,16 @@ def _run_chat_turn(project, message, history):
 
     tool_schemas = [schema for (_fn, schema) in CHAT_TOOLS.values()]
 
-    # Deterministic per-turn language directive — prepended to system prompt so
-    # it overrides any bias the model has toward the audience's default language.
+    # Deterministic per-turn language instruction. Embedded in the user message
+    # (not the system prompt) because testing showed system-prompt language
+    # directives get drowned out by Chinese context in the system prompt, tool
+    # responses, and historical turns. Instructions at the top of the user
+    # message itself are respected by both Haiku 4.5 and Sonnet 4.5.
     lang = _detect_language(message)
     if lang == 'en':
-        lang_directive = "CRITICAL OVERRIDE: The user just asked a question in ENGLISH. You MUST reply 100% in English. Do not use any Chinese characters (汉字) in your reply. No bilingual output. English only."
+        lang_instruction = "[Reply in ENGLISH ONLY. Do not use any Chinese characters in your answer, not even a single CJK character. English only.]"
     else:
-        lang_directive = "CRITICAL OVERRIDE: The user just asked a question in Chinese. You MUST reply 100% in Simplified Chinese. No English sentences (proper nouns like WPS-001, ASME, SPL-045 are fine)."
-    system_prompt = lang_directive + "\n\n" + CHAT_SYSTEM_PROMPT
+        lang_instruction = "[Reply in Simplified Chinese only.]"
 
     # Build message list: trimmed history + project-tagged user message
     msgs = []
@@ -1217,14 +1235,14 @@ def _run_chat_turn(project, message, history):
         role = h.get('role'); content = h.get('content')
         if role in ('user', 'assistant') and isinstance(content, str) and content.strip():
             msgs.append({'role': role, 'content': content})
-    msgs.append({'role': 'user', 'content': f"[Current project: {project}]\n\n{message}"})
+    msgs.append({'role': 'user', 'content': f"[Current project: {project}]\n{lang_instruction}\n\n{message}"})
 
     tools_used = []
     for _iter in range(8):  # safety cap on tool-use loops
         resp = client.messages.create(
             model=model,
             max_tokens=1500,
-            system=system_prompt,
+            system=CHAT_SYSTEM_PROMPT,
             tools=tool_schemas,
             messages=msgs,
         )
@@ -1249,7 +1267,10 @@ def _run_chat_turn(project, message, history):
                         result = fn_schema[0](**tool_input)
                     except Exception as e:
                         result = f"Tool error: {e}"
-                tool_results.append({'type': 'tool_result', 'tool_use_id': block.id, 'content': str(result)[:20000]})
+                result_str = str(result)
+                if lang == 'en':
+                    result_str = _strip_chinese(result_str)
+                tool_results.append({'type': 'tool_result', 'tool_use_id': block.id, 'content': result_str[:20000]})
         msgs.append({'role': 'user', 'content': tool_results})
     return ("(Tool-use loop limit reached. Please rephrase your question.)", tools_used)
 
@@ -1827,9 +1848,7 @@ def api_shipment_mark_shipped(project, num):
     else:
         ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     steps_def = get_project_steps(project)
-    pp_steps = sorted(
-        [s for s in steps_def if not s.get('counts_for_production', 1)],
-        key=lambda s: s.get('display_order') or s.get('step_number', 0))
+    pp_steps = get_post_production_steps(steps_def)
     if not pp_steps:
         return jsonify({'error': 'No post-production step defined for this project'}), 400
     shipped_step = pp_steps[-1]['step_number']
@@ -3389,7 +3408,53 @@ body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;backgr
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;padding:16px}
 .stat-card{background:#fff;border-radius:10px;padding:16px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.1)}
 .stat-card .value{font-size:28px;font-weight:700;color:#2F5496}.stat-card .label{font-size:11px;color:#888;margin-top:4px}
-@media(max-width:600px){.stats-grid{grid-template-columns:repeat(2,1fr)}}"""
+@media(max-width:600px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
+/* ── ENERXON Chat Assistant Widget (shared across all pages) ───────────── */
+.chat-btn-robot{position:fixed;top:12px;right:16px;z-index:900;width:44px;height:44px;border-radius:10px;background:#fff;border:1px solid rgba(255,255,255,.4);box-shadow:0 2px 8px rgba(0,0,0,.18);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;transition:transform .15s,box-shadow .15s}
+.chat-btn-robot:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.22)}
+.chat-btn-robot svg{display:block;width:28px;height:28px}
+.chat-btn-robot .chat-pulse{position:absolute;top:-3px;right:-3px;width:11px;height:11px;background:#27ae60;border:2px solid #fff;border-radius:50%}
+.chat-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:999;opacity:0;pointer-events:none;transition:opacity .25s}
+.chat-backdrop.open{opacity:1;pointer-events:auto}
+.chat-panel{position:fixed;top:0;right:-460px;width:420px;height:100vh;background:#fff;box-shadow:-4px 0 24px rgba(0,0,0,.12);display:flex;flex-direction:column;transition:right .28s cubic-bezier(.4,0,.2,1);z-index:1000;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif}
+.chat-panel.open{right:0}
+.chat-panel-header{background:linear-gradient(135deg,#2F5496,#1a3a6e);color:#fff;padding:14px 16px;display:flex;align-items:center;justify-content:space-between}
+.chat-panel-header .title{font-size:15px;font-weight:600}
+.chat-panel-header .title-sub{font-size:11px;opacity:.85;margin-top:2px}
+.chat-close{background:none;border:none;color:#fff;font-size:24px;cursor:pointer;opacity:.8;width:28px;height:28px;line-height:1;padding:0}
+.chat-close:hover{opacity:1}
+.chat-body{flex:1;overflow-y:auto;padding:16px;background:#f7f9fc}
+.chat-welcome{padding:20px 8px;font-size:13px;color:#666;line-height:1.6;text-align:left}
+.chat-welcome strong{color:#2F5496;font-size:14px;display:block;margin-bottom:4px}
+.chat-msg{margin-bottom:14px;max-width:88%;word-wrap:break-word}
+.chat-msg.user{margin-left:auto}
+.chat-msg.assistant{margin-right:auto}
+.chat-bubble{padding:10px 13px;border-radius:12px;font-size:13px;line-height:1.55;white-space:pre-wrap}
+.chat-msg.user .chat-bubble{background:#2F5496;color:#fff;border-bottom-right-radius:3px}
+.chat-msg.assistant .chat-bubble{background:#fff;color:#333;border:1px solid #e8ecf1;border-bottom-left-radius:3px}
+.chat-bubble strong{font-weight:600}
+.chat-bubble table{border-collapse:collapse;margin:6px 0;font-size:12px}
+.chat-bubble td,.chat-bubble th{border:1px solid #d8dee8;padding:4px 8px;text-align:left}
+.chat-bubble th{background:#eef4fc}
+.chat-meta{font-size:10px;color:#999;margin-top:4px;padding:0 4px}
+.chat-tool-badge{display:inline-block;background:#eef4fc;color:#4472C4;border:1px solid #d0dcef;border-radius:4px;padding:1px 6px;font-size:10px;margin:2px 4px 2px 0;font-family:monospace}
+.chat-feedback{display:inline-flex;gap:6px;margin-top:6px;margin-left:2px}
+.chat-feedback button{background:none;border:1px solid #e0e4eb;border-radius:6px;padding:3px 9px;cursor:pointer;font-size:13px;color:#888}
+.chat-feedback button:hover{background:#f0f4fa;color:#2F5496}
+.chat-feedback button.selected-up{background:#e8f5e9;color:#27ae60;border-color:#a8dbb1}
+.chat-feedback button.selected-down{background:#fce4ec;color:#e74c3c;border-color:#f5b7c5}
+.chat-input-bar{border-top:1px solid #e8ecf1;padding:12px;background:#fff;display:flex;gap:8px;align-items:flex-end}
+.chat-input{flex:1;border:1px solid #d8dee8;border-radius:20px;padding:9px 14px;font-size:13px;font-family:inherit;resize:none;outline:none;max-height:80px;line-height:1.4}
+.chat-input:focus{border-color:#2F5496}
+.chat-send{background:#2F5496;color:#fff;border:none;width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.chat-send:hover{background:#1a3a6e}
+.chat-send:disabled{background:#c0c4cc;cursor:not-allowed}
+.chat-thinking{display:inline-flex;gap:4px;align-items:center;padding:4px 0}
+.chat-thinking span{width:6px;height:6px;background:#2F5496;border-radius:50%;animation:chatBounce 1.2s infinite ease-in-out}
+.chat-thinking span:nth-child(2){animation-delay:.2s}
+.chat-thinking span:nth-child(3){animation-delay:.4s}
+@keyframes chatBounce{0%,80%,100%{transform:scale(.6);opacity:.5}40%{transform:scale(1);opacity:1}}
+@media(max-width:600px){.chat-panel{width:100%;right:-100%}.chat-panel.open{right:0}.chat-btn-robot{top:10px;right:10px;width:40px;height:40px}.chat-btn-robot svg{width:24px;height:24px}}"""
 
 HOME_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>ENERXON Tracker</title><style>""" + COMMON_CSS + """

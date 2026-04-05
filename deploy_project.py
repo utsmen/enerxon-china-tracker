@@ -423,6 +423,30 @@ def deploy(args):
                     print(f"    Uploaded {uploaded} drawings...")
         print(f"  Uploaded {uploaded} drawings")
 
+    # ── Step 11: Chat Assistant Knowledge File Check ────────────
+    # The tracker chat assistant reads knowledge/<project>_qc_knowledge.md
+    # on demand. If the file is missing, the 10 knowledge tools return a
+    # friendly "no knowledge base" message and the widget still works for
+    # live data tools. We warn here so the deployer knows to add the file
+    # before QC staff start asking standards/procedure questions.
+    print("\nStep 11: Checking chat assistant knowledge file...")
+    knowledge_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'knowledge', f'{args.project}_qc_knowledge.md')
+    if os.path.exists(knowledge_path):
+        size_kb = os.path.getsize(knowledge_path) // 1024
+        print(f"  [OK] Found knowledge/{args.project}_qc_knowledge.md ({size_kb} KB)")
+        print(f"       Chat assistant will answer quality/standards questions from this file.")
+    else:
+        print(f"  [WARN] No knowledge file at knowledge/{args.project}_qc_knowledge.md")
+        print(f"         The chat assistant live-data tools will work, but standards,")
+        print(f"         WPS, NDT, ITP, and acceptance-criteria questions will return")
+        print(f"         'No QC knowledge base is configured for this project'.")
+        print(f"         To enable full chat coverage, create the markdown file with")
+        print(f"         ## section headings covering: Project Overview, Material &")
+        print(f"         Metallurgy, Welding (WPS registry), NDT, ITP Flow, Finishing,")
+        print(f"         Cutting & Fit-up, Documentation, Q&A, Glossary. Commit and")
+        print(f"         redeploy — no code change required.")
+
     # ── Summary ─────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  DEPLOYMENT COMPLETE: {args.project}")
@@ -431,6 +455,7 @@ def deploy(args):
     print(f"  Route cards parsed: {len(route_data)}")
     print(f"  Schedule: {len(schedule)} entries")
     print(f"  Settings: {settings}")
+    print(f"  Knowledge file: {'present' if os.path.exists(knowledge_path) else 'MISSING (chat assistant will have limited answers)'}")
     print(f"\n  View at: {TRACKER_URL}/project/{args.project}")
     print(f"  Report:  {TRACKER_URL}/project/{args.project}/report")
     print(f"  Password: {PASSWORD}")

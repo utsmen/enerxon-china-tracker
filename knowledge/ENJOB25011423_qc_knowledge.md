@@ -155,6 +155,107 @@ The welding engineer confirms the WPS on the weld map for each joint before fit-
 | 2″  (DN50)  | 501 | 1,002 | 94.9  |
 | **Total**   | **890** | **8,290** | **676.6** |
 
+### 3.4 Welder Field Rules — Absolute Principles for Duplex S32205
+
+Field-validated welder guidance for 423. These are the practical discipline rules that must be followed in parallel with the WPS parameters in Section 3.1. Originally compiled from a field review of a real production batch where arc strikes (IMG_1277) and back-purge contamination (IMG_1265/66/72 internal oxidation, IMG_1286/87 small-bore branch discoloration) were found and corrected.
+
+#### 3.4.1 Four Absolute Principles
+
+**① Arc strikes are strictly prohibited**
+Arc strikes on the base-material surface cause localised rapid quenching, producing very high ferrite (> 80 %) and nitride precipitation. This is a prohibited metallurgical defect in duplex stainless and cannot be "touched up" visually — it must be ground out and PT inspected. Arc initiation and crater-stop must be INSIDE the groove only. Never strike or test the arc on the pipe outer surface or HAZ. Reference case on 423: IMG_1277 in the production batch — required grinding and PT inspection after detection.
+
+**② Interpass temperature ≤ 150 °C — strictly enforced**
+Exceeding 150 °C disturbs the austenite/ferrite phase balance and increases sigma-phase precipitation risk. After every pass, temperature must be verified with a calibrated temperature crayon (Tempilstik) or infrared thermometer. **Do not rely on experience or feel.** Practical quick-check: if the joint feels uncomfortably hot to the touch, stop and wait — but this is only a secondary confirmation, not a replacement for measurement.
+
+**③ Heat input 0.5 – 2.5 kJ/mm**
+- **Too high** (> 2.5 kJ/mm): slow cooling → ferrite too low (< 35 %) → higher sigma-phase risk, loss of toughness.
+- **Too low** (< 0.5 kJ/mm): fast cooling → ferrite too high (> 65 %) → nitrogen loss, embrittlement.
+- Duplex has a very narrow process window. Weld strictly per the WPS; never improvise amps/volts/travel speed.
+- SAW especially can drift above 2.5 kJ/mm if not watched; measure and record on every pass.
+
+**④ Ferrite content 35 – 65 % (weld) / 30 – 70 % (HAZ)**
+This is the **only** true metallurgical indicator for duplex steel.
+- Heat-tint colour is NOT a metallurgical indicator (see clarification below).
+- Ferrite below 35 % → SCC (stress corrosion cracking) risk.
+- Ferrite above 65 % → embrittlement and reduced toughness.
+- Measure with Fischer Feritscope FMP30 per ITP step 150, 6 points per weld (3 cap + 3 HAZ, 120° intervals).
+
+#### 3.4.2 Back Purging / Root Shielding Gas
+
+This was the single biggest issue found in the reference production batch (internal root oxidation IMG_1265/66/72; severe branch-weld discoloration IMG_1286/87). Back-purge discipline is non-negotiable:
+
+- **Backing gas:** pure Argon 99.99 %, OR **Argon + 2 % N₂** (Ar + 2 % N₂ is recommended for duplex because the small nitrogen addition compensates nitrogen loss from the weld pool and helps restore austenite; either is acceptable but must be controlled end-to-end).
+- **Oxygen content before arc strike:** verify with an **oxygen analyser** at the vent, below the project specification limit (for 423 the project limit is **< 0.1 %**, per NORSOK M-601 and Section 7.3). **Do not estimate by time alone** — measure every joint.
+- **Purge volume:** purge for a minimum of **5 – 10 times the internal pipe volume** before starting the root pass.
+- **Positive pressure maintained throughout welding** and until the weld has cooled below **300 °C** on the root side. Do not shut the purge off the moment the cap is complete.
+- **Pipe end sealing:** water-soluble purge paper, aluminium foil tape, or inflatable purge plugs. Ends must be reliably sealed so the argon does not escape. Water-soluble paper is ideal because it dissolves during hydrotest.
+- **Per-joint record:** purge time, gas flow rate, O₂ reading at start of welding, and maintenance during welding must be written on the welding log for every weld.
+
+**Important clarification — heat tint vs metallurgy.** Heat-tint colour (straw → brown → blue → dark grey / black) is a SURFACE indicator of gas shielding quality and a discipline check. It is NOT a direct indicator of sigma / chi phase precipitation, and pickling per ASTM A380 can fully restore the surface corrosion resistance of heat-tinted areas. However, dark discoloration is clear evidence that back-purge was inadequate during welding, which is a process discipline failure that must be corrected at the source — not hidden by downstream pickling. If the inside of a joint comes out dark, the root cause is back-purge contamination or insufficient flow, and the welder / procedure must be addressed before the next joint.
+
+#### 3.4.3 GTAW Root + Fill — Field Key Points
+
+1. **Filler metal:** AWS **ER2209** Ø 2.4 mm (or Ø 2.5 mm per WPS-001). Using ER308L, ER316L, or any 304/316 filler is strictly prohibited — the filler must over-match in nitrogen and nickel to maintain phase balance.
+2. **Shielding gas (torch side):** pure Argon 99.99 %, flow rate 10 – 15 L/min.
+3. **Tungsten electrode:** 2 % ceriated (grey band) Ø 2.4 mm, ground longitudinally (grooves parallel to the axis of the tungsten, not across). Thoriated tungsten is acceptable but ceriated is preferred for cleaner arc starts and longer tip life on duplex.
+4. **Minimum two passes on every joint:** after the root pass, at least one hot / cover pass is required so the root is reheated. This reheat is what helps restore the austenite phase in the root bead and is essential for phase balance. Single-pass root-only joints are prohibited on 423.
+5. **Interpass cleaning:** stainless-steel wire brush only, dedicated to duplex work and never used on carbon steel. Carbon-steel brushes are strictly prohibited — they embed iron into the surface and cause pitting. Grinding between passes, if required, must use stainless-only flap discs / wheels.
+6. **Arc start and stop:** always inside the groove. At the end of each pass, fill the crater (taper down amps or use the foot pedal to walk out the arc) to prevent crater cracking — duplex is sensitive to crater cracks.
+7. **Tack welds:** made with the same filler (ER2209) and the same back-purge discipline as the root pass. Tacks must be ground flush or fully consumed into the root; never leave a tack with its own start/stop signature in the finished weld.
+
+#### 3.4.4 GTAW Root + SAW Fill / Cap — Field Key Points (WPS-002)
+
+1. **GTAW root:** as Section 3.4.3 — ER2209, pure Ar torch gas, full back-purge, minimum hot pass on top of the root before transitioning.
+2. **SAW transition:** only after the GTAW root AND at least one GTAW hot pass are complete. Never go straight from bare GTAW root to SAW fill — the transition thermal shock plus SAW heat will disturb the root phase balance.
+3. **SAW wire:** ER2209 matched with a **duplex-specific basic flux** — qualified products include Lincoln 880M, ESAB OK 10.93, or equivalent. Standard carbon-steel SAW fluxes are prohibited.
+4. **Flux must be dry:** bake new / re-exposed flux at 300 – 350 °C for 2 hours before use. Keep in a heated holding oven at 100 – 150 °C during production. Moisture in SAW flux is a direct source of hydrogen and porosity and will also oxidise the weld pool — a very common SAW failure mode on duplex.
+5. **Heat input control:** SAW can easily exceed 2.5 kJ/mm if the operator increases amps or slows travel to build a bigger bead. **Heat input must stay ≤ 2.5 kJ/mm (PQR-002 qualified limit is 21.60 kJ/cm ≈ 2.16 kJ/mm).** Measure every pass.
+6. **Interpass temperature:** measure after every SAW pass; start the next pass only when the joint has cooled to ≤ 150 °C. SAW deposits a lot of heat per pass, so the cooling wait between SAW passes is typically longer than GTAW.
+7. **Bead strategy:** narrow multi-pass welds are **strongly preferred** over wide weave beads. Narrow beads give better phase balance (faster cooling per bead), less heat accumulation, and better refinement of the underlying passes on reheat. Wide weave beads are a common cause of high-ferrite problems on duplex SAW.
+
+#### 3.4.5 Things to Avoid When Welding Duplex Spools
+
+Non-negotiable "do-not" list for duplex fabrication — every welder and fitter must know these:
+
+- **No carbon-steel tools, brushes, clamps, or grinding discs anywhere near duplex.** Iron contamination is a point-corrosion initiator and will show up on the Ferroxyl test. Stainless-only or aluminium-oxide discs.
+- **No marker pens containing halogens** (most general-purpose marker inks). Use duplex-approved low-halogen markers only. Clean off any marks before welding in the HAZ zone.
+- **No arc strikes outside the groove.** See 3.4.1 ①.
+- **No single-pass roots.** Always follow with at least a hot pass for phase recovery. See 3.4.3 ④.
+- **No wrong filler.** ER2209 only. Never ER308L / ER316L / ER309L — these are austenitic and will unbalance the weld. See 3.4.3 ①.
+- **No incorrect interpass temperature.** Strictly ≤ 150 °C. Measure, don't guess. See 3.4.1 ②.
+- **No back-purge shortcuts.** Always measure O₂, always time the purge volume, always seal the ends, always maintain positive pressure until the root is below 300 °C. See 3.4.2.
+- **No PVC plastic, PVC tape, or chlorinated markers.** Chloride contamination causes pitting and stress corrosion cracking on duplex. PE/PP only for any film or plug material in contact with the pipe.
+- **No oxy-fuel flame cutting on duplex pipe.** Use plasma, abrasive saw, or mechanical cutting only. Oxy-fuel introduces iron-rich oxide contamination in the cut area.
+- **No carbon-steel clamps or fixtures touching the pipe.** Rent / build dedicated stainless-faced fixtures, or use thick rubber / PE spacers between any CS clamp and the duplex pipe.
+- **No grinding the HAZ after welding unless absolutely necessary** — NORSOK M-630 prefers as-welded surfaces. If grinding is done, it must use stainless-dedicated flap discs and be followed by pickling + passivation + ferroxyl.
+- **No leaving hot work near duplex pipe** — sparks from CS work done nearby will contaminate the duplex surface. Erect a physical barrier or schedule duplex and CS work in different zones.
+- **No reusing consumables once the flux can / electrode can has been opened beyond the manufacturer's exposure time.** Bake or discard per flux/electrode data sheet.
+- **No welding on a wet, oily, painted, marked, or otherwise contaminated surface.** Wipe with IPA, dry, and visually verify before striking the arc.
+- **No V-stamps or hard-punch markings on the pipe body.** They are crack initiation sites on duplex. Vibro-peen only, away from weld and HAZ (see Section 6 Finishing).
+
+#### 3.4.6 Field Inspection Checklist (per joint)
+
+Quick field checklist welders and QC should follow for each 423 duplex weld:
+
+- [ ] Joint groove clean, dry, no oil / marker / oxide / iron contamination
+- [ ] Fit-up within spec (root gap 1–3 mm, bevel, hi-lo, cleanliness)
+- [ ] Both pipe ends sealed (water-soluble paper / tape / plugs) for back purge
+- [ ] Back purge started, O₂ measured at vent, below 0.1 % before arc strike
+- [ ] Back purge volume ≥ 5–10 × internal pipe volume, time logged
+- [ ] Preheat ≥ 10 °C verified (condensation removed in cold conditions)
+- [ ] Filler metal is ER2209, correct diameter, lot number logged
+- [ ] Tungsten is 2 % ceriated Ø 2.4 mm, longitudinally ground
+- [ ] Shielding gas pure Ar 99.99 % at 10–15 L/min, verified
+- [ ] Arc strike inside groove only — never on base material surface
+- [ ] Interpass ≤ 150 °C verified with crayon or IR thermometer after every pass
+- [ ] Hot pass completed on top of GTAW root before any SAW transition
+- [ ] Stainless-only wire brush for interpass cleaning
+- [ ] Crater filled at every arc-stop
+- [ ] Heat input in range 0.5–2.5 kJ/mm per pass, recorded
+- [ ] Back purge maintained until root cooled below 300 °C
+- [ ] Weld ID stamp and welder stamp applied per weld map
+- [ ] Back purge time, flow, O₂ reading, ferrite reading recorded on welding log
+
 ---
 
 ## 4. NDT Procedures (无损检测)

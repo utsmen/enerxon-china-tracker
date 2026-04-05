@@ -1250,7 +1250,11 @@ def _run_chat_turn(project, message, history):
         return ("服务未就绪：ANTHROPIC_API_KEY 未配置。请联系管理员。\n(Chat service not ready: API key not configured.)", [])
 
     model = get_qc_setting(project, 'chat_model') or 'claude-haiku-4-5'
-    client = anthropic.Anthropic(api_key=api_key)
+    # max_retries=0 so rate-limit errors fail fast and hit our exception
+    # handler below instead of retrying inside the SDK for 25+ seconds and
+    # tripping Render's gunicorn worker timeout (which would surface as a
+    # generic 500 to the user).
+    client = anthropic.Anthropic(api_key=api_key, max_retries=0)
 
     tool_schemas = [schema for (_fn, schema) in CHAT_TOOLS.values()]
 

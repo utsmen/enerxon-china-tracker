@@ -962,9 +962,10 @@ def _split_sections(md):
         sections.append((cur_head, '\n'.join(cur_body).strip()))
     return sections
 
-def _knowledge_section(project, *keywords, limit=3):
+def _knowledge_section(project, *keywords, limit=2, max_chars_per_section=4000):
     """Return sections of the project knowledge file whose heading contains any keyword.
-    Case-insensitive substring match. Limits to `limit` sections to keep token use low.
+    Case-insensitive substring match. Limits to `limit` sections and caps each
+    section to `max_chars_per_section` chars to stay within API token budgets.
     Language for the knowledge file is read from Flask request-local g.chat_lang
     (set by _run_chat_turn). Defaults to 'en' if not set (e.g. when called outside
     a chat request)."""
@@ -976,11 +977,19 @@ def _knowledge_section(project, *keywords, limit=3):
     if not sections:
         return "Knowledge file is empty or malformed."
     kws = [k.lower() for k in keywords if k]
+
+    def _pack(head, body):
+        # Cap each section so one matched ## block cannot consume the entire
+        # token budget. Large sections are trimmed with an explicit note.
+        if len(body) > max_chars_per_section:
+            body = body[:max_chars_per_section] + f"\n\n[... section truncated at {max_chars_per_section} chars — ask a more specific follow-up for additional detail ...]"
+        return f"## {head}\n\n{body}"
+
     matched = []
     for head, body in sections:
         hl = head.lower()
         if not kws or any(k in hl for k in kws):
-            matched.append(f"## {head}\n\n{body}")
+            matched.append(_pack(head, body))
             if len(matched) >= limit:
                 break
     if not matched:
@@ -988,7 +997,7 @@ def _knowledge_section(project, *keywords, limit=3):
         for head, body in sections:
             bl = body.lower()
             if any(k in bl for k in kws):
-                matched.append(f"## {head}\n\n{body}")
+                matched.append(_pack(head, body))
                 if len(matched) >= limit:
                     break
     if not matched:
@@ -1268,13 +1277,25 @@ def _run_chat_turn(project, message, history):
 
     tools_used = []
     for _iter in range(8):  # safety cap on tool-use loops
-        resp = client.messages.create(
-            model=model,
-            max_tokens=1500,
-            system=CHAT_SYSTEM_PROMPT,
-            tools=tool_schemas,
-            messages=msgs,
-        )
+        try:
+            resp = client.messages.create(
+                model=model,
+                max_tokens=1500,
+                system=CHAT_SYSTEM_PROMPT,
+                tools=tool_schemas,
+                messages=msgs,
+            )
+        except anthropic.RateLimitError:
+            msg_zh = "系统繁忙：Anthropic API 速率限制。请等待 1 分钟后重试。"
+            msg_en = "System busy: Anthropic API rate limit reached. Please wait 1 minute and try again."
+            return (msg_zh + "\n\n" + msg_en, tools_used)
+        except anthropic.APIStatusError as e:
+            status = getattr(e, 'status_code', 'unknown')
+            return (f"API error ({status}): please try again. / 服务异常（{status}），请稍后重试。", tools_used)
+        except anthropic.APIConnectionError:
+            return ("Network error connecting to Anthropic. / 连接 Anthropic 服务失败，请稍后重试。", tools_used)
+        except Exception as e:
+            return (f"Unexpected error: {type(e).__name__}. Please try again. / 系统异常（{type(e).__name__}），请稍后重试。", tools_used)
         if resp.stop_reason != 'tool_use':
             # Collect final text blocks
             text_out = ''.join([b.text for b in resp.content if getattr(b, 'type', None) == 'text'])

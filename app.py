@@ -145,6 +145,8 @@ def init_db():
             # Ensure spool_type column exists on old spools tables and backfill NULLs
             "ALTER TABLE spools ADD COLUMN spool_type TEXT DEFAULT 'SPOOL'",
             "UPDATE spools SET spool_type = 'SPOOL' WHERE spool_type IS NULL",
+            # Backfill: any spool named 'STRAIGHT PIPE ...' is by definition a straight pipe
+            "UPDATE spools SET spool_type = 'STRAIGHT' WHERE spool_id LIKE 'STRAIGHT PIPE%' AND spool_type <> 'STRAIGHT'",
             # Migrate legacy schedule task_type names to phase names
             "UPDATE schedule SET task_type = 'fab' WHERE task_type IN ('fabrication', 'Fabricacion')",
             "UPDATE schedule SET task_type = 'paint' WHERE task_type IN ('painting', 'Pintura')",
@@ -171,6 +173,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS project_settings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, key TEXT NOT NULL, value TEXT DEFAULT '', UNIQUE(project, key));
             CREATE TABLE IF NOT EXISTS drawings (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, pdf_data BLOB NOT NULL, UNIQUE(project, spool_id));
             CREATE TABLE IF NOT EXISTS project_steps (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, step_number INTEGER NOT NULL, name_en TEXT NOT NULL, name_cn TEXT NOT NULL DEFAULT '', weight INTEGER DEFAULT 5, category TEXT NOT NULL, hours_fixed REAL DEFAULT 2.0, hours_variable TEXT DEFAULT '', spool_type TEXT DEFAULT 'ALL', display_order INTEGER NOT NULL, is_conditional INTEGER DEFAULT 0, is_hold_point INTEGER DEFAULT 0, is_release INTEGER DEFAULT 0, phase TEXT DEFAULT 'fab', counts_for_production INTEGER DEFAULT 1, UNIQUE(project, step_number));
+            UPDATE spools SET spool_type = 'STRAIGHT' WHERE spool_id LIKE 'STRAIGHT PIPE%' AND spool_type <> 'STRAIGHT';
             UPDATE schedule SET task_type = 'fab' WHERE task_type IN ('fabrication', 'Fabricacion');
             UPDATE schedule SET task_type = 'paint' WHERE task_type IN ('painting', 'Pintura');
             CREATE TABLE IF NOT EXISTS qc_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, report_subtype TEXT DEFAULT '', status TEXT DEFAULT 'draft', inspector_name TEXT DEFAULT '', inspector_date TEXT DEFAULT '', tpi_name TEXT DEFAULT '', tpi_date TEXT DEFAULT '', data TEXT DEFAULT '{}', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), created_by TEXT DEFAULT '', UNIQUE(project, spool_id, report_type, report_subtype));

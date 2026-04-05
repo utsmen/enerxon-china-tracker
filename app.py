@@ -293,9 +293,6 @@ def spool_hours(spool_row, completed_steps, settings, steps_def):
         if step['hours_variable'] == 'surface' and step['phase']:
             surface_count_by_phase[step['phase']] = surface_count_by_phase.get(step['phase'], 0) + 1
 
-    # Determine which phases need surface area (contain surface_treatment steps)
-    phases_with_surface = set(surface_count_by_phase.keys())
-
     # Accumulate per phase
     phase_totals = {}  # {phase: {total, done}}
     weld_hrs = 0.0; surface_hrs = 0.0
@@ -319,8 +316,6 @@ def spool_hours(spool_row, completed_steps, settings, steps_def):
             hrs = total_surface_hrs / n_surface if n_surface > 0 else 0
             surface_hrs += hrs
         else:
-            # Fixed hours — skip if this phase requires surface and spool has none
-            if phase in phases_with_surface and surface <= 0: continue
             hrs = float(step.get('hours_fixed', 2.0) or 2.0)
 
         if phase not in phase_totals: phase_totals[phase] = {'total': 0.0, 'done': 0.0}

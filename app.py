@@ -1150,8 +1150,6 @@ CHAT_TOOLS = {
 
 CHAT_SYSTEM_PROMPT = """You are the ENERXON Production & Quality Assistant (ENERXON 生产与质量助手) for the ENERXON China Tracker website.
 
-LANGUAGE RULE (STRICT): Match the language of the user's MOST RECENT message exactly. If the user's last message is in Chinese, reply ONLY in Chinese. If the user's last message is in English, reply ONLY in English. Never mix languages in a single reply. Default to Simplified Chinese (简体中文) only when the input is ambiguous or has no clear language.
-
 YOU HELP with:
 - Production progress (spools, diameters, phase progress, recent activity)
 - Quality control procedures (WPS/PQR, NDT: VT/RT/PT/MT/PMI, ferrite, ferroxyl, dimensional, cutting, fit-up, metallographic)
@@ -1165,10 +1163,29 @@ RULES:
 4. Always pass the current project ID to every tool call. The project ID is provided in the first user message.
 5. Be CONCISE. Cite spool IDs, report types, ITP steps, or standards when relevant.
 6. If a tool returns empty, "No section matching...", or "No QC knowledge base...", you MUST tell the user that no data is available in the project knowledge base. Do NOT guess, do NOT provide values from general engineering knowledge, do NOT cite typical industry ranges. The user needs to know whether the answer came from their project documents or not. If the knowledge base is missing, tell them to contact the QC manager and stop.
-7. If the question is outside production or quality (pricing, contracts, suppliers, customers, HR, logistics costs), reply in Chinese:
-"抱歉，我只能回答生产和质量相关的问题。"
-8. Format answers for Chinese production/QC staff — plain language, practical, with the numeric acceptance values and the applicable standard where relevant.
-9. Do not expose internal tool names to the user in the answer text."""
+7. If the question is outside production or quality (pricing, contracts, suppliers, customers, HR, logistics costs), reply in the user's language with: "Sorry, I can only answer production and quality questions." / "抱歉，我只能回答生产和质量相关的问题。"
+8. Do not expose internal tool names to the user in the answer text.
+
+═══════════════════════════════════════════════════════════════════
+LANGUAGE RULE — THIS OVERRIDES EVERY OTHER INSTRUCTION:
+
+Detect the language of the user's MOST RECENT message and reply in THAT SAME LANGUAGE ONLY.
+
+- User wrote Chinese (contains 汉字) → reply 100% in Simplified Chinese. No English words except proper nouns (WPS-001, SPL-045, ASME, GTAW, etc).
+- User wrote English (Latin letters only, no 汉字) → reply 100% in English. No Chinese characters at all.
+- Mixed or ambiguous input → reply in Simplified Chinese.
+
+This rule applies EVEN THOUGH the primary audience is Chinese staff. If an English speaker asks a question, answer them in English. Do not translate the reply to Chinese. Do not append a Chinese version. Match the user's language exactly, every single time.
+═══════════════════════════════════════════════════════════════════"""
+
+def _detect_language(text):
+    """Return 'zh' if the text contains any CJK character, else 'en'. Deterministic, no LLM."""
+    if not text:
+        return 'zh'
+    for ch in text:
+        if '\u4e00' <= ch <= '\u9fff':
+            return 'zh'
+    return 'en'
 
 def _run_chat_turn(project, message, history):
     """Run one chat turn through Anthropic with tool use. Returns (reply_text, tools_used_list)."""
@@ -1185,6 +1202,15 @@ def _run_chat_turn(project, message, history):
 
     tool_schemas = [schema for (_fn, schema) in CHAT_TOOLS.values()]
 
+    # Deterministic per-turn language directive — prepended to system prompt so
+    # it overrides any bias the model has toward the audience's default language.
+    lang = _detect_language(message)
+    if lang == 'en':
+        lang_directive = "CRITICAL OVERRIDE: The user just asked a question in ENGLISH. You MUST reply 100% in English. Do not use any Chinese characters (汉字) in your reply. No bilingual output. English only."
+    else:
+        lang_directive = "CRITICAL OVERRIDE: The user just asked a question in Chinese. You MUST reply 100% in Simplified Chinese. No English sentences (proper nouns like WPS-001, ASME, SPL-045 are fine)."
+    system_prompt = lang_directive + "\n\n" + CHAT_SYSTEM_PROMPT
+
     # Build message list: trimmed history + project-tagged user message
     msgs = []
     for h in (history or [])[-10:]:
@@ -1198,7 +1224,7 @@ def _run_chat_turn(project, message, history):
         resp = client.messages.create(
             model=model,
             max_tokens=1500,
-            system=CHAT_SYSTEM_PROMPT,
+            system=system_prompt,
             tools=tool_schemas,
             messages=msgs,
         )
@@ -5027,7 +5053,7 @@ async function load(){
       const col = ringColors[idx % ringColors.length];
       const pct = pp.pct || 0;
       const dashLen = ringCircum * (pct/100);
-      const emoji = idx === postProd.length - 1 && postProd.length > 1 ? '\ud83d\udea2' : '\ud83d\udce6';
+      const emoji = idx === postProd.length - 1 && postProd.length > 1 ? '\U0001F6A2' : '\U0001F4E6';
       html += `<div class="pp-gate">
         <div class="pp-ring">
           <svg width="104" height="104" viewBox="0 0 104 104">
@@ -5082,7 +5108,7 @@ async function load(){
         : '';
       html += `<div class="ship-row ${sh.status}">
         <div>
-          <div class="ship-head">\ud83d\udea2 SH-${String(sh.shipment_number).padStart(3,'0')}${sh.description?' \u00b7 '+sh.description:''}</div>
+          <div class="ship-head">\U0001F6A2 SH-${String(sh.shipment_number).padStart(3,'0')}${sh.description?' \u00b7 '+sh.description:''}</div>
           <div class="ship-meta">${sh.assigned} spools \u00b7 ${etaLine}</div>
           <div class="ship-counts">${countsLine}</div>
           ${bars}

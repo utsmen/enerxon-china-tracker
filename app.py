@@ -144,6 +144,8 @@ def init_db():
             "ALTER TABLE project_steps ADD COLUMN counts_for_production INTEGER DEFAULT 1",
             # Ensure spool_type column exists on old spools tables and backfill NULLs
             "ALTER TABLE spools ADD COLUMN spool_type TEXT DEFAULT 'SPOOL'",
+            # Shipment assignment per spool (nullable FK to shipments.shipment_number)
+            "ALTER TABLE spools ADD COLUMN shipment_number INTEGER",
             "UPDATE spools SET spool_type = 'SPOOL' WHERE spool_type IS NULL",
             # Backfill: any spool named 'STRAIGHT PIPE ...' is by definition a straight pipe
             "UPDATE spools SET spool_type = 'STRAIGHT' WHERE spool_id LIKE 'STRAIGHT PIPE%' AND spool_type <> 'STRAIGHT'",
@@ -157,6 +159,9 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_qc_images_ps ON qc_images(project, spool_id, report_type)",
             "CREATE TABLE IF NOT EXISTS qc_inspectors (id SERIAL PRIMARY KEY, name TEXT NOT NULL, role TEXT DEFAULT '', signature_data TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW(), UNIQUE(name))",
             "CREATE TABLE IF NOT EXISTS shipments (id SERIAL PRIMARY KEY, project TEXT NOT NULL, shipment_number INTEGER NOT NULL, description TEXT DEFAULT '', etd DATE, transit_days INTEGER DEFAULT 45, notes TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW(), UNIQUE(project, shipment_number))",
+            # Chat agent log (production & quality assistant)
+            "CREATE TABLE IF NOT EXISTS chat_log (id SERIAL PRIMARY KEY, project TEXT NOT NULL, user_msg TEXT NOT NULL, assistant_msg TEXT NOT NULL, tools_used TEXT DEFAULT '[]', feedback TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_chat_log_project ON chat_log(project, created_at)",
         ]
         for stmt in pg_statements:
             try: cur.execute(stmt)
@@ -180,6 +185,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS qc_images (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, spool_id TEXT NOT NULL, report_type TEXT NOT NULL, image_data BLOB NOT NULL, filename TEXT DEFAULT '', mime_type TEXT DEFAULT 'image/jpeg', caption TEXT DEFAULT '', uploaded_at TEXT DEFAULT (datetime('now')), uploaded_by TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS qc_inspectors (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, role TEXT DEFAULT '', signature_data TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
             CREATE TABLE IF NOT EXISTS shipments (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, shipment_number INTEGER NOT NULL, description TEXT DEFAULT '', etd TEXT, transit_days INTEGER DEFAULT 45, notes TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(project, shipment_number));
+            CREATE TABLE IF NOT EXISTS chat_log (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, user_msg TEXT NOT NULL, assistant_msg TEXT NOT NULL, tools_used TEXT DEFAULT '[]', feedback TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
+            CREATE INDEX IF NOT EXISTS idx_chat_log_project ON chat_log(project, created_at);
         """); c.close()
 
 # ── QC Report Type Registry ──────────────────────────────────────────────────
@@ -500,7 +507,10 @@ def schedule_status(project, bulk=None):
         diff = actual_pct - expected_pct
         diam_fc = fc_diams.get(dk, {})
         fc_end = parse_date(diam_fc.get('forecast_end')) if diam_fc.get('forecast_end') else None
-        if not diam_fc.get('started') and actual_pct == 0:
+        if diam_fc.get('completed'):
+            status = 'completed'
+            diff = 0
+        elif not diam_fc.get('started') and actual_pct == 0:
             status = 'not_started'
         elif fc_end and target_end:
             days_diff = (target_end - fc_end).days
@@ -528,6 +538,7 @@ def schedule_status(project, bulk=None):
     statuses = [r['status'] for r in result if r['status'] != 'not_started']
     if 'delayed' in statuses: overall_status = 'delayed'
     elif 'at_risk' in statuses: overall_status = 'at_risk'
+    elif statuses and all(s == 'completed' for s in statuses): overall_status = 'completed'
     elif statuses: overall_status = 'on_time'
     else: overall_status = 'not_started'
     return {'diameters': result, 'overall_status': overall_status, 'today': str(today), 'phase_order': phase_order}
@@ -633,7 +644,27 @@ def forecast_production(project, bulk=None):
         total_raf = sum(i['raf_inches'] for i in diam_infos)
         total_m2 = sum(i['surface_m2'] for i in diam_infos)
 
-        if started:
+        is_completed = False
+        if remaining_hrs <= 0 and started:
+            # Diameter is production-complete — end date is a measured fact, not a forecast.
+            # Query MAX(completed_at) from progress for this diameter's spools, restricted
+            # to production-counting steps (counts_for_production=1).
+            prod_step_nums = [s['step_number'] for s in steps_def if s.get('counts_for_production', 1)]
+            spool_ids = [i['spool']['spool_id'] for i in diam_infos if i.get('spool')]
+            last_date = None
+            if spool_ids and prod_step_nums:
+                ph_s = ','.join(['?'] * len(spool_ids))
+                ph_p = ','.join(['?'] * len(prod_step_nums))
+                row = db_fetchone(
+                    f"SELECT MAX(completed_at) as last FROM progress "
+                    f"WHERE project=? AND completed=1 AND spool_id IN ({ph_s}) AND step_number IN ({ph_p})",
+                    tuple([project] + spool_ids + prod_step_nums))
+                if row and row.get('last'):
+                    last_date = parse_date(row['last'])
+            forecast_end = last_date or today
+            forecast_days = 0
+            is_completed = True
+        elif started:
             first_activity = diam_first_activity.get(dk, prod_start)
             diam_elapsed = max(1, (today - first_activity).days)
             actual_rate = done_hrs / diam_elapsed
@@ -649,7 +680,9 @@ def forecast_production(project, bulk=None):
         else:
             forecast_end = committed_end; forecast_days = (committed_end - today).days
 
-        if forecast_end < committed_end:
+        # Only floor to committed_end for in-progress forecasts. Completed diameters
+        # report their actual completion date even if it precedes committed_end.
+        if not is_completed and forecast_end < committed_end:
             forecast_end = committed_end; forecast_days = (committed_end - today).days
 
         fc_result[dk] = {
@@ -660,7 +693,7 @@ def forecast_production(project, bulk=None):
             'remaining_hrs': round(remaining_hrs, 1),
             'remaining_raf': round(remaining_raf, 0), 'remaining_m2': round(remaining_m2, 1),
             'total_raf': round(total_raf, 0), 'total_m2': round(total_m2, 1),
-            'spool_count': len(diam_infos), 'started': started,
+            'spool_count': len(diam_infos), 'started': started, 'completed': is_completed,
         }
         if forecast_end and (overall_forecast is None or forecast_end > overall_forecast):
             overall_forecast = forecast_end
@@ -671,6 +704,125 @@ def forecast_production(project, bulk=None):
         'actual_weld_ipd': actual_weld_ipd, 'actual_paint_m2d': actual_paint_m2d,
         'days_elapsed': global_days_elapsed,
     }
+
+def post_production_status(project, bulk=None, steps_def=None):
+    """Per post-production step (counts_for_production=0): applicable spool count,
+    completed count, completion %, last completion date. Generalised — no hardcoded
+    step numbers or names. Returns list ordered by display_order."""
+    if bulk is None: bulk = bulk_spool_progress(project)
+    if steps_def is None: steps_def = get_project_steps(project)
+    pp_steps = [s for s in steps_def if not s.get('counts_for_production', 1)]
+    pp_steps = sorted(pp_steps, key=lambda s: s.get('display_order') or s.get('step_number', 0))
+    result = []
+    for step in pp_steps:
+        sn = step['step_number']
+        st_type = step.get('spool_type', 'ALL') or 'ALL'
+        is_cond = step.get('is_conditional', 0)
+        applicable = []
+        for sid, info in bulk.items():
+            sp = info.get('spool', {})
+            if st_type != 'ALL' and (sp.get('spool_type', 'SPOOL') or 'SPOOL') != st_type: continue
+            if is_cond and not sp.get('has_branches'): continue
+            applicable.append(sid)
+        done_ids = [sid for sid in applicable if sn in bulk.get(sid, {}).get('done_steps', set())]
+        last_date = None
+        if done_ids:
+            ph = ','.join(['?'] * len(done_ids))
+            row = db_fetchone(
+                f"SELECT MAX(completed_at) as last FROM progress "
+                f"WHERE project=? AND step_number=? AND completed=1 AND spool_id IN ({ph})",
+                tuple([project, sn] + done_ids))
+            if row and row.get('last'):
+                last_date = str(row['last'])[:10]
+        total = len(applicable)
+        done = len(done_ids)
+        result.append({
+            'step_number': sn,
+            'name_en': step.get('name_en', ''), 'name_cn': step.get('name_cn', ''),
+            'total': total, 'completed': done,
+            'pct': round(done / total * 100, 1) if total else 0.0,
+            'last_date': last_date,
+        })
+    return result
+
+
+def shipment_status(project, bulk=None, steps_def=None):
+    """Per shipment: assigned spool count + per post-production step progress + derived
+    status. The 'shipped' gate by convention is the LAST post-production step by
+    display_order; 'packed' is the aggregate of all preceding pp steps. Zero hardcoded
+    step numbers or names. Empty list if no shipments configured."""
+    if bulk is None: bulk = bulk_spool_progress(project)
+    if steps_def is None: steps_def = get_project_steps(project)
+    pp_steps = sorted(
+        [s for s in steps_def if not s.get('counts_for_production', 1)],
+        key=lambda s: s.get('display_order') or s.get('step_number', 0))
+    shipments = db_fetchall("SELECT * FROM shipments WHERE project=? ORDER BY shipment_number", (project,))
+    if not shipments: return []
+    # Last pp step = "shipped" gate; all prior pp steps = "packed" gates
+    shipped_step = pp_steps[-1]['step_number'] if pp_steps else None
+    pack_steps = [s['step_number'] for s in pp_steps[:-1]] if len(pp_steps) > 1 else (
+        [s['step_number'] for s in pp_steps] if pp_steps else [])
+    result = []
+    for ship in shipments:
+        num = ship.get('shipment_number')
+        desc = ship.get('description', '') or ''
+        etd = str(ship.get('etd') or '')[:10] if ship.get('etd') else None
+        transit = int(ship.get('transit_days') or 0)
+        eta = None
+        if etd and transit:
+            try:
+                etd_dt = parse_date(etd)
+                if etd_dt:
+                    eta = (etd_dt + timedelta(days=transit)).strftime('%Y-%m-%d')
+            except Exception: pass
+        # Assigned spools = spools with shipment_number matching this row
+        assigned = [sid for sid, info in bulk.items()
+                    if info.get('spool', {}).get('shipment_number') == num]
+        assigned_count = len(assigned)
+        # Packed = all pack_steps complete for that spool (or shipped-only model if only one pp step)
+        packed_ids = []
+        shipped_ids = []
+        for sid in assigned:
+            done = bulk.get(sid, {}).get('done_steps', set())
+            if pack_steps and all(ps in done for ps in pack_steps):
+                packed_ids.append(sid)
+            if shipped_step and shipped_step in done:
+                shipped_ids.append(sid)
+        packed_count = len(packed_ids)
+        shipped_count = len(shipped_ids)
+        # Shipped date = MAX(completed_at) of shipped_step for shipped spools in this shipment
+        shipped_date = None
+        if shipped_ids and shipped_step:
+            ph = ','.join(['?'] * len(shipped_ids))
+            row = db_fetchone(
+                f"SELECT MAX(completed_at) as last FROM progress "
+                f"WHERE project=? AND step_number=? AND completed=1 AND spool_id IN ({ph})",
+                tuple([project, shipped_step] + shipped_ids))
+            if row and row.get('last'):
+                shipped_date = str(row['last'])[:10]
+        # Derived status
+        if assigned_count == 0:
+            status = 'unassigned'
+        elif shipped_count == assigned_count:
+            status = 'shipped'
+        elif shipped_count > 0:
+            status = 'partial'
+        elif packed_count == assigned_count:
+            status = 'ready'
+        else:
+            status = 'pending'
+        result.append({
+            'shipment_number': num,
+            'description': desc,
+            'etd': etd, 'transit_days': transit, 'eta': eta,
+            'assigned': assigned_count,
+            'packed': packed_count,
+            'shipped': shipped_count,
+            'shipped_date': shipped_date,
+            'status': status,
+        })
+    return result
+
 
 def past_hold_point_count(project):
     """Count spools that have passed the hold point (RT or equivalent)."""
@@ -713,6 +865,8 @@ def generate_report_data(project):
     st = project_stats(project)
     sched = schedule_status(project, bulk)
     forecast = forecast_production(project, bulk)
+    post_prod = post_production_status(project, bulk, steps_def)
+    ship_data = shipment_status(project, bulk, steps_def)
     today = date.today().strftime('%Y-%m-%d')
     today_act = daily_activity(project, today)
     steps_today = len([a for a in today_act if a.get('action') == 'completed'])
@@ -734,7 +888,381 @@ def generate_report_data(project):
         'step_names': step_names, 'released_today': released_today,
         'hold_steps': list(hold_steps), 'release_steps': list(release_steps),
         'phase_order': get_phase_order(steps_def),
+        'post_production': post_prod, 'shipment_status': ship_data,
     }
+
+# ── Chat Agent — ENERXON Production & Quality Assistant ─────────────────────
+# Generalised: every tool takes `project` as parameter. Knowledge file path is
+# derived from project id — new projects drop in knowledge/<project>_qc_knowledge.md
+# with zero code change. No hardcoded project IDs anywhere in this section.
+
+_KNOWLEDGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'knowledge')
+
+def _load_knowledge_file(project):
+    """Load the project's QC knowledge markdown file. Returns None if not present."""
+    path = os.path.join(_KNOWLEDGE_DIR, f'{project}_qc_knowledge.md')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception:
+        return None
+
+def _split_sections(md):
+    """Split a markdown string into (heading, body) tuples at every ## or ### heading."""
+    if not md:
+        return []
+    lines = md.split('\n')
+    sections = []
+    cur_head = None; cur_body = []
+    for line in lines:
+        if line.startswith('## '):
+            if cur_head is not None:
+                sections.append((cur_head, '\n'.join(cur_body).strip()))
+            cur_head = line.lstrip('# ').strip()
+            cur_body = []
+        else:
+            cur_body.append(line)
+    if cur_head is not None:
+        sections.append((cur_head, '\n'.join(cur_body).strip()))
+    return sections
+
+def _knowledge_section(project, *keywords, limit=3):
+    """Return sections of the project knowledge file whose heading contains any keyword.
+    Case-insensitive substring match. Limits to `limit` sections to keep token use low."""
+    md = _load_knowledge_file(project)
+    if md is None:
+        return f"No QC knowledge base is configured for project {project}. Ask the QC manager to add knowledge/{project}_qc_knowledge.md."
+    sections = _split_sections(md)
+    if not sections:
+        return "Knowledge file is empty or malformed."
+    kws = [k.lower() for k in keywords if k]
+    matched = []
+    for head, body in sections:
+        hl = head.lower()
+        if not kws or any(k in hl for k in kws):
+            matched.append(f"## {head}\n\n{body}")
+            if len(matched) >= limit:
+                break
+    if not matched:
+        # Fallback: search body text as well (covers Q&A and glossary)
+        for head, body in sections:
+            bl = body.lower()
+            if any(k in bl for k in kws):
+                matched.append(f"## {head}\n\n{body}")
+                if len(matched) >= limit:
+                    break
+    if not matched:
+        return f"No section matching {list(keywords)} in the {project} knowledge base."
+    return '\n\n---\n\n'.join(matched)
+
+# ── Chat tool implementations — all read-only, all take `project` ────────────
+
+def tool_get_material_and_metallurgy(project, **_):
+    return _knowledge_section(project, 'material', 'metallurgy', 'acceptance')
+
+def tool_get_welding_procedure(project, wps_number=None, **_):
+    if wps_number:
+        return _knowledge_section(project, wps_number, 'welding')
+    return _knowledge_section(project, 'welding', 'wps')
+
+def tool_get_ndt_procedure(project, ndt_type=None, **_):
+    if not ndt_type:
+        return _knowledge_section(project, 'ndt', 'non-destructive')
+    return _knowledge_section(project, ndt_type, 'ndt')
+
+def tool_get_acceptance_criteria(project, topic=None, **_):
+    if not topic:
+        return _knowledge_section(project, 'acceptance')
+    return _knowledge_section(project, topic, 'acceptance')
+
+def tool_get_itp_flow(project, **_):
+    return _knowledge_section(project, 'itp', 'inspection and test plan', 'hold point')
+
+def tool_get_finishing_process(project, **_):
+    return _knowledge_section(project, 'finishing', 'surface', 'station')
+
+def tool_get_cutting_and_fitup(project, **_):
+    return _knowledge_section(project, 'cutting', 'fit-up', 'fitup', 'bevel')
+
+def tool_get_report_requirements(project, report_type=None, **_):
+    if report_type:
+        return _knowledge_section(project, report_type, 'report')
+    return _knowledge_section(project, 'documentation', 'report', 'certification')
+
+def tool_get_standards_and_codes(project, **_):
+    return _knowledge_section(project, 'project overview', 'standard', 'code')
+
+def tool_get_qc_knowledge(project, topic=None, **_):
+    if not topic:
+        return "Please provide a topic keyword (e.g. 'ferrite', 'RT', 'WPS-001', 'ferroxyl')."
+    return _knowledge_section(project, topic, limit=2)
+
+def tool_get_project_stats(project, **_):
+    try:
+        st = project_stats(project)
+    except Exception as e:
+        return f"Could not load stats for {project}: {e}"
+    out = {
+        'project': project,
+        'total_spools': st['total'],
+        'completed': st['completed'],
+        'in_progress': st['in_progress'],
+        'not_started': st['not_started'],
+        'overall_pct': st['overall_pct'],
+        'phase_order': st['phase_order'],
+        'by_diameter': {d: {'spools': v['total'], 'avg_pct': v['avg_pct'], 'phase_avgs': v['phase_avgs']}
+                        for d, v in st['by_diameter'].items()},
+    }
+    return json.dumps(out, ensure_ascii=False)
+
+def tool_get_spool_status(project, spool_id=None, **_):
+    if not spool_id:
+        return "Please provide a spool_id (e.g. 'SPL-045')."
+    sp = db_fetchone("SELECT * FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
+    if not sp:
+        return f"Spool {spool_id} not found in project {project}."
+    prog = db_fetchall("SELECT p.step_number, p.completed, p.completed_at, p.completed_by, s.name_en, s.name_cn, s.phase FROM progress p LEFT JOIN project_steps s ON s.project=p.project AND s.step_number=p.step_number WHERE p.project=? AND p.spool_id=? ORDER BY p.step_number", (project, spool_id))
+    qc = db_fetchall("SELECT report_type, status, inspector_name, inspector_date FROM qc_reports WHERE project=? AND spool_id=?", (project, spool_id))
+    return json.dumps({
+        'spool_id': spool_id,
+        'marking': sp.get('marking',''),
+        'iso_no': sp.get('iso_no',''),
+        'main_diameter': sp.get('main_diameter',''),
+        'spool_type': sp.get('spool_type','SPOOL'),
+        'steps': [{'step': r['step_number'], 'name_en': r.get('name_en',''), 'name_cn': r.get('name_cn',''), 'phase': r.get('phase',''), 'completed': bool(r['completed']), 'completed_at': str(r.get('completed_at') or '')[:19], 'completed_by': r.get('completed_by','')} for r in fix_timestamps(prog)],
+        'qc_reports': [{'type': r['report_type'], 'status': r['status'], 'inspector': r.get('inspector_name',''), 'date': r.get('inspector_date','')} for r in qc],
+    }, ensure_ascii=False)
+
+def tool_get_qc_report_status(project, report_type=None, status=None, **_):
+    q = "SELECT spool_id, report_type, status, inspector_name, inspector_date FROM qc_reports WHERE project=?"
+    params = [project]
+    if report_type:
+        q += " AND report_type=?"; params.append(report_type)
+    if status:
+        q += " AND status=?"; params.append(status)
+    q += " ORDER BY spool_id LIMIT 200"
+    rows = db_fetchall(q, tuple(params))
+    if not rows:
+        return f"No QC reports found in {project}" + (f" for type={report_type}" if report_type else "") + (f" with status={status}" if status else "") + "."
+    return json.dumps([{'spool': r['spool_id'], 'type': r['report_type'], 'status': r['status'], 'inspector': r.get('inspector_name','') or '', 'date': r.get('inspector_date','') or ''} for r in rows], ensure_ascii=False)
+
+def tool_get_recent_activity(project, days=3, **_):
+    try:
+        days = int(days)
+    except Exception:
+        days = 3
+    days = max(1, min(days, 30))
+    rows = db_fetchall("SELECT spool_id, step_number, action, operator, timestamp, details FROM activity_log WHERE project=? ORDER BY timestamp DESC LIMIT 100", (project,))
+    # Filter in Python to avoid PG/SQLite date math differences
+    from datetime import datetime as _dt
+    cutoff = _dt.now() - timedelta(days=days)
+    out = []
+    for r in fix_timestamps(rows):
+        ts = r.get('timestamp') or ''
+        try:
+            t = _dt.strptime(str(ts)[:19], '%Y-%m-%d %H:%M:%S')
+            if t < cutoff: continue
+        except Exception:
+            pass
+        out.append({'spool': r['spool_id'], 'step': r.get('step_number'), 'action': r['action'], 'operator': r.get('operator',''), 'timestamp': str(ts)[:19], 'details': r.get('details','')})
+        if len(out) >= 50: break
+    if not out:
+        return f"No activity recorded in project {project} in the last {days} days."
+    return json.dumps(out, ensure_ascii=False)
+
+# ── Chat tool registry: name → (function, Anthropic schema) ──────────────────
+# Single source of truth. Adding a tool = one entry. No hardcoded per-project logic.
+
+CHAT_TOOLS = {
+    'get_material_and_metallurgy': (tool_get_material_and_metallurgy, {
+        'name': 'get_material_and_metallurgy',
+        'description': 'Get the project material, metallurgy rules, and acceptance ranges (base/filler material, phase balance, ferrite band, PMI criteria, preheat, interpass, heat input limits, intermetallic screen, chloride-free chain).',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string', 'description': 'Project ID, e.g. ENJOB25011423'}}, 'required': ['project']},
+    }),
+    'get_welding_procedure': (tool_get_welding_procedure, {
+        'name': 'get_welding_procedure',
+        'description': 'Get the welding procedures (WPS) for the project, including selection rules, pass tables, welder qualification (WPQ), and weld counting rules. Optionally filter by a specific WPS number.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}, 'wps_number': {'type': 'string', 'description': 'Optional WPS identifier, e.g. WPS-001 or WPS-002'}}, 'required': ['project']},
+    }),
+    'get_ndt_procedure': (tool_get_ndt_procedure, {
+        'name': 'get_ndt_procedure',
+        'description': 'Get the full NDT procedure and acceptance criteria for a given test type. Use this for questions about VT, RT, PT, MT, PMI, Ferrite, Ferroxyl, Dimensional inspection, or Metallographic (A923) testing.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}, 'ndt_type': {'type': 'string', 'description': 'Test type keyword: vt, rt, pt, mt, pmi, ferrite, ferroxyl, dimensional, metallographic'}}, 'required': ['project', 'ndt_type']},
+    }),
+    'get_acceptance_criteria': (tool_get_acceptance_criteria, {
+        'name': 'get_acceptance_criteria',
+        'description': 'Look up accept/reject acceptance criteria for any QC topic (ferrite band, PMI Cr/Mo, DFT, hi-lo, back-purge O2, interpass, etc).',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}, 'topic': {'type': 'string', 'description': 'Keyword e.g. ferrite, pmi, dft, hi-lo, interpass'}}, 'required': ['project', 'topic']},
+    }),
+    'get_itp_flow': (tool_get_itp_flow, {
+        'name': 'get_itp_flow',
+        'description': 'Get the Inspection and Test Plan (ITP) step flow for the project, including hold points, witness points, and review points.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}}, 'required': ['project']},
+    }),
+    'get_finishing_process': (tool_get_finishing_process, {
+        'name': 'get_finishing_process',
+        'description': 'Get the post-weld finishing and surface treatment process, including station flow, sequence, and key technical decisions (pickling, passivation, ferroxyl, photo, marking, packing).',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}}, 'required': ['project']},
+    }),
+    'get_cutting_and_fitup': (tool_get_cutting_and_fitup, {
+        'name': 'get_cutting_and_fitup',
+        'description': 'Get the cutting, end-preparation (beveling), and fit-up rules for the project, including back-purge O2 limit and hi-lo tolerance.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}}, 'required': ['project']},
+    }),
+    'get_report_requirements': (tool_get_report_requirements, {
+        'name': 'get_report_requirements',
+        'description': 'Get the mandatory fields, signatures, and format requirements for QC reports (or a specific report type).',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}, 'report_type': {'type': 'string', 'description': 'Optional: cutting, fitup, welding, vt, rt, pt, pmi, ferrite, dimensional, ferroxyl, dft'}}, 'required': ['project']},
+    }),
+    'get_standards_and_codes': (tool_get_standards_and_codes, {
+        'name': 'get_standards_and_codes',
+        'description': 'List the applicable standards and codes for the project (ASME B31.3, Section V, A923, A380, NORSOK M-601/M-630, etc) and what each covers.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}}, 'required': ['project']},
+    }),
+    'get_qc_knowledge': (tool_get_qc_knowledge, {
+        'name': 'get_qc_knowledge',
+        'description': 'Fallback keyword search across the full project QC knowledge base. Use only if no other tool fits the topic.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}, 'topic': {'type': 'string', 'description': 'Keyword to search for'}}, 'required': ['project', 'topic']},
+    }),
+    'get_project_stats': (tool_get_project_stats, {
+        'name': 'get_project_stats',
+        'description': 'Get overall production progress for the project: total spools, completed, in-progress, overall %, and per-diameter breakdown with per-phase averages.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}}, 'required': ['project']},
+    }),
+    'get_spool_status': (tool_get_spool_status, {
+        'name': 'get_spool_status',
+        'description': 'Get the step-by-step status of a specific spool, including all checklist steps, QC reports, and completion dates.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}, 'spool_id': {'type': 'string', 'description': 'Spool identifier, e.g. SPL-045'}}, 'required': ['project', 'spool_id']},
+    }),
+    'get_qc_report_status': (tool_get_qc_report_status, {
+        'name': 'get_qc_report_status',
+        'description': 'List QC reports across the project. Filter by report_type or status (draft, submitted, accepted, rejected) to find e.g. which spools failed RT.',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}, 'report_type': {'type': 'string'}, 'status': {'type': 'string'}}, 'required': ['project']},
+    }),
+    'get_recent_activity': (tool_get_recent_activity, {
+        'name': 'get_recent_activity',
+        'description': 'Get the recent activity log for the project (step completions, QC updates) within the last N days (default 3, max 30).',
+        'input_schema': {'type': 'object', 'properties': {'project': {'type': 'string'}, 'days': {'type': 'integer'}}, 'required': ['project']},
+    }),
+}
+
+CHAT_SYSTEM_PROMPT = """You are the ENERXON Production & Quality Assistant (ENERXON 生产与质量助手) for the ENERXON China Tracker website.
+
+LANGUAGE RULE (STRICT): Match the language of the user's MOST RECENT message exactly. If the user's last message is in Chinese, reply ONLY in Chinese. If the user's last message is in English, reply ONLY in English. Never mix languages in a single reply. Default to Simplified Chinese (简体中文) only when the input is ambiguous or has no clear language.
+
+YOU HELP with:
+- Production progress (spools, diameters, phase progress, recent activity)
+- Quality control procedures (WPS/PQR, NDT: VT/RT/PT/MT/PMI, ferrite, ferroxyl, dimensional, cutting, fit-up, metallographic)
+- Testing and acceptance criteria per the project's standards (ASME B31.3, ASME Section V, ASTM A923/A380, NORSOK, etc.)
+- ITP flow, hold/witness points, finishing process, report requirements
+
+RULES:
+1. ONLY use the provided tools to answer. Never invent data, numbers, or procedures.
+2. For standards, procedures, acceptance criteria, welding, NDT, materials, ITP, finishing — CALL a knowledge tool (get_material_and_metallurgy, get_welding_procedure, get_ndt_procedure, get_acceptance_criteria, get_itp_flow, get_finishing_process, get_cutting_and_fitup, get_report_requirements, get_standards_and_codes, or get_qc_knowledge as fallback).
+3. For live progress, spools, QC report status, or recent activity — CALL a data tool (get_project_stats, get_spool_status, get_qc_report_status, get_recent_activity).
+4. Always pass the current project ID to every tool call. The project ID is provided in the first user message.
+5. Be CONCISE. Cite spool IDs, report types, ITP steps, or standards when relevant.
+6. If a tool returns empty, "No section matching...", or "No QC knowledge base...", you MUST tell the user that no data is available in the project knowledge base. Do NOT guess, do NOT provide values from general engineering knowledge, do NOT cite typical industry ranges. The user needs to know whether the answer came from their project documents or not. If the knowledge base is missing, tell them to contact the QC manager and stop.
+7. If the question is outside production or quality (pricing, contracts, suppliers, customers, HR, logistics costs), reply in Chinese:
+"抱歉，我只能回答生产和质量相关的问题。"
+8. Format answers for Chinese production/QC staff — plain language, practical, with the numeric acceptance values and the applicable standard where relevant.
+9. Do not expose internal tool names to the user in the answer text."""
+
+def _run_chat_turn(project, message, history):
+    """Run one chat turn through Anthropic with tool use. Returns (reply_text, tools_used_list)."""
+    try:
+        import anthropic
+    except ImportError:
+        return ("服务未就绪：Anthropic SDK 未安装。请联系管理员。\n(Chat service not ready: Anthropic SDK missing.)", [])
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
+    if not api_key:
+        return ("服务未就绪：ANTHROPIC_API_KEY 未配置。请联系管理员。\n(Chat service not ready: API key not configured.)", [])
+
+    model = get_qc_setting(project, 'chat_model') or 'claude-haiku-4-5'
+    client = anthropic.Anthropic(api_key=api_key)
+
+    tool_schemas = [schema for (_fn, schema) in CHAT_TOOLS.values()]
+
+    # Build message list: trimmed history + project-tagged user message
+    msgs = []
+    for h in (history or [])[-10:]:
+        role = h.get('role'); content = h.get('content')
+        if role in ('user', 'assistant') and isinstance(content, str) and content.strip():
+            msgs.append({'role': role, 'content': content})
+    msgs.append({'role': 'user', 'content': f"[Current project: {project}]\n\n{message}"})
+
+    tools_used = []
+    for _iter in range(8):  # safety cap on tool-use loops
+        resp = client.messages.create(
+            model=model,
+            max_tokens=1500,
+            system=CHAT_SYSTEM_PROMPT,
+            tools=tool_schemas,
+            messages=msgs,
+        )
+        if resp.stop_reason != 'tool_use':
+            # Collect final text blocks
+            text_out = ''.join([b.text for b in resp.content if getattr(b, 'type', None) == 'text'])
+            return (text_out.strip() or '(no response)', tools_used)
+        # Execute tool calls
+        msgs.append({'role': 'assistant', 'content': resp.content})
+        tool_results = []
+        for block in resp.content:
+            if getattr(block, 'type', None) == 'tool_use':
+                tool_name = block.name
+                tool_input = block.input or {}
+                tools_used.append(tool_name)
+                tool_input['project'] = project  # enforce project scoping, ignore any model-supplied project
+                fn_schema = CHAT_TOOLS.get(tool_name)
+                if not fn_schema:
+                    result = f"Unknown tool: {tool_name}"
+                else:
+                    try:
+                        result = fn_schema[0](**tool_input)
+                    except Exception as e:
+                        result = f"Tool error: {e}"
+                tool_results.append({'type': 'tool_result', 'tool_use_id': block.id, 'content': str(result)[:20000]})
+        msgs.append({'role': 'user', 'content': tool_results})
+    return ("(Tool-use loop limit reached. Please rephrase your question.)", tools_used)
+
+@app.route('/api/chat', methods=['POST'])
+@login_required
+def api_chat():
+    body = request.get_json(silent=True) or {}
+    project = (body.get('project') or '').strip()
+    message = (body.get('message') or '').strip()
+    history = body.get('history') or []
+    if not project or not message:
+        return jsonify({'error': 'project and message are required'}), 400
+    reply, tools_used = _run_chat_turn(project, message, history)
+    # Log to DB
+    log_id = None
+    try:
+        db_execute("INSERT INTO chat_log (project, user_msg, assistant_msg, tools_used) VALUES (?, ?, ?, ?)",
+                   (project, message, reply, json.dumps(tools_used, ensure_ascii=False)))
+        db_commit()
+        row = db_fetchone("SELECT id FROM chat_log WHERE project=? ORDER BY id DESC LIMIT 1", (project,))
+        if row: log_id = row['id']
+    except Exception as e:
+        print(f"chat_log insert failed: {e}")
+    return jsonify({'reply': reply, 'tools_used': tools_used, 'log_id': log_id})
+
+@app.route('/api/chat/feedback', methods=['POST'])
+@login_required
+def api_chat_feedback():
+    body = request.get_json(silent=True) or {}
+    log_id = body.get('log_id')
+    fb = (body.get('feedback') or '').strip()
+    if not log_id or fb not in ('up', 'down', ''):
+        return jsonify({'error': 'log_id and feedback in (up|down|) required'}), 400
+    try:
+        db_execute("UPDATE chat_log SET feedback=? WHERE id=?", (fb, int(log_id)))
+        db_commit()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    return jsonify({'ok': True})
 
 # ── API: Projects ─────────────────────────────────────────────────────────────
 @app.route('/')
@@ -1225,8 +1753,78 @@ def api_shipments_save(project):
 @login_required
 def api_shipments_delete(project, num):
     db_execute("DELETE FROM shipments WHERE project=? AND shipment_number=?", (project, num))
+    # Clear any spools assigned to the deleted shipment
+    db_execute("UPDATE spools SET shipment_number=NULL WHERE project=? AND shipment_number=?", (project, num))
     db_commit()
     return jsonify({'ok': True})
+
+@app.route('/api/project/<project>/spool/<spool_id>/shipment', methods=['POST'])
+@login_required
+def api_spool_set_shipment(project, spool_id):
+    """Assign a single spool to a shipment, or unassign when shipment_number is null."""
+    d = request.get_json() or {}
+    num = d.get('shipment_number')
+    if num == '' or num == 0: num = None
+    db_execute("UPDATE spools SET shipment_number=? WHERE project=? AND spool_id=?",
+               (num, project, spool_id))
+    db_commit()
+    return jsonify({'ok': True})
+
+@app.route('/api/project/<project>/spools/assign-shipment', methods=['POST'])
+@login_required
+def api_spools_bulk_assign_shipment(project):
+    """Bulk-assign multiple spools to a shipment (or unassign with null)."""
+    d = request.get_json() or {}
+    spool_ids = d.get('spool_ids') or []
+    num = d.get('shipment_number')
+    if num == '' or num == 0: num = None
+    if not spool_ids:
+        return jsonify({'error': 'spool_ids required'}), 400
+    ph = ','.join(['?'] * len(spool_ids))
+    db_execute(
+        f"UPDATE spools SET shipment_number=? WHERE project=? AND spool_id IN ({ph})",
+        tuple([num, project] + list(spool_ids)))
+    db_commit()
+    return jsonify({'ok': True, 'updated': len(spool_ids)})
+
+@app.route('/api/project/<project>/shipment/<int:num>/mark-shipped', methods=['POST'])
+@login_required
+def api_shipment_mark_shipped(project, num):
+    """Bulk-tick the 'shipped' gate (last counts_for_production=0 step by display_order)
+    for every spool assigned to the given shipment. Generalised — no hardcoded step.
+    Body: {date: 'YYYY-MM-DD', operator: '...'} (both optional; defaults to today)."""
+    d = request.get_json() or {}
+    op = d.get('operator', 'bulk-ship')
+    ship_date = d.get('date')
+    if ship_date:
+        ts = f"{ship_date} 12:00:00"
+    else:
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    steps_def = get_project_steps(project)
+    pp_steps = sorted(
+        [s for s in steps_def if not s.get('counts_for_production', 1)],
+        key=lambda s: s.get('display_order') or s.get('step_number', 0))
+    if not pp_steps:
+        return jsonify({'error': 'No post-production step defined for this project'}), 400
+    shipped_step = pp_steps[-1]['step_number']
+    spools = db_fetchall("SELECT spool_id FROM spools WHERE project=? AND shipment_number=?",
+                         (project, num))
+    updated = 0
+    for s in spools:
+        db_execute(
+            "INSERT INTO progress (project,spool_id,step_number,completed,completed_by,completed_at) "
+            "VALUES (?,?,?,1,?,?) "
+            "ON CONFLICT (project,spool_id,step_number) DO UPDATE SET "
+            "completed=1, completed_by=EXCLUDED.completed_by, completed_at=EXCLUDED.completed_at",
+            (project, s['spool_id'], shipped_step, op, ts))
+        db_execute(
+            "INSERT INTO activity_log (project,spool_id,step_number,action,operator,details) "
+            "VALUES (?,?,?,?,?,?)",
+            (project, s['spool_id'], shipped_step, 'completed', op,
+             f"Shipped via shipment {num} on {ts[:10]}"))
+        updated += 1
+    db_commit()
+    return jsonify({'ok': True, 'updated': updated, 'shipped_step': shipped_step, 'date': ts[:10]})
 
 # ── API: Inspector Registry ───────────────────────────────────────────────────
 @app.route('/api/inspectors')
@@ -3147,6 +3745,17 @@ SPOOL_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
   <div class="sub" id="sub-info">Loading... / 加载中...</div>
 </div>
 <div class="info-bar" id="info-bar"></div>
+<div id="ship-assign-wrap" style="padding:8px 16px;display:none">
+  <div style="background:#fff;border-radius:10px;padding:10px 14px;box-shadow:0 1px 2px rgba(0,0,0,.05);display:flex;align-items:center;gap:10px">
+    <span style="font-size:16px">\U0001f6a2</span>
+    <div style="flex:1">
+      <div style="font-size:11px;color:#888">Shipment / \u53d1\u8fd0</div>
+      <select id="ship-select" onchange="assignShipment(this.value)" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:6px;font-size:13px;margin-top:2px">
+        <option value="">\u2014 Unassigned / \u672a\u5206\u914d \u2014</option>
+      </select>
+    </div>
+  </div>
+</div>
 <div style="padding:8px 16px;display:none" id="dwg-wrap">
   <a class="btn" id="dwg-btn" target="_blank" style="width:100%;text-align:center;display:block;padding:10px;font-size:14px">\U0001f4c4 View Drawing / \u67e5\u770b\u56fe\u7eb8</a>
 </div>
@@ -3210,6 +3819,30 @@ async function load(){
       document.getElementById('dwg-btn').href=`/api/project/${P}/spool/${S}/drawing`;
     }
   }catch(e){}
+  // Shipment assignment dropdown (shown only if project has shipments configured)
+  try{
+    const shr = await fetch(`/api/project/${P}/shipments`);
+    const ships = await shr.json();
+    if(ships && ships.length){
+      const sel = document.getElementById('ship-select');
+      const current = sp.shipment_number;
+      ships.forEach(s => {
+        const o = document.createElement('option');
+        o.value = s.shipment_number;
+        o.textContent = `SH-${String(s.shipment_number).padStart(3,'0')}${s.description?' \u00b7 '+s.description:''}${s.etd?' \u00b7 ETD '+String(s.etd).substring(0,10):''}`;
+        if(current == s.shipment_number) o.selected = true;
+        sel.appendChild(o);
+      });
+      document.getElementById('ship-assign-wrap').style.display = 'block';
+    }
+  }catch(e){}
+}
+async function assignShipment(v){
+  const body = {shipment_number: v === '' ? null : parseInt(v)};
+  await fetch(`/api/project/${P}/spool/${S}/shipment`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
 }
 async function toggle(n){
   const st=stepMap[n]||{completed:0};
@@ -4021,6 +4654,51 @@ REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vi
 .report-card h3{font-size:16px;color:#2F5496;margin-bottom:12px}
 .status-badge{display:inline-block;padding:6px 14px;border-radius:20px;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
 .status-on_time{background:#e8f5e9;color:#27ae60}.status-at_risk{background:#fff3e0;color:#f39c12}.status-delayed{background:#fce4ec;color:#e74c3c}.status-not_started{background:#f5f5f5;color:#95a5a6}
+.status-completed{background:#e8f8f5;color:#16a085}
+.status-ready{background:#e3f2fd;color:#1976d2}
+.status-partial{background:#fff3e0;color:#f39c12}
+.status-shipped{background:#e8f5e9;color:#27ae60}
+.status-pending{background:#f5f5f5;color:#7f8c8d}
+.status-unassigned{background:#fafafa;color:#bdbdbd}
+/* Post-production card */
+.pp-dual{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+.pp-gate{display:flex;align-items:center;gap:16px;padding:14px;background:#fafbfc;border-radius:10px;border:1px solid #ecf0f1}
+.pp-ring{width:104px;height:104px;position:relative;flex-shrink:0}
+.pp-ring svg{transform:rotate(-90deg)}
+.pp-ring-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.pp-ring-num{font-size:22px;font-weight:700;line-height:1}
+.pp-ring-sep{font-size:9px;color:#bbb;margin:2px 0}
+.pp-ring-tot{font-size:11px;color:#7f8c8d;font-weight:600}
+.pp-body{flex:1;min-width:0}
+.pp-title{font-size:13px;font-weight:700;color:#2c3e50}
+.pp-title-cn{font-size:11px;color:#7f8c8d;margin-bottom:6px}
+.pp-bar{background:#ecf0f1;border-radius:6px;height:8px;overflow:hidden}
+.pp-bar-fill{height:100%;border-radius:6px}
+.pp-caption{font-size:11px;color:#95a5a6;margin-top:4px}
+/* Shipments card */
+.ship-list{display:flex;flex-direction:column;gap:10px}
+.ship-row{padding:12px 14px;background:#fafbfc;border-radius:10px;border-left:4px solid #bdc3c7;display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center}
+.ship-row.pending{border-left-color:#bdc3c7}
+.ship-row.ready{border-left-color:#1976d2}
+.ship-row.partial{border-left-color:#f39c12}
+.ship-row.shipped{border-left-color:#27ae60}
+.ship-row.unassigned{border-left-color:#e0e0e0}
+.ship-head{font-size:13px;font-weight:700;color:#2c3e50}
+.ship-meta{font-size:11px;color:#888;margin-top:2px}
+.ship-counts{display:flex;gap:14px;margin-top:6px;font-size:11px}
+.ship-counts .lbl{color:#95a5a6}
+.ship-counts .val{color:#2c3e50;font-weight:700}
+.ship-counts .val.done{color:#27ae60}
+.ship-counts .val.pack{color:#16a085}
+.ship-bars{display:flex;gap:4px;margin-top:6px}
+.ship-bar{flex:1}
+.ship-bar .lab{font-size:8px;color:#aaa;margin-bottom:2px}
+.ship-bar-track{background:#ecf0f1;height:5px;border-radius:3px;overflow:hidden}
+.ship-bar-fill{height:100%;border-radius:3px}
+.ship-badge-wrap{text-align:right}
+.ship-date{font-size:10px;color:#888;margin-top:4px}
+.ship-actions button{font-size:11px;color:#fff;background:#16a085;border:none;padding:5px 10px;border-radius:6px;margin-top:6px;cursor:pointer}
+.ship-actions button:hover{background:#0e6655}
 .diam-status{display:flex;flex-direction:column;gap:8px}
 .diam-row{display:flex;align-items:center;gap:12px;padding:8px 12px;background:#FAFBFD;border-radius:8px}
 .d-name{font-size:20px;font-weight:700;color:#2F5496;min-width:50px}.d-info{flex:1}.d-status{min-width:100px;text-align:right}
@@ -4098,8 +4776,9 @@ REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vi
 </div>
 <script>
 const P='{{project}}';
-const STATUS_LABELS = {on_time:'ON TIME / \u6309\u65f6',at_risk:'AT RISK / \u6709\u5ef6\u8fdf\u98ce\u9669',delayed:'DELAYED / \u5df2\u5ef6\u8fdf',not_started:'NOT STARTED / \u672a\u5f00\u59cb'};
-const STATUS_COLORS = {on_time:'#27ae60',at_risk:'#f39c12',delayed:'#e74c3c',not_started:'#95a5a6'};
+const STATUS_LABELS = {on_time:'ON TIME / \u6309\u65f6',at_risk:'AT RISK / \u6709\u5ef6\u8fdf\u98ce\u9669',delayed:'DELAYED / \u5df2\u5ef6\u8fdf',not_started:'NOT STARTED / \u672a\u5f00\u59cb',completed:'\u2713 COMPLETED / \u5df2\u5b8c\u6210'};
+const STATUS_COLORS = {on_time:'#27ae60',at_risk:'#f39c12',delayed:'#e74c3c',not_started:'#95a5a6',completed:'#16a085'};
+const SHIP_STATUS_LABELS = {pending:'\u25cf PENDING / \u5f85\u52a0\u5de5',ready:'\u25cf READY TO SHIP / \u5f85\u53d1\u8fd0',partial:'\u25cf PARTIAL / \u90e8\u5206\u53d1\u8fd0',shipped:'\u2713 SHIPPED / \u5df2\u53d1\u8fd0',unassigned:'UNASSIGNED / \u672a\u5206\u914d'};
 async function load(){
   const [r, shipR] = await Promise.all([fetch(`/api/project/${P}/report`), fetch(`/api/project/${P}/shipments`)]);
   const d = await r.json();
@@ -4124,12 +4803,19 @@ async function load(){
   const fmt = dt => dt.toLocaleDateString('en',{day:'2-digit',month:'short',year:'numeric'});
   const fmtShort = dt => dt.toLocaleDateString('en',{day:'2-digit',month:'short'});
 
+  // Finish date = max forecast_end across diameters when overall is completed
+  let finishDate = null;
+  if(overallStatus === 'completed' && fc.overall_forecast_end) finishDate = fc.overall_forecast_end;
+  const finishLine = (overallStatus === 'completed' && finishDate)
+    ? `<div style="font-size:12px;color:#16a085;margin-top:6px;font-weight:600">Production finished ${finishDate} / \u751f\u4ea7\u5b8c\u5de5\u65e5\u671f</div>`
+    : '';
   html += `<div class="report-card">
     <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
       <div><h3 style="margin:0">Overall Status / \u603b\u4f53\u72b6\u6001</h3>
-        <div class="status-badge status-${overallStatus}" style="margin-top:8px">${STATUS_LABELS[overallStatus]||overallStatus}</div></div>
+        <div class="status-badge status-${overallStatus}" style="margin-top:8px">${STATUS_LABELS[overallStatus]||overallStatus}</div>
+        ${finishLine}</div>
       <div style="flex:1;min-width:200px"><div class="summary-grid">
-        <div class="sum-card"><div class="v" style="color:#2F5496">${st.overall_pct}%</div><div class="l">Progress / \u8fdb\u5ea6</div></div>
+        <div class="sum-card"><div class="v" style="color:${overallStatus==='completed'?'#16a085':'#2F5496'}">${st.overall_pct}%</div><div class="l">Progress / \u8fdb\u5ea6</div></div>
         <div class="sum-card"><div class="v">${st.total}</div><div class="l">Total / \u603b\u6570</div></div>
         <div class="sum-card"><div class="v" style="color:#27ae60">${st.completed}</div><div class="l">Done / \u5b8c\u6210</div>${d.past_rt?`<div style="font-size:11px;color:#4472C4;margin-top:2px"><strong>${d.past_rt}</strong> past RT / \u5df2\u8fc7RT</div>`:''}</div>
         <div class="sum-card"><div class="v" style="color:#f39c12">${st.in_progress}</div><div class="l">WIP / \u8fdb\u884c\u4e2d</div></div>
@@ -4331,9 +5017,85 @@ async function load(){
       <p style="color:#888;padding:20px 0">No schedule configured.<br><code>POST /api/project/${P}/schedule</code></p></div>`;
   }
 
-  // ── Shipments section (read-only — edit in project settings ⚙) ──
-  html += `<div class="report-card"><h3>Shipments / \u53d1\u8fd0 <span style="font-size:10px;font-weight:400;color:#888">(edit in \u2699 Settings)</span></h3>`;
-  html += `<div id="shipments-list"></div></div>`;
+  // ── Post-Production Gates card (rings per counts_for_production=0 step) ──
+  const postProd = d.post_production || [];
+  if(postProd.length){
+    html += `<div class="report-card"><h3>Post-Production Gates / \u751f\u4ea7\u540e\u5de5\u5e8f</h3><div class="pp-dual">`;
+    const ringCircum = 2 * Math.PI * 47; // r=47 in SVG
+    const ringColors = ['#16a085','#27ae60','#8E44AD','#2F5496'];
+    postProd.forEach((pp, idx) => {
+      const col = ringColors[idx % ringColors.length];
+      const pct = pp.pct || 0;
+      const dashLen = ringCircum * (pct/100);
+      const emoji = idx === postProd.length - 1 && postProd.length > 1 ? '\ud83d\udea2' : '\ud83d\udce6';
+      html += `<div class="pp-gate">
+        <div class="pp-ring">
+          <svg width="104" height="104" viewBox="0 0 104 104">
+            <circle cx="52" cy="52" r="47" fill="none" stroke="#ecf0f1" stroke-width="10"/>
+            <circle cx="52" cy="52" r="47" fill="none" stroke="${col}" stroke-width="10"
+              stroke-dasharray="${dashLen.toFixed(1)} ${ringCircum.toFixed(1)}" stroke-linecap="round"/>
+          </svg>
+          <div class="pp-ring-center">
+            <div class="pp-ring-num" style="color:${col}">${pp.completed}</div>
+            <div class="pp-ring-sep">\u2500\u2500 of \u2500\u2500</div>
+            <div class="pp-ring-tot">${pp.total}</div>
+          </div>
+        </div>
+        <div class="pp-body">
+          <div class="pp-title">${emoji} ${pp.name_en||'Step '+pp.step_number}</div>
+          <div class="pp-title-cn">${pp.name_cn||''}</div>
+          <div class="pp-bar"><div class="pp-bar-fill" style="width:${pct}%;background:${col}"></div></div>
+          <div class="pp-caption">${pp.completed} / ${pp.total} spools \u00b7 ${pct}%${pp.last_date?' \u00b7 last '+pp.last_date:''}</div>
+        </div>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // ── Shipments card (derived status from assigned spools + post-prod gates) ──
+  const shipRows = d.shipment_status || [];
+  if(shipRows.length){
+    html += `<div class="report-card"><h3>Shipments / \u53d1\u8fd0\u8ba1\u5212 <span style="font-size:10px;font-weight:400;color:#888">(edit details in \u2699 Settings)</span></h3><div class="ship-list">`;
+    shipRows.forEach(sh => {
+      const showPacked = postProd.length > 1;
+      const shippedPct = sh.assigned ? (sh.shipped/sh.assigned*100) : 0;
+      const packedPct = sh.assigned ? (sh.packed/sh.assigned*100) : 0;
+      const etaLine = sh.etd ? `ETD planned ${sh.etd}${sh.eta?' \u00b7 '+sh.transit_days+'d transit \u2192 ETA '+sh.eta:''}` : 'No ETD set';
+      const bars = showPacked
+        ? `<div class="ship-bars">
+             <div class="ship-bar"><div class="lab">Packed</div><div class="ship-bar-track"><div class="ship-bar-fill" style="width:${packedPct}%;background:#16a085"></div></div></div>
+             <div class="ship-bar"><div class="lab">Shipped</div><div class="ship-bar-track"><div class="ship-bar-fill" style="width:${shippedPct}%;background:#27ae60"></div></div></div>
+           </div>`
+        : `<div class="ship-bars"><div class="ship-bar"><div class="lab">Shipped</div><div class="ship-bar-track"><div class="ship-bar-fill" style="width:${shippedPct}%;background:#27ae60"></div></div></div></div>`;
+      const countsLine = showPacked
+        ? `<span><span class="lbl">Assigned</span> <span class="val">${sh.assigned}</span></span>
+           <span><span class="lbl">Packed</span> <span class="val pack">${sh.packed}/${sh.assigned}</span></span>
+           <span><span class="lbl">Shipped</span> <span class="val done">${sh.shipped}/${sh.assigned}</span></span>`
+        : `<span><span class="lbl">Assigned</span> <span class="val">${sh.assigned}</span></span>
+           <span><span class="lbl">Shipped</span> <span class="val done">${sh.shipped}/${sh.assigned}</span></span>`;
+      const dateLine = sh.status === 'shipped' && sh.shipped_date
+        ? `<div class="ship-date">Dispatched ${sh.shipped_date}</div>`
+        : (sh.etd ? `<div class="ship-date">ETD ${sh.etd}</div>` : '');
+      const canMark = sh.status === 'ready' || sh.status === 'partial';
+      const actionBtn = canMark
+        ? `<div class="ship-actions no-print"><button onclick="markShipped(${sh.shipment_number})">Mark as shipped \u2192</button></div>`
+        : '';
+      html += `<div class="ship-row ${sh.status}">
+        <div>
+          <div class="ship-head">\ud83d\udea2 SH-${String(sh.shipment_number).padStart(3,'0')}${sh.description?' \u00b7 '+sh.description:''}</div>
+          <div class="ship-meta">${sh.assigned} spools \u00b7 ${etaLine}</div>
+          <div class="ship-counts">${countsLine}</div>
+          ${bars}
+        </div>
+        <div class="ship-badge-wrap">
+          <span class="status-badge status-${sh.status}" style="font-size:10px;padding:4px 10px">${SHIP_STATUS_LABELS[sh.status]||sh.status}</span>
+          ${dateLine}
+          ${actionBtn}
+        </div>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
 
   // Today's activity — grouped by spool, using dynamic hold/release
   const completed = (d.today_activity||[]).filter(a=>a.action==='completed');
@@ -4385,36 +5147,18 @@ async function load(){
   }
   html += `</div>`;
   document.getElementById('rpt-content').innerHTML = html;
-  loadShipments();
 }
-async function loadShipments(){
-  const el = document.getElementById('shipments-list');
-  if(!el) return;
-  try {
-    const r = await fetch(`/api/project/${P}/shipments`);
-    const ships = await r.json();
-    if(!ships.length){
-      el.innerHTML = '<div style="text-align:center;padding:12px;color:#aaa;font-size:12px">No shipments configured / \u672a\u914d\u7f6e\u53d1\u8fd0</div>';
-      return;
-    }
-    let h = `<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:8px">
-      <tr style="background:#f0f2f5"><th style="padding:6px;border:1px solid #ddd;text-align:left"># / \u6279\u6b21</th>
-      <th style="padding:6px;border:1px solid #ddd">Description / \u63cf\u8ff0</th>
-      <th style="padding:6px;border:1px solid #ddd">ETD / \u79bb\u6e2f</th>
-      <th style="padding:6px;border:1px solid #ddd">Transit / \u8fd0\u8f93</th>
-      <th style="padding:6px;border:1px solid #ddd">ETA / \u5230\u8fbe</th></tr>`;
-    ships.forEach(s => {
-      h += `<tr>
-        <td style="padding:6px 8px;border:1px solid #ddd;font-weight:700;color:#2F5496;text-align:center">${s.shipment_number}</td>
-        <td style="padding:6px;border:1px solid #ddd">${s.description||''}</td>
-        <td style="padding:6px;border:1px solid #ddd;text-align:center">${(s.etd||'').substring(0,10)||'\u2014'}</td>
-        <td style="padding:6px;border:1px solid #ddd;text-align:center">${s.transit_days||''} days</td>
-        <td style="padding:6px;border:1px solid #ddd;text-align:center;font-weight:700;color:#003366">${s.eta||'\u2014'}</td>
-      </tr>`;
-    });
-    h += '</table>';
-    el.innerHTML = h;
-  } catch(e) { el.innerHTML = '<div style="color:red">Error loading shipments</div>'; }
+async function markShipped(num){
+  const today = new Date().toISOString().substring(0,10);
+  const date = prompt('Dispatch date (YYYY-MM-DD) / \u53d1\u8fd0\u65e5\u671f:', today);
+  if(!date) return;
+  const r = await fetch(`/api/project/${P}/shipment/${num}/mark-shipped`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({date: date, operator: 'shipment-bulk'})
+  });
+  const res = await r.json();
+  if(res.ok){ alert(`\u2713 Marked ${res.updated} spools as shipped on ${res.date}`); load(); }
+  else alert('Error: ' + (res.error || 'unknown'));
 }
 load();
 </script></body></html>"""

@@ -3410,7 +3410,7 @@ body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;backgr
 .stat-card .value{font-size:28px;font-weight:700;color:#2F5496}.stat-card .label{font-size:11px;color:#888;margin-top:4px}
 @media(max-width:600px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
 /* ── ENERXON Chat Assistant Widget (shared across all pages) ───────────── */
-.chat-btn-robot{position:fixed;top:12px;right:16px;z-index:900;width:44px;height:44px;border-radius:10px;background:#fff;border:1px solid rgba(255,255,255,.4);box-shadow:0 2px 8px rgba(0,0,0,.18);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;transition:transform .15s,box-shadow .15s}
+.chat-btn-robot{position:fixed;top:12px;right:60px;z-index:900;width:44px;height:44px;border-radius:10px;background:#fff;border:1px solid rgba(255,255,255,.4);box-shadow:0 2px 8px rgba(0,0,0,.18);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;transition:transform .15s,box-shadow .15s}
 .chat-btn-robot:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,.22)}
 .chat-btn-robot svg{display:block;width:28px;height:28px}
 .chat-btn-robot .chat-pulse{position:absolute;top:-3px;right:-3px;width:11px;height:11px;background:#27ae60;border:2px solid #fff;border-radius:50%}
@@ -3454,7 +3454,7 @@ body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;backgr
 .chat-thinking span:nth-child(2){animation-delay:.2s}
 .chat-thinking span:nth-child(3){animation-delay:.4s}
 @keyframes chatBounce{0%,80%,100%{transform:scale(.6);opacity:.5}40%{transform:scale(1);opacity:1}}
-@media(max-width:600px){.chat-panel{width:100%;right:-100%}.chat-panel.open{right:0}.chat-btn-robot{top:10px;right:10px;width:40px;height:40px}.chat-btn-robot svg{width:24px;height:24px}}"""
+@media(max-width:600px){.chat-panel{width:100%;right:-100%}.chat-panel.open{right:0}.chat-btn-robot{top:10px;right:52px;width:40px;height:40px}.chat-btn-robot svg{width:24px;height:24px}}"""
 
 HOME_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>ENERXON Tracker</title><style>""" + COMMON_CSS + """
@@ -5253,6 +5253,222 @@ async function markShipped(num){
 }
 load();
 </script></body></html>"""
+
+# ── Chat Widget Bundle — injected into every page template ───────────────────
+# Generalised: project ID is read from the URL at runtime (/project/<id>/...).
+# No hardcoded project strings. Appears on landing, project, spool, QC, report.
+
+CHAT_WIDGET_HTML = """
+<!-- ENERXON Chat Assistant -->
+<button class="chat-btn-robot" id="cxChatBtn" title="ENERXON Assistant" type="button">
+<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+<line x1="16" y1="2" x2="16" y2="6" stroke="#2F5496" stroke-width="2" stroke-linecap="round"/>
+<circle cx="16" cy="2.5" r="1.5" fill="#E63946"/>
+<rect x="5" y="6" width="22" height="18" rx="4" ry="4" fill="#2F5496"/>
+<rect x="7.5" y="9" width="17" height="12" rx="2" ry="2" fill="#fff"/>
+<circle cx="12" cy="14.5" r="2" fill="#2F5496"/>
+<circle cx="20" cy="14.5" r="2" fill="#2F5496"/>
+<circle cx="12.6" cy="13.9" r="0.6" fill="#fff"/>
+<circle cx="20.6" cy="13.9" r="0.6" fill="#fff"/>
+<path d="M11 18 Q16 20 21 18" stroke="#2F5496" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+<rect x="3" y="12" width="2" height="6" rx="1" fill="#2F5496"/>
+<rect x="27" y="12" width="2" height="6" rx="1" fill="#2F5496"/>
+<rect x="13" y="24" width="6" height="2" fill="#2F5496"/>
+<rect x="8" y="26" width="16" height="3" rx="1" fill="#E63946"/>
+</svg>
+<span class="chat-pulse"></span>
+</button>
+<div class="chat-backdrop" id="cxChatBackdrop"></div>
+<div class="chat-panel" id="cxChatPanel">
+  <div class="chat-panel-header">
+    <div style="display:flex;align-items:center;gap:10px">
+      <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0">
+        <line x1="16" y1="2" x2="16" y2="6" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="16" cy="2.5" r="1.5" fill="#E63946"/>
+        <rect x="5" y="6" width="22" height="18" rx="4" ry="4" fill="#fff"/>
+        <rect x="7.5" y="9" width="17" height="12" rx="2" ry="2" fill="#2F5496"/>
+        <circle cx="12" cy="14.5" r="2" fill="#fff"/>
+        <circle cx="20" cy="14.5" r="2" fill="#fff"/>
+        <path d="M11 18 Q16 20 21 18" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round"/>
+        <rect x="3" y="12" width="2" height="6" rx="1" fill="#fff"/>
+        <rect x="27" y="12" width="2" height="6" rx="1" fill="#fff"/>
+        <rect x="13" y="24" width="6" height="2" fill="#fff"/>
+        <rect x="8" y="26" width="16" height="3" rx="1" fill="#E63946"/>
+      </svg>
+      <div>
+        <div class="title">ENERXON \u52a9\u624b</div>
+        <div class="title-sub">Production & Quality Assistant \u00b7 <span id="cxChatProjLabel"></span></div>
+      </div>
+    </div>
+    <button class="chat-close" id="cxChatClose" type="button" aria-label="Close">\u00d7</button>
+  </div>
+  <div class="chat-body" id="cxChatBody">
+    <div class="chat-welcome" id="cxChatWelcome">
+      <strong>\u5173\u4e8e\u672c\u9879\u76ee\uff0c\u95ee\u6211\u4efb\u4f55\u95ee\u9898</strong>
+      <span style="color:#888">Ask me anything about this project.</span>
+    </div>
+  </div>
+  <div class="chat-input-bar">
+    <textarea class="chat-input" id="cxChatInput" placeholder="\u95ee\u6211\u4efb\u4f55\u95ee\u9898 / Ask me anything..." rows="1"></textarea>
+    <button class="chat-send" id="cxChatSend" type="button" title="Send">\u27a4</button>
+  </div>
+</div>
+<script>
+(function(){
+  // Derive project ID from URL path. Works on /project/<id>, /project/<id>/spool/..., etc.
+  // No hardcoded IDs — generalised.
+  function cxGetProject(){
+    var m = window.location.pathname.match(/\\/project\\/([^\\/]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+  var cxProject = cxGetProject();
+  var panel = document.getElementById('cxChatPanel');
+  var backdrop = document.getElementById('cxChatBackdrop');
+  var btn = document.getElementById('cxChatBtn');
+  var closeBtn = document.getElementById('cxChatClose');
+  var body = document.getElementById('cxChatBody');
+  var welcome = document.getElementById('cxChatWelcome');
+  var input = document.getElementById('cxChatInput');
+  var send = document.getElementById('cxChatSend');
+  var projLabel = document.getElementById('cxChatProjLabel');
+
+  // Hide the widget entirely when not on a project page (landing has no project scope)
+  if(!cxProject){ btn.style.display='none'; return; }
+  projLabel.textContent = cxProject;
+
+  var historyKey = 'cxChat_'+cxProject;
+  var history = [];
+  try{ history = JSON.parse(sessionStorage.getItem(historyKey)||'[]'); }catch(e){ history=[]; }
+
+  function saveHistory(){ try{ sessionStorage.setItem(historyKey, JSON.stringify(history.slice(-20))); }catch(e){} }
+
+  // Minimal safe renderer — preserves newlines, escapes HTML, bolds **text**, supports simple GFM tables
+  function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function renderText(txt){
+    var esc = escapeHtml(txt);
+    esc = esc.replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>$1</strong>');
+    // Simple table detection
+    var lines = esc.split('\\n');
+    var out = []; var i = 0;
+    while(i < lines.length){
+      if(/^\\|.+\\|\\s*$/.test(lines[i]) && i+1<lines.length && /^\\|[\\s\\-:|]+\\|\\s*$/.test(lines[i+1])){
+        var headers = lines[i].split('|').slice(1,-1).map(function(s){return s.trim();});
+        i += 2;
+        var rows = [];
+        while(i < lines.length && /^\\|.+\\|\\s*$/.test(lines[i])){
+          rows.push(lines[i].split('|').slice(1,-1).map(function(s){return s.trim();}));
+          i++;
+        }
+        out.push('<table><tr>'+headers.map(function(h){return '<th>'+h+'</th>';}).join('')+'</tr>'+
+          rows.map(function(r){return '<tr>'+r.map(function(c){return '<td>'+c+'</td>';}).join('')+'</tr>';}).join('')+'</table>');
+      } else {
+        out.push(lines[i]); i++;
+      }
+    }
+    return out.join('\\n');
+  }
+
+  function addMessage(role, text, tools, logId){
+    if(welcome){ welcome.style.display='none'; }
+    var msg = document.createElement('div');
+    msg.className = 'chat-msg '+role;
+    var bubble = document.createElement('div');
+    bubble.className = 'chat-bubble';
+    bubble.innerHTML = renderText(text);
+    msg.appendChild(bubble);
+    if(role === 'assistant'){
+      if(tools && tools.length){
+        var meta = document.createElement('div');
+        meta.className = 'chat-meta';
+        tools.forEach(function(t){
+          var b = document.createElement('span'); b.className='chat-tool-badge'; b.textContent=t; meta.appendChild(b);
+        });
+        msg.appendChild(meta);
+      }
+      if(logId){
+        var fb = document.createElement('div');
+        fb.className = 'chat-feedback';
+        var up = document.createElement('button'); up.type='button'; up.textContent='\U0001F44D'; up.title='helpful';
+        var dn = document.createElement('button'); dn.type='button'; dn.textContent='\U0001F44E'; dn.title='not helpful';
+        function sendFb(val, btnEl, other){
+          fetch('/api/chat/feedback', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({log_id: logId, feedback: val})});
+          btnEl.classList.add(val==='up'?'selected-up':'selected-down');
+          other.classList.remove('selected-up','selected-down');
+        }
+        up.addEventListener('click', function(){ sendFb('up', up, dn); });
+        dn.addEventListener('click', function(){ sendFb('down', dn, up); });
+        fb.appendChild(up); fb.appendChild(dn);
+        msg.appendChild(fb);
+      }
+    }
+    body.appendChild(msg);
+    body.scrollTop = body.scrollHeight;
+  }
+
+  function addThinking(){
+    var msg = document.createElement('div');
+    msg.className = 'chat-msg assistant';
+    msg.id = 'cxChatThinking';
+    msg.innerHTML = '<div class="chat-bubble"><div class="chat-thinking"><span></span><span></span><span></span></div></div>';
+    body.appendChild(msg);
+    body.scrollTop = body.scrollHeight;
+  }
+  function removeThinking(){ var t = document.getElementById('cxChatThinking'); if(t) t.remove(); }
+
+  function openChat(){ panel.classList.add('open'); backdrop.classList.add('open'); setTimeout(function(){input.focus();},300); }
+  function closeChat(){ panel.classList.remove('open'); backdrop.classList.remove('open'); }
+
+  btn.addEventListener('click', openChat);
+  closeBtn.addEventListener('click', closeChat);
+  backdrop.addEventListener('click', closeChat);
+
+  input.addEventListener('input', function(){ input.style.height='auto'; input.style.height=Math.min(input.scrollHeight,80)+'px'; });
+  input.addEventListener('keydown', function(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send.click(); } });
+
+  // Restore prior conversation
+  history.forEach(function(h){
+    if(h.role==='user' || h.role==='assistant') addMessage(h.role, h.content, h.tools||null, h.log_id||null);
+  });
+
+  send.addEventListener('click', function(){
+    var msg = input.value.trim();
+    if(!msg) return;
+    addMessage('user', msg);
+    history.push({role:'user', content: msg});
+    input.value = ''; input.style.height='auto';
+    send.disabled = true;
+    addThinking();
+    fetch('/api/chat', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({project: cxProject, message: msg, history: history.slice(0,-1)})
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      removeThinking();
+      send.disabled = false;
+      if(d.error){ addMessage('assistant', 'Error: '+d.error); return; }
+      var reply = d.reply || '(no reply)';
+      var tools = d.tools_used || [];
+      var logId = d.log_id || null;
+      addMessage('assistant', reply, tools, logId);
+      history.push({role:'assistant', content: reply, tools: tools, log_id: logId});
+      saveHistory();
+    })
+    .catch(function(err){
+      removeThinking();
+      send.disabled = false;
+      addMessage('assistant', 'Network error: '+err.message);
+    });
+  });
+})();
+</script>"""
+
+# Inject into every page template. One loop, one rule — any new template added
+# later just needs to include </body> to pick up the widget automatically.
+for _tpl in ('HOME_HTML', 'PROJECT_HTML', 'SPOOL_HTML', 'QC_REPORT_HTML', 'REPORT_HTML'):
+    if _tpl in globals() and '</body>' in globals()[_tpl]:
+        globals()[_tpl] = globals()[_tpl].replace('</body>', CHAT_WIDGET_HTML + '\n</body>', 1)
 
 # ── Init & Run ────────────────────────────────────────────────────────────────
 try: init_db(); print("DB initialized")

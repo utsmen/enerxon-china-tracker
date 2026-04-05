@@ -1043,6 +1043,39 @@ def api_qc_seed(project, spool_id):
                         (project, spool_id, rt, subtype, data_json, now))
         db_commit()
         return jsonify({'ok': True, 'source': 'post_body'})
+    # Auto-seed for straight pipes — derive data from spool name (no DXF needed)
+    sp_row = db_fetchone("SELECT * FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
+    if sp_row and (sp_row.get('spool_type') or '').upper() == 'STRAIGHT':
+        import re as re_mod
+        # Extract length from spool name (e.g. "STRAIGHT PIPE L=9697mm" → 9697)
+        name = sp_row.get('spool_id','') + ' ' + (sp_row.get('marking') or '')
+        m = re_mod.search(r'L=(\d+)', name)
+        length_mm = int(m.group(1)) if m else None
+        diameter = sp_row.get('main_diameter','')
+        drawing_ref = f"{project}-{spool_id}"
+        seed = {
+            'cutting': {'drawing_ref': drawing_ref, 'pieces': [{'mark': 'Cut 1', 'description': f'STRAIGHT PIPE {diameter}', 'nominal': length_mm, 'size': diameter}] if length_mm else []},
+            'dimensional': {'nominal_l_mm': length_mm, 'drawing_ref': drawing_ref, 'flanges': [], 'fittings': []},
+        }
+        for d in get_qc_report_defs(project):
+            rt = d['type']
+            if rt not in seed: continue
+            subtype = d.get('report_subtype', '')
+            existing = db_fetchone("SELECT data FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
+                                   (project, spool_id, rt, subtype))
+            if existing and existing.get('data','{}') != '{}':
+                continue
+            data_json = json.dumps(seed[rt])
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            if USE_PG:
+                db_execute("INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,data,updated_at) VALUES (%s,%s,%s,%s,'not_started',%s,%s) ON CONFLICT (project,spool_id,report_type,report_subtype) DO UPDATE SET data=EXCLUDED.data, updated_at=EXCLUDED.updated_at WHERE qc_reports.data = '{}'",
+                    (project, spool_id, rt, subtype, data_json, now))
+            else:
+                db_execute("INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,data,updated_at) VALUES (?,?,?,?,'not_started',?,?) ON CONFLICT(project,spool_id,report_type,report_subtype) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at WHERE qc_reports.data = '{}'",
+                    (project, spool_id, rt, subtype, data_json, now))
+        db_commit()
+        return jsonify({'ok': True, 'source': 'straight_pipe', 'length_mm': length_mm})
+
     # Fall back to DXF file (local only)
     db_path = get_qc_setting(project, 'dxf_sqlite_path')
     if not db_path or not os.path.exists(db_path):

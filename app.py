@@ -5740,58 +5740,43 @@ def migrate_add_acceptance_criteria():
 try: migrate_add_acceptance_criteria()
 except Exception as e: print(f"acceptance criteria migration: {e}")
 
-@app.route('/api/migrate-to-frankfurt', methods=['POST'])
+@app.route('/api/db-dump/<table_name>')
 @login_required
-def api_migrate_frankfurt():
-    """Temporary: copy all data from current DB to Frankfurt DB. Remove after migration."""
-    target_url = request.json.get('target_url', '')
-    if not target_url:
-        return jsonify({'error': 'target_url required'}), 400
-    import psycopg2, psycopg2.extras
-    src = get_db()
-    src_cur = src.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    dst = psycopg2.connect(target_url.replace('postgres://','postgresql://',1))
-    dst.autocommit = True
-    dst_cur = dst.cursor()
-    # Create schema in target using same DDL as init_db
-    for stmt in PG_SCHEMA_STATEMENTS:
-        try: dst_cur.execute(stmt)
-        except: pass
-    # Get all tables from source
-    src_cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")
-    tables = [r['tablename'] for r in src_cur.fetchall()]
-    results = {}
-    for tbl in tables:
-        src_cur.execute(f'SELECT * FROM {tbl}')
-        rows = src_cur.fetchall()
-        if not rows:
-            results[tbl] = 0
-            continue
-        cols = list(rows[0].keys())
-        # Create table in target (use source DDL)
-        src_cur.execute(f"SELECT pg_get_tabledef_ext('{tbl}')") if False else None
-        # Insert rows
-        placeholders = ','.join(['%s'] * len(cols))
-        col_names = ','.join([f'"{c}"' for c in cols])
-        for row in rows:
-            vals = [row[c] for c in cols]
-            try:
-                dst_cur.execute(f'INSERT INTO {tbl} ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING', vals)
-            except Exception as e:
-                dst.rollback()
-                dst_cur = dst.cursor()
-                results[tbl] = f'error: {str(e)[:100]}'
-                break
-        else:
-            results[tbl] = len(rows)
-    # Reset sequences
-    for tbl in tables:
-        try:
-            dst_cur.execute(f"SELECT setval(pg_get_serial_sequence('{tbl}', 'id'), COALESCE((SELECT MAX(id) FROM {tbl}), 1))")
-        except:
-            pass
-    dst.close()
-    return jsonify({'ok': True, 'tables': results})
+def api_db_dump(table_name):
+    """Temporary: dump a single table as JSON for migration. Remove after migration."""
+    import re
+    if not re.match(r'^[a-z_]+$', table_name):
+        return jsonify({'error': 'invalid table'}), 400
+    try:
+        rows = db_fetchall(f'SELECT * FROM {table_name}')
+        # Convert non-serializable types
+        import base64, datetime
+        clean = []
+        for r in rows:
+            row = {}
+            for k, v in r.items():
+                if isinstance(v, (bytes, bytearray, memoryview)):
+                    row[k] = {'__bytes__': base64.b64encode(bytes(v)).decode()}
+                elif isinstance(v, datetime.datetime):
+                    row[k] = v.isoformat()
+                else:
+                    row[k] = v
+            clean.append(row)
+        return jsonify({'table': table_name, 'count': len(clean), 'rows': clean})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/db-tables')
+@login_required
+def api_db_tables():
+    """Temporary: list all tables with row counts."""
+    rows = db_fetchall("SELECT tablename FROM pg_tables WHERE schemaname='public'")
+    tables = {}
+    for r in rows:
+        t = r['tablename']
+        cnt = db_fetchone(f'SELECT COUNT(*) as c FROM {t}')
+        tables[t] = cnt['c']
+    return jsonify(tables)
 
 if __name__ == '__main__':
     app.run(host=os.environ.get('HOST','0.0.0.0'), port=int(os.environ.get('PORT',5000)))

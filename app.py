@@ -5781,6 +5781,7 @@ def api_db_import():
     if not rows:
         return jsonify({'ok': True, 'imported': 0})
     ok = 0
+    errors = []
     for row in rows:
         # Decode base64 binary fields
         for k, v in row.items():
@@ -5793,13 +5794,15 @@ def api_db_import():
             db_execute(f'INSERT INTO {tbl} ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING', [row[c] for c in cols])
             ok += 1
         except Exception as e:
-            db_commit()
+            errors.append(str(e)[:120])
+            try: get_db().rollback()
+            except: pass
     db_commit()
     # Reset sequence
     try: db_execute(f"SELECT setval(pg_get_serial_sequence('{tbl}', 'id'), COALESCE((SELECT MAX(id) FROM {tbl}), 1))")
     except: pass
     db_commit()
-    return jsonify({'ok': True, 'imported': ok, 'total': len(rows)})
+    return jsonify({'ok': True, 'imported': ok, 'total': len(rows), 'errors': errors[:5]})
 
 @app.route('/api/db-tables')
 @login_required

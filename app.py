@@ -1541,6 +1541,10 @@ def api_qc_get(project, spool_id, report_type):
         sr = db_fetchone("SELECT completed_at FROM progress WHERE project=? AND spool_id=? AND step_number=? AND completed=1", (project, spool_id, itp_step))
         if sr and sr.get('completed_at'):
             step_date = str(sr['completed_at'] or '')[:10]
+    # Get spool info for renderers that need it (e.g. photo_doc needs has_branches, spool_type)
+    sp = db_fetchone("SELECT spool_type, has_branches FROM spools WHERE project=? AND spool_id=?", (project, spool_id))
+    spool_info = {'spool_type': (sp.get('spool_type','SPOOL') or 'SPOOL') if sp else 'SPOOL',
+                  'has_branches': bool(sp.get('has_branches')) if sp else False}
     row = db_fetchone("SELECT * FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
                       (project, spool_id, report_type, subtype))
     if row:
@@ -1551,6 +1555,7 @@ def api_qc_get(project, spool_id, report_type):
         proj_info = get_qc_project_info(project)
         r['itp'] = proj_info.get('itp', '')
         r['material_type'] = proj_info.get('material_type', '')
+        r.update(spool_info)
         img_count = db_fetchone("SELECT COUNT(*) as cnt FROM qc_images WHERE project=? AND spool_id=? AND report_type=?",
                                 (project, spool_id, report_type))
         r['image_count'] = img_count['cnt'] if img_count else 0
@@ -1563,6 +1568,7 @@ def api_qc_get(project, spool_id, report_type):
         'data': {}, 'image_count': 0, 'step_date': step_date, 'rec_no': rec_no,
         'itp': get_qc_project_info(project).get('itp', ''),
         'material_type': get_qc_project_info(project).get('material_type', ''),
+        **spool_info,
     })
 
 @app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>', methods=['POST'])
@@ -4149,20 +4155,22 @@ const REPORT_FIELDS = {
   welding_log: { title:'Welding Log / 焊接记录', render: renderWeldingLog },
   vt:          { title:'Visual Testing (VT) / 目视检验', render: renderVT },
   rt:          { title:'Radiographic Testing (RT) / 射线检测', render: renderRT },
-  pt:          { title:'Penetrant Testing (PT) / 渗透检测', render: renderPT },
+  pt:          { title:'Penetrant Testing (PT) / 渗透检测', render: renderPT, hasImages: true },
   mt:          { title:'Magnetic Particle (MT) / 磁粉检测', render: renderMT },
-  pmi:         { title:'PMI Report / PMI检测报告', render: renderPMI },
-  ferrite:     { title:'Ferrite Content / 铁素体含量', render: renderFerrite },
+  pmi:         { title:'PMI Report / PMI检测报告', render: renderPMI, hasImages: true },
+  ferrite:     { title:'Ferrite Content / 铁素体含量', render: renderFerrite, hasImages: true },
   dimensional: { title:'Dimensional Inspection / 尺寸检验', render: renderDimensional },
   ferroxyl:    { title:'Ferroxyl Test / 铁离子检测', render: renderFerroxyl, hasImages: true },
   dft:         { title:'Coating Inspection (DFT) / 涂层检验', render: renderDFT },
+  photo_doc:   { title:'Photo Documentation / 照片记录', render: renderPhotoDoc, imageCategories: true },
 };
 
 // ── Shared helpers ──
 function inp(key,val,opts={}){const t=opts.type||'text',ph=opts.ph||'',st=opts.style||'';return `<input class="qc-input" type="${t}" ${t==='number'?'inputmode="decimal" step="any"':''} value="${val!=null?val:opts.def||''}" placeholder="${ph}" style="font-size:12px;padding:6px;${st}" onchange="setD('${key}',${t==='number'?"this.value?parseFloat(this.value):null":"this.value"});scheduleSave()">`;}
 function setD(path,val){let o=reportData.data,parts=path.split('.');for(let i=0;i<parts.length-1;i++){if(!o[parts[i]])o[parts[i]]={};o=o[parts[i]];}o[parts[parts.length-1]]=val;}
 function sH(t){return `<div class="qc-section"><h3>${t}</h3>`;}
-function reRender(){const cfg=REPORT_FIELDS[RT];if(cfg)cfg.render(reportData.data);scheduleSave();}
+function reRender(){const cfg=REPORT_FIELDS[RT];if(cfg){cfg.render(reportData.data);appendImageSection(cfg);}scheduleSave();}
+function appendImageSection(cfg){if(!cfg.hasImages)return;const body=document.getElementById('report-body');body.innerHTML+=`<div class="qc-section"><h3>Photos / 照片 (Optional / 可选)</h3><div class="img-grid" id="img-grid"></div><label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files)">📷 Upload Photos / 上传照片</label></div>`;loadImages();}
 function pfCell(key,val){const cls=val===true?'pass':val===false?'fail':'';const txt=val===true?'✓ ACC 合格':val===false?'✗ REJ 不合格':'—';return `<td style="padding:4px;border:1px solid #ddd;text-align:center;cursor:pointer;font-size:11px" class="${cls}" onclick="setD('${key}',${val===true?'false':(val===false?'null':'true')});reRender()">${txt}</td>`;}
 function accRejCell(key,val){const cls=val==='ACC'?'pass':val==='REJ'?'fail':'';const txt=val==='ACC'?'✓ ACC 合格':val==='REJ'?'✗ REJ 不合格':'—';return `<td style="padding:4px;border:1px solid #ddd;text-align:center;cursor:pointer;font-size:11px" class="${cls}" onclick="var c=getDV('${key}');setD('${key}',c==='ACC'?'REJ':(c==='REJ'?null:'ACC'));reRender()">${txt}</td>`;}
 function getDV(path){let o=reportData.data,parts=path.split('.');for(let i=0;i<parts.length;i++){if(!o)return null;o=o[parts[i]];}return o;}
@@ -4584,13 +4592,9 @@ function renderFerroxyl(data){
       <td style="padding:4px;border:1px solid #ddd;text-align:center;cursor:pointer" class="${fail?'fail':pass?'pass':''}" onclick="var v=reportData.data.areas[${i}].copper_deposit;reportData.data.areas[${i}].copper_deposit=v===false?true:(v===true?null:false);reRender()">${pass?'✓ No / 无铜沉积':fail?'✗ Yes / 有铜沉积':'—'}</td>
       <td style="padding:4px;border:1px solid #ddd;text-align:center;font-size:11px" class="${pass?'pass':fail?'fail':''}">${pass?'✓ ACC 合格':fail?'✗ REJ 不合格':'—'}</td></tr>`;
   });
-  html += '</table>';
-  html += `<div style="margin-top:8px"><div class="img-grid" id="img-grid"></div>
-    <label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files)">📷 Upload Test Photos / 上传检测照片</label></div>`;
-  html += '</div>';
+  html += '</table></div>';
   html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
   document.getElementById('report-body').innerHTML = html;
-  loadImages();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -4629,10 +4633,77 @@ function renderDFT(data){
   document.getElementById('report-body').innerHTML = html;
 }
 
-// ── IMAGE UPLOAD (Ferroxyl only) ──
+// ══════════════════════════════════════════════════════════════════════════════
+// 13. Photo Documentation / 照片记录 (both projects)
+// ══════════════════════════════════════════════════════════════════════════════
+function getPhotoCategories(){
+  const isSpool = reportData.spool_type !== 'STRAIGHT';
+  const hasBranches = reportData.has_branches;
+  const cats = [
+    {key:'full_spool', label:'Full Spool / Pipe / 管段全貌', min:1},
+    {key:'marking', label:'Marking / 标识', min:1},
+  ];
+  if(isSpool){
+    cats.push({key:'weld_mark', label:'Welding Mark / 焊接标识 (skip if painted / 涂漆后不可见则跳过)', min:0});
+    cats.push({key:'outside_welds', label:'Outside Weld Seams / 外部焊缝', min:3});
+    cats.push({key:'inside_welds', label:'Inside Weld Seams / 内部焊缝', min:3});
+  }
+  if(isSpool && hasBranches){
+    cats.push({key:'branch_welds', label:'Branch Weld Seams / 支管焊缝', min:3});
+  }
+  return cats;
+}
+function renderPhotoDoc(data){
+  const cats = getPhotoCategories();
+  const totalMin = cats.reduce((s,c)=>s+c.min, 0);
+  let html = sH('Photo Documentation / 照片记录');
+  html += `<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:6px;padding:10px;font-size:11px;margin-bottom:8px">
+    <div><strong>Minimum / 最少:</strong> ${totalMin} photos / 张照片</div>
+    <div><strong>Maximum / 最多:</strong> 15 photos / 张照片</div>
+    <div style="margin-top:4px;color:#888">Compressed to 1200px, ~120 KB each / 压缩至1200像素，约120 KB/张</div>
+  </div></div>`;
+  cats.forEach(cat=>{
+    html += `<div class="qc-section"><h3>${cat.label}${cat.min ? ' <span style="color:#e74c3c;font-size:10px">(min '+cat.min+' / 至少'+cat.min+'张)</span>' : ' <span style="color:#888;font-size:10px">(optional / 可选)</span>'}</h3>`;
+    html += `<div class="img-grid" id="img-grid-${cat.key}"></div>`;
+    html += `<label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files,'${cat.key}')">📷 Upload / 上传</label></div>`;
+  });
+  html += `<div class="qc-section" id="photo-doc-summary" style="display:none"><h3>Summary / 总计</h3><div id="photo-doc-count" style="font-size:12px;padding:8px"></div></div>`;
+  html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+  loadPhotoDocImages();
+}
+async function loadPhotoDocImages(){
+  const r=await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/images`);
+  const imgs=await r.json();
+  const cats=getPhotoCategories();
+  let total=0;
+  cats.forEach(cat=>{
+    const grid=document.getElementById('img-grid-'+cat.key);
+    if(!grid)return;
+    const catImgs=imgs.filter(img=>img.caption===cat.key);
+    total+=catImgs.length;
+    grid.innerHTML=catImgs.map(img=>`<div class="img-thumb"><img src="/api/project/${P}/qc/image/${img.id}" loading="lazy"><button class="del" onclick="delImage(${img.id})">×</button></div>`).join('');
+  });
+  // Show uncategorized images (uploaded before categories existed)
+  const knownKeys=cats.map(c=>c.key);
+  const uncategorized=imgs.filter(img=>!knownKeys.includes(img.caption));
+  total+=uncategorized.length;
+  // Summary
+  const summary=document.getElementById('photo-doc-summary');
+  const countEl=document.getElementById('photo-doc-count');
+  if(summary&&countEl){
+    summary.style.display=total?'block':'none';
+    const missing=cats.filter(c=>c.min>0&&imgs.filter(i=>i.caption===c.key).length<c.min);
+    countEl.innerHTML=`<strong>${total} / 15</strong> photos uploaded / 已上传照片`
+      +(missing.length?`<br><span style="color:#e74c3c">Missing / 缺少: ${missing.map(c=>c.label.split('/')[0].trim()).join(', ')}</span>`
+      :`<br><span style="color:#27ae60">All minimum requirements met / 已满足最低要求 ✓</span>`);
+  }
+}
+
+// ── IMAGE UPLOAD ──
 async function loadImages(){const r=await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/images`);const imgs=await r.json();const grid=document.getElementById('img-grid');if(!grid)return;grid.innerHTML=imgs.map(img=>`<div class="img-thumb"><img src="/api/project/${P}/qc/image/${img.id}" loading="lazy"><button class="del" onclick="delImage(${img.id})">×</button></div>`).join('');}
-async function uploadImages(files){for(const f of files){const c=await compressImage(f,2000,0.85);const fd=new FormData();fd.append('file',c,f.name);fd.append('operator',document.getElementById('inspector').value);await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`,{method:'POST',body:fd});}loadImages();}
-async function delImage(id){if(!confirm('Delete? / 删除？'))return;await fetch(`/api/project/${P}/qc/image/${id}`,{method:'DELETE'});loadImages();}
+async function uploadImages(files,caption){for(const f of files){const c=await compressImage(f,1200,0.70);const fd=new FormData();fd.append('file',c,f.name);fd.append('operator',document.getElementById('inspector').value);if(caption)fd.append('caption',caption);await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`,{method:'POST',body:fd});}const cfg=REPORT_FIELDS[RT];if(cfg&&cfg.imageCategories){loadPhotoDocImages();}else{loadImages();}}
+async function delImage(id){if(!confirm('Delete? / 删除？'))return;await fetch(`/api/project/${P}/qc/image/${id}`,{method:'DELETE'});const cfg=REPORT_FIELDS[RT];if(cfg&&cfg.imageCategories){loadPhotoDocImages();}else{loadImages();}}
 function compressImage(file,maxDim,quality){return new Promise(r=>{const img=new Image();img.onload=()=>{let w=img.width,h=img.height;if(w>maxDim||h>maxDim){const ratio=Math.min(maxDim/w,maxDim/h);w=Math.round(w*ratio);h=Math.round(h*ratio);}const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h);c.toBlob(b=>r(b),'image/jpeg',quality);};img.src=URL.createObjectURL(file);});}
 
 
@@ -4752,6 +4823,7 @@ async function loadReport(){
     document.getElementById('rpt-sub').innerHTML = `${S} · ${P}${recNo ? ' · <span style="font-family:monospace;font-size:10px;color:#2F5496">'+recNo+'</span>' : ''}${stepDate ? ' · <span style="font-size:10px">Date / 日期: '+stepDate+'</span>' : ''}`;
     document.getElementById('itp-display').textContent = itpDoc;
     cfg.render(reportData.data);
+    appendImageSection(cfg);
   } else {
     document.getElementById('report-body').innerHTML = '<p style="padding:20px;color:#888">Report type not configured</p>';
   }
@@ -5527,6 +5599,34 @@ for _tpl in ('HOME_HTML', 'PROJECT_HTML', 'SPOOL_HTML', 'QC_REPORT_HTML', 'REPOR
 # ── Init & Run ────────────────────────────────────────────────────────────────
 try: init_db(); print("DB initialized")
 except Exception as e: print(f"DB init: {e}")
+
+def migrate_add_photo_doc():
+    """Add photo_doc report type to qc_report_defs for all projects that have defs but lack photo_doc."""
+    try:
+        with app.app_context():
+            rows = db_fetchall("SELECT project, value FROM project_settings WHERE key=?", ('qc_report_defs',))
+            for row in rows:
+                defs = json.loads(row['value']) if row['value'] else []
+                if any(d.get('type') == 'photo_doc' for d in defs):
+                    continue
+                # Determine next rec_seq
+                max_seq = max((int(d.get('rec_seq','0')) for d in defs), default=0)
+                next_seq = f"{max_seq + 1:03d}"
+                defs.append({
+                    'type': 'photo_doc', 'name_en': 'Photo Documentation', 'name_cn': '\u7167\u7247\u8bb0\u5f55',
+                    'rec_seq': next_seq, 'itp_step': 0, 'category': 'fab',
+                    'icon': '\U0001f4f7', 'standard': 'Per ITP', 'spool_only': False,
+                    'has_images': True,
+                })
+                db_execute("UPDATE project_settings SET value=? WHERE project=? AND key=?",
+                           (json.dumps(defs), row['project'], 'qc_report_defs'))
+                db_commit()
+                print(f"Added photo_doc to {row['project']} as rec_seq {next_seq}")
+    except Exception as e:
+        print(f"migrate_add_photo_doc: {e}")
+
+try: migrate_add_photo_doc()
+except Exception as e: print(f"photo_doc migration: {e}")
 
 if __name__ == '__main__':
     app.run(host=os.environ.get('HOST','0.0.0.0'), port=int(os.environ.get('PORT',5000)))

@@ -4132,10 +4132,11 @@ async function loadQC(){
     const cardCls = rp.status==='approved'?'s-done':rp.status==='draft'?'s-draft':'';
     const url = `/project/${P}/spool/${S}/qc/${rp.type}${rp.subtype?'?sub='+rp.subtype:''}`;
     const holdBadge = rp.is_hold ? ' <span style="background:#EDE7F6;color:#5E35B1;font-size:8px;font-weight:700;padding:1px 5px;border-radius:3px">HOLD</span>' : '';
+    const photoBadge = rp.has_images ? ' <span style="font-size:10px" title="Photos required">\ud83d\udcf7</span>' : '';
     html+=`<a class="qc-card ${cardCls}" href="${url}">
       <div class="qc-icon">${rp.icon}</div>
       <div class="qc-info">
-        <div class="en">${rp.name_en}${holdBadge}</div>
+        <div class="en">${rp.name_en}${holdBadge}${photoBadge}</div>
         <div class="cn">${rp.name_cn} \u00b7 ITP Step ${rp.itp_step}${rp.sub_label?' \u00b7 '+rp.sub_label:''}</div>
         <div style="font-size:8px;color:#aaa;font-family:monospace;margin-top:1px">${rp.rec_no}</div>
       </div>
@@ -5819,6 +5820,30 @@ def migrate_add_acceptance_criteria():
 
 try: migrate_add_acceptance_criteria()
 except Exception as e: print(f"acceptance criteria migration: {e}")
+
+def migrate_has_images_flag():
+    """Ensure has_images flag is set for report types that require photos."""
+    TYPES_WITH_IMAGES = {'pt', 'pmi', 'ferrite', 'ferroxyl', 'passivation', 'photo_doc'}
+    try:
+        with app.app_context():
+            rows = db_fetchall("SELECT project, value FROM project_settings WHERE key=?", ('qc_report_defs',))
+            for row in rows:
+                defs = json.loads(row['value']) if row['value'] else []
+                changed = False
+                for d in defs:
+                    if d['type'] in TYPES_WITH_IMAGES and not d.get('has_images'):
+                        d['has_images'] = True
+                        changed = True
+                if changed:
+                    db_execute("UPDATE project_settings SET value=? WHERE project=? AND key=?",
+                               (json.dumps(defs), row['project'], 'qc_report_defs'))
+                    db_commit()
+                    print(f"Fixed has_images flags for {row['project']}")
+    except Exception as e:
+        print(f"migrate_has_images_flag: {e}")
+
+try: migrate_has_images_flag()
+except Exception as e: print(f"has_images migration: {e}")
 
 def migrate_inspectors_to_data():
     """Migrate legacy inspector_name/tpi_name columns into data.inspectors and recalculate status."""

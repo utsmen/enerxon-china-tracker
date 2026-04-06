@@ -1626,9 +1626,13 @@ def api_qc_save(project, spool_id, report_type):
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     # Derive status from data completeness — single source of truth
     result = data.get('overall_result', '')
-    status = 'draft'
-    if inspector and inspector_date and result:
+    has_user_input = bool(inspector or result)
+    if not has_user_input:
+        status = 'not_started'
+    elif inspector and inspector_date and result:
         status = 'approved' if (tpi and tpi_date) else 'submitted'
+    else:
+        status = 'draft'
     if USE_PG:
         db_execute("""INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,inspector_name,inspector_date,tpi_name,tpi_date,data,created_by,updated_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -5791,9 +5795,13 @@ def migrate_recalc_qc_status():
                 insp_date = r.get('inspector_date', '') or ''
                 tpi = r.get('tpi_name', '') or ''
                 tpi_date = r.get('tpi_date', '') or ''
-                status = 'draft'
-                if insp and insp_date and result:
+                has_user_input = bool(insp or result)
+                if not has_user_input:
+                    status = 'not_started'
+                elif insp and insp_date and result:
                     status = 'approved' if (tpi and tpi_date) else 'submitted'
+                else:
+                    status = 'draft'
                 db_execute("UPDATE qc_reports SET status=? WHERE id=?", (status, r['id']))
                 updated += 1
             db_commit()

@@ -242,6 +242,16 @@ def get_wps_registry(project):
     """Load WPS registry from project_settings."""
     return get_qc_setting(project, 'wps_registry', {})
 
+_DEFAULT_INSPECTOR_TYPES = [
+    {'key': 'qc', 'label_en': 'QC Inspector', 'label_cn': '\u8d28\u68c0\u5458', 'required': True},
+    {'key': 'qm', 'label_en': 'QM', 'label_cn': '\u8d28\u91cf\u7ecf\u7406', 'required': False},
+    {'key': 'tpi', 'label_en': 'TPI', 'label_cn': '\u7b2c\u4e09\u65b9\u68c0\u9a8c', 'required': False},
+]
+
+def get_inspector_types(project):
+    """Load inspector types from project_settings. Falls back to default 3 types."""
+    return get_qc_setting(project, 'qc_inspector_types', _DEFAULT_INSPECTOR_TYPES)
+
 def get_qc_reports_for_spool(project, spool_type='SPOOL'):
     """Return list of report defs applicable to this project+spool_type."""
     defs = get_qc_report_defs(project)
@@ -1583,6 +1593,7 @@ def api_qc_get(project, spool_id, report_type):
                   'has_branches': bool(sp.get('has_branches')) if sp else False}
     row = db_fetchone("SELECT * FROM qc_reports WHERE project=? AND spool_id=? AND report_type=? AND report_subtype=?",
                       (project, spool_id, report_type, subtype))
+    insp_types = get_inspector_types(project)
     if row:
         r = dict(row)
         r['data'] = json.loads(r.get('data','{}'))
@@ -1592,6 +1603,7 @@ def api_qc_get(project, spool_id, report_type):
         r['itp'] = proj_info.get('itp', '')
         r['material_type'] = proj_info.get('material_type', '')
         r['material'] = proj_info.get('material', '')
+        r['inspector_types'] = insp_types
         r.update(spool_info)
         r.update(def_fields)
         img_count = db_fetchone("SELECT COUNT(*) as cnt FROM qc_images WHERE project=? AND spool_id=? AND report_type=?",
@@ -1605,34 +1617,56 @@ def api_qc_get(project, spool_id, report_type):
         'report_subtype': subtype, 'status': 'not_started',
         'inspector_name': '', 'inspector_date': '', 'tpi_name': '', 'tpi_date': '',
         'data': {}, 'image_count': 0, 'step_date': step_date, 'rec_no': rec_no,
+        'inspector_types': insp_types,
         'itp': proj_info.get('itp', ''),
         'material_type': proj_info.get('material_type', ''),
         'material': proj_info.get('material', ''),
         **spool_info, **def_fields,
     })
 
+def _derive_qc_status(data, inspector_types):
+    """Derive QC report status from data.inspectors + overall_result.
+    Returns not_started | draft | submitted | approved."""
+    inspectors = data.get('inspectors', {})
+    result = data.get('overall_result', '')
+    # Check if any inspector is assigned
+    has_any = any(inspectors.get(t['key'], {}).get('name') for t in inspector_types)
+    if not has_any and not result:
+        return 'not_started'
+    # Check required types filled (name + date)
+    required = [t for t in inspector_types if t.get('required')]
+    all_required = all(
+        inspectors.get(t['key'], {}).get('name') and inspectors.get(t['key'], {}).get('date')
+        for t in required
+    ) if required else True
+    if not (all_required and result):
+        return 'draft'
+    # Check ALL types filled (including optional)
+    all_filled = all(
+        inspectors.get(t['key'], {}).get('name') and inspectors.get(t['key'], {}).get('date')
+        for t in inspector_types
+    )
+    return 'approved' if all_filled else 'submitted'
+
 @app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>', methods=['POST'])
 @login_required
 def api_qc_save(project, spool_id, report_type):
     d = request.get_json() or {}
     subtype = d.get('report_subtype', '')
-    inspector = d.get('inspector_name', '')
-    inspector_date = d.get('inspector_date', '')
-    tpi = d.get('tpi_name', '')
-    tpi_date = d.get('tpi_date', '')
     data = d.get('data', {})
+    inspectors = data.get('inspectors', {})
+    # Populate legacy columns from first inspector for backward compat
+    first_insp = inspectors.get('qc', {})
+    inspector = first_insp.get('name', '')
+    inspector_date = first_insp.get('date', '')
+    tpi_insp = inspectors.get('tpi', {})
+    tpi = tpi_insp.get('name', '')
+    tpi_date = tpi_insp.get('date', '')
     data_json = json.dumps(data)
     created_by = d.get('created_by', inspector)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     # Derive status from data completeness — single source of truth
-    result = data.get('overall_result', '')
-    has_user_input = bool(inspector or result)
-    if not has_user_input:
-        status = 'not_started'
-    elif inspector and inspector_date and result:
-        status = 'approved' if (tpi and tpi_date) else 'submitted'
-    else:
-        status = 'draft'
+    status = _derive_qc_status(data, get_inspector_types(project))
     if USE_PG:
         db_execute("""INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,inspector_name,inspector_date,tpi_name,tpi_date,data,created_by,updated_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -2051,7 +2085,8 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
     data = json.loads(report_row['data']) if report_row and report_row.get('data') else {}
     rec_no = get_record_number(project, spool_id, report_def['rec_seq'])
     sub_label = f" ({report_def.get('sub_label','')})" if report_def.get('sub_label') else ''
-    inspector = report_row.get('inspector_name', '') if report_row else ''
+    inspector = report_row.get('inspector_name', '') if report_row else ''  # legacy compat
+    inspectors_data = data.get('inspectors', {})
     overall = data.get('overall_result', '')
 
     def draw_text(x, yy, text, size=9, color=black, bold=False, align='left', max_w=None):
@@ -2304,34 +2339,32 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
     draw_text(W - margin - 50*mm, y, result_text, 12, result_color, bold=True)
     y -= 10*mm
 
-    # ── SIGNATURES ──
+    # ── SIGNATURES — driven by inspector types config ──
+    import base64 as _b64
+    from reportlab.lib.utils import ImageReader
+    insp_types = get_inspector_types(project)
+    n_types = max(len(insp_types), 1)
     y = new_page_if_needed(y, 30*mm)
-    sig_w = cw / 3 - 3*mm
-    # Load inspector signature if available
-    inspector_sig = None
-    if inspector:
-        sig_row = db_fetchone("SELECT signature_data FROM qc_inspectors WHERE name=?", (inspector,))
-        if sig_row and sig_row.get('signature_data','').startswith('data:image'):
-            inspector_sig = sig_row['signature_data']
-    for i, label in enumerate(['QC Inspector', 'QM', 'TPI']):
+    sig_w = cw / n_types - 3*mm
+    for i, t in enumerate(insp_types):
         sx = margin + i * (sig_w + 4*mm)
         draw_rect(sx, y - 22*mm, sig_w, 22*mm, stroke=grey)
-        draw_text(sx + 2*mm, y - 4*mm, label, 7, grey)
+        draw_text(sx + 2*mm, y - 4*mm, t['label_en'], 7, grey)
         draw_line(y - 18*mm, grey, 0.3)
-        if i == 0 and inspector:
-            # Draw signature image if available
-            if inspector_sig:
+        slot = inspectors_data.get(t['key'], {})
+        slot_name = slot.get('name', '')
+        slot_date = slot.get('date', '')
+        if slot_name:
+            # Load signature from registry
+            sig_row = db_fetchone("SELECT signature_data FROM qc_inspectors WHERE name=?", (slot_name,))
+            if sig_row and (sig_row.get('signature_data','') or '').startswith('data:image'):
                 try:
-                    import base64
-                    sig_b64 = inspector_sig.split(',')[1]
-                    sig_bytes = base64.b64decode(sig_b64)
-                    sig_buf = BytesIO(sig_bytes)
-                    from reportlab.lib.utils import ImageReader
-                    sig_img = ImageReader(sig_buf)
+                    sig_bytes = _b64.b64decode(sig_row['signature_data'].split(',')[1])
+                    sig_img = ImageReader(BytesIO(sig_bytes))
                     c.drawImage(sig_img, sx + 5*mm, y - 17*mm, width=sig_w - 10*mm, height=10*mm, preserveAspectRatio=True, mask='auto')
                 except: pass
-            draw_text(sx + 5*mm, y - 15*mm, inspector, 9, blue)
-            draw_text(sx + 2*mm, y - 21*mm, step_date, 7, grey)
+            draw_text(sx + 5*mm, y - 15*mm, slot_name, 9, blue)
+            draw_text(sx + 2*mm, y - 21*mm, slot_date, 7, grey)
 
     # ── FOOTER ──
     draw_footer()
@@ -4163,29 +4196,11 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
   <h1 id="rpt-title">QC Report</h1>
   <div class="sub" id="rpt-sub">Loading... / 加载中...</div>
 </div>
-<div class="inspector-bar">
-  <div>
-    <label>Inspector / \u68c0\u9a8c\u5458</label>
-    <select id="inspector-select" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px" onchange="onInspectorSelect(this.value)">
-      <option value="">— Select / \u9009\u62e9\u68c0\u9a8c\u5458 —</option>
-    </select>
-    <input id="inspector" type="hidden">
-  </div>
-  <div><label>Date / \u65e5\u671f</label><input id="insp-date" type="date"></div>
-  <div style="grid-column:1/-1"><label>ITP</label><div id="itp-display" style="padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-weight:600;color:#8E44AD;background:#f8f5ff"></div></div>
-  <div style="grid-column:1/-1" id="sig-section" style="display:none">
-    <label>Signature / \u7b7e\u540d</label>
-    <div style="position:relative;border:1px solid #ddd;border-radius:6px;background:#fff;height:80px;touch-action:none" id="sig-container">
-      <canvas id="sig-canvas" style="width:100%;height:100%;cursor:crosshair"></canvas>
-      <div style="position:absolute;top:4px;right:4px;display:flex;gap:4px">
-        <button onclick="clearSig()" style="padding:2px 8px;font-size:10px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer">Clear / \u6e05\u9664</button>
-        <button onclick="saveSig()" style="padding:2px 8px;font-size:10px;border:1px solid #27ae60;border-radius:4px;background:#27ae60;color:#fff;cursor:pointer">Save / \u4fdd\u5b58</button>
-      </div>
-      <img id="sig-preview" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none">
-    </div>
-  </div>
+<div id="inspector-slots"></div>
+<div style="background:#fff;padding:8px 16px;margin-bottom:8px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+  <label style="font-size:10px;color:#888;display:block;margin-bottom:2px">ITP</label>
+  <div id="itp-display" style="padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;font-weight:600;color:#8E44AD;background:#f8f5ff"></div>
 </div>
-<input type="hidden" id="tpi" value=""><input type="hidden" id="tpi-date" value="">
 <div id="report-body"></div>
 <div class="overall-result">
   <h3>Overall Result / \u6700\u7ec8\u7ed3\u679c</h3>
@@ -4797,110 +4812,141 @@ function compressImage(file,maxDim,quality){return new Promise(r=>{const img=new
 
 // ── Inspector Registry + Signature Pad ──
 let inspectorList = [];
-let sigCtx = null, sigDrawing = false;
+let sigDrawing = {}, sigCtx = {};
+let inspectorTypes = [];
+
 async function loadInspectors(){
   try{const r=await fetch('/api/inspectors');inspectorList=await r.json();}catch(e){}
-  const sel=document.getElementById('inspector-select');
-  const current=document.getElementById('inspector').value;
-  sel.innerHTML='<option value="">— Select / 选择检验员 —</option>';
-  inspectorList.forEach(ins=>{
-    sel.innerHTML+=`<option value="${ins.name}" ${ins.name===current?'selected':''}>${ins.name}${ins.role?' ('+ins.role+')':''}${ins.has_signature?' ✓':''}</option>`;
-  });
-  sel.innerHTML+='<option value="__new__">+ New inspector / 新增检验员</option>';
-  sel.innerHTML+='<option value="__delete__">- Delete inspector / 删除检验员</option>';
-  if(current && !inspectorList.find(i=>i.name===current)){
-    sel.innerHTML+=`<option value="${current}" selected>${current}</option>`;
-  }
 }
-async function onInspectorSelect(val){
+function renderInspectorSlots(){
+  if(!reportData.data.inspectors) reportData.data.inspectors = {};
+  const container = document.getElementById('inspector-slots');
+  let html = '';
+  inspectorTypes.forEach(t => {
+    const key = t.key;
+    const saved = reportData.data.inspectors[key] || {};
+    const reqBadge = t.required ? ' <span style="color:#e74c3c;font-size:9px">*</span>' : '';
+    html += `<div class="inspector-bar" id="slot-${key}">
+      <div>
+        <label>${t.label_en} / ${t.label_cn}${reqBadge}</label>
+        <select style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px" onchange="onSlotSelect('${key}',this.value)">
+          <option value="">\u2014 Select / \u9009\u62e9 \u2014</option>`;
+    inspectorList.filter(i => !i.role || i.role === key).forEach(ins => {
+      const sel = ins.name === (saved.name||'') ? 'selected' : '';
+      html += `<option value="${ins.name}" ${sel}>${ins.name}${ins.has_signature?' \u2713':''}</option>`;
+    });
+    html += `<option value="__new__">+ New / \u65b0\u589e</option></select></div>
+      <div><label>Date / \u65e5\u671f</label><input type="date" value="${saved.date||reportData.step_date||''}" onchange="onSlotDate('${key}',this.value)"></div>
+      <div style="grid-column:1/-1;display:none" id="sig-section-${key}">
+        <label>Signature / \u7b7e\u540d</label>
+        <div style="position:relative;border:1px solid #ddd;border-radius:6px;background:#fff;height:80px;touch-action:none" id="sig-container-${key}">
+          <canvas id="sig-canvas-${key}" style="width:100%;height:100%;cursor:crosshair"></canvas>
+          <div style="position:absolute;top:4px;right:4px;display:flex;gap:4px">
+            <button onclick="clearSlotSig('${key}')" style="padding:2px 8px;font-size:10px;border:1px solid #ddd;border-radius:4px;background:#fff;cursor:pointer">Clear / \u6e05\u9664</button>
+            <button onclick="saveSlotSig('${key}')" style="padding:2px 8px;font-size:10px;border:1px solid #27ae60;border-radius:4px;background:#27ae60;color:#fff;cursor:pointer">Save / \u4fdd\u5b58</button>
+          </div>
+          <img id="sig-preview-${key}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none">
+        </div>
+      </div>
+    </div>`;
+  });
+  container.innerHTML = html;
+  inspectorTypes.forEach(t => {
+    const name = (reportData.data.inspectors[t.key]||{}).name;
+    if(name) showSlotSig(t.key, name);
+  });
+}
+
+async function onSlotSelect(key, val){
   if(val==='__new__'){
-    const name=prompt('Inspector name / 检验员姓名:');
-    if(!name){document.getElementById('inspector-select').value='';return;}
-    await fetch('/api/inspectors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})});
-    document.getElementById('inspector').value=name;
+    const name = prompt('Inspector name / \u68c0\u9a8c\u5458\u59d3\u540d:');
+    if(!name){renderInspectorSlots();return;}
+    await fetch('/api/inspectors',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,role:key})});
     await loadInspectors();
-    document.getElementById('inspector-select').value=name;
-    showSigPad(name);
+    if(!reportData.data.inspectors) reportData.data.inspectors = {};
+    if(!reportData.data.inspectors[key]) reportData.data.inspectors[key] = {};
+    reportData.data.inspectors[key].name = name;
+    renderInspectorSlots();
     scheduleSave();
     return;
   }
-  if(val==='__delete__'){
-    const names=inspectorList.map(i=>`${i.id}: ${i.name}`).join('\\n');
-    const id=prompt('Enter inspector number to delete / 输入要删除的检验员编号:\\n'+names);
-    if(id){await fetch(`/api/inspectors/${parseInt(id)}`,{method:'DELETE'});}
-    await loadInspectors();
-    document.getElementById('inspector-select').value='';
-    return;
-  }
-  document.getElementById('inspector').value=val;
-  if(val) showSigPad(val);
-  else document.getElementById('sig-section').style.display='none';
+  if(!reportData.data.inspectors) reportData.data.inspectors = {};
+  if(!reportData.data.inspectors[key]) reportData.data.inspectors[key] = {};
+  reportData.data.inspectors[key].name = val || '';
+  if(val) showSlotSig(key, val);
+  else { const ss=document.getElementById('sig-section-'+key); if(ss) ss.style.display='none'; }
   scheduleSave();
 }
-async function showSigPad(name){
-  const section=document.getElementById('sig-section');
-  section.style.display='block';
-  const ins=inspectorList.find(i=>i.name===name);
+
+function onSlotDate(key, val){
+  if(!reportData.data.inspectors) reportData.data.inspectors = {};
+  if(!reportData.data.inspectors[key]) reportData.data.inspectors[key] = {};
+  reportData.data.inspectors[key].date = val;
+  scheduleSave();
+}
+
+async function showSlotSig(key, name){
+  const section = document.getElementById('sig-section-'+key);
+  if(!section) return;
+  section.style.display = 'block';
+  const ins = inspectorList.find(i=>i.name===name);
   if(ins && ins.has_signature){
-    // Load existing signature
-    const r=await fetch(`/api/inspectors/${ins.id}/signature`);
-    const d=await r.json();
+    const r = await fetch(`/api/inspectors/${ins.id}/signature`);
+    const d = await r.json();
     if(d.signature_data){
-      document.getElementById('sig-preview').src=d.signature_data;
-      document.getElementById('sig-preview').style.display='block';
-      document.getElementById('sig-canvas').style.display='none';
+      document.getElementById('sig-preview-'+key).src = d.signature_data;
+      document.getElementById('sig-preview-'+key).style.display = 'block';
+      document.getElementById('sig-canvas-'+key).style.display = 'none';
       return;
     }
   }
-  // Show canvas for new signature
-  document.getElementById('sig-preview').style.display='none';
-  document.getElementById('sig-canvas').style.display='block';
-  initSigCanvas();
+  document.getElementById('sig-preview-'+key).style.display = 'none';
+  document.getElementById('sig-canvas-'+key).style.display = 'block';
+  initSlotSigCanvas(key);
 }
-function initSigCanvas(){
-  const canvas=document.getElementById('sig-canvas');
-  const container=document.getElementById('sig-container');
-  canvas.width=container.clientWidth;
-  canvas.height=container.clientHeight;
-  sigCtx=canvas.getContext('2d');
-  sigCtx.strokeStyle='#2F5496';sigCtx.lineWidth=2;sigCtx.lineCap='round';
-  canvas.onpointerdown=e=>{sigDrawing=true;sigCtx.beginPath();sigCtx.moveTo(e.offsetX,e.offsetY);};
-  canvas.onpointermove=e=>{if(!sigDrawing)return;sigCtx.lineTo(e.offsetX,e.offsetY);sigCtx.stroke();};
-  canvas.onpointerup=()=>{sigDrawing=false;};
-  canvas.onpointerleave=()=>{sigDrawing=false;};
+
+function initSlotSigCanvas(key){
+  const canvas = document.getElementById('sig-canvas-'+key);
+  const container = document.getElementById('sig-container-'+key);
+  canvas.width = container.clientWidth;
+  canvas.height = container.clientHeight;
+  const ctx = canvas.getContext('2d');
+  sigCtx[key] = ctx;
+  ctx.strokeStyle='#2F5496';ctx.lineWidth=2;ctx.lineCap='round';
+  canvas.onpointerdown=e=>{sigDrawing[key]=true;ctx.beginPath();ctx.moveTo(e.offsetX,e.offsetY);};
+  canvas.onpointermove=e=>{if(!sigDrawing[key])return;ctx.lineTo(e.offsetX,e.offsetY);ctx.stroke();};
+  canvas.onpointerup=()=>{sigDrawing[key]=false;};
+  canvas.onpointerleave=()=>{sigDrawing[key]=false;};
 }
-function clearSig(){
-  const canvas=document.getElementById('sig-canvas');
-  sigCtx.clearRect(0,0,canvas.width,canvas.height);
-  document.getElementById('sig-preview').style.display='none';
+
+function clearSlotSig(key){
+  const canvas = document.getElementById('sig-canvas-'+key);
+  if(sigCtx[key]) sigCtx[key].clearRect(0,0,canvas.width,canvas.height);
+  document.getElementById('sig-preview-'+key).style.display='none';
   canvas.style.display='block';
 }
-async function saveSig(){
-  const canvas=document.getElementById('sig-canvas');
-  const dataUrl=canvas.toDataURL('image/png');
-  const name=document.getElementById('inspector').value;
-  if(!name){alert('Select inspector first / 先选择检验员');return;}
+
+async function saveSlotSig(key){
+  const canvas = document.getElementById('sig-canvas-'+key);
+  const dataUrl = canvas.toDataURL('image/png');
+  const name = (reportData.data.inspectors[key]||{}).name;
+  if(!name){alert('Select inspector first / \u5148\u9009\u62e9\u68c0\u9a8c\u5458');return;}
   await fetch('/api/inspectors',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({name:name,signature_data:dataUrl})});
-  document.getElementById('sig-preview').src=dataUrl;
-  document.getElementById('sig-preview').style.display='block';
-  canvas.style.display='none';
+    body:JSON.stringify({name:name,role:key,signature_data:dataUrl})});
+  document.getElementById('sig-preview-'+key).src = dataUrl;
+  document.getElementById('sig-preview-'+key).style.display = 'block';
+  canvas.style.display = 'none';
   await loadInspectors();
-  showSave('Signature saved / 签名已保存',true);
+  showSave('Signature saved / \u7b7e\u540d\u5df2\u4fdd\u5b58',true);
 }
 
 async function loadReport(){
   const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}?sub=${SUB}`);
   reportData = await r.json();
   if(!reportData.data || typeof reportData.data !== 'object') reportData.data = {};
-  const inspName = reportData.inspector_name || localStorage.getItem('qc_inspector') || '';
-  document.getElementById('inspector').value = inspName;
-  // Report date = checklist step completion date, NOT today
-  document.getElementById('insp-date').value = reportData.inspector_date || reportData.step_date || '';
-  document.getElementById('tpi').value = reportData.tpi_name || '';
-  document.getElementById('tpi-date').value = reportData.tpi_date || '';
+  inspectorTypes = reportData.inspector_types || [];
   await loadInspectors();
-  if(inspName) showSigPad(inspName);
+  renderInspectorSlots();
   const cfg = REPORT_FIELDS[RT];
   if(cfg){
     document.getElementById('rpt-title').textContent = cfg.title;
@@ -4908,7 +4954,7 @@ async function loadReport(){
     const stepDate = reportData.step_date || '';
     const itpDoc = reportData.itp || P+'-ITP-SPL-001';
     MATERIAL_TYPE = reportData.material_type || '';
-    document.getElementById('rpt-sub').innerHTML = `${S} · ${P}${recNo ? ' · <span style="font-family:monospace;font-size:10px;color:#2F5496">'+recNo+'</span>' : ''}${stepDate ? ' · <span style="font-size:10px">Date / 日期: '+stepDate+'</span>' : ''}`;
+    document.getElementById('rpt-sub').innerHTML = `${S} \u00b7 ${P}${recNo ? ' \u00b7 <span style="font-family:monospace;font-size:10px;color:#2F5496">'+recNo+'</span>' : ''}${stepDate ? ' \u00b7 <span style="font-size:10px">Date / \u65e5\u671f: '+stepDate+'</span>' : ''}`;
     document.getElementById('itp-display').textContent = itpDoc;
     cfg.render(reportData.data);
     appendImageSection(cfg);
@@ -4929,18 +4975,11 @@ function setResult(val){
 }
 function scheduleSave(){ clearTimeout(saveTimer); saveTimer = setTimeout(doSave, 600); }
 async function doSave(){
-  const insp = document.getElementById('inspector').value;
-  localStorage.setItem('qc_inspector', insp);
-  const body = {
-    report_subtype: SUB,
-    inspector_name: insp, inspector_date: document.getElementById('insp-date').value,
-    tpi_name: document.getElementById('tpi').value, tpi_date: document.getElementById('tpi-date').value,
-    data: reportData.data,
-  };
+  const body = { report_subtype: SUB, data: reportData.data };
   try{
     const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     const d = await r.json();
-    showSave(d.ok ? 'Saved / 已保存' : 'Error', d.ok);
+    showSave(d.ok ? 'Saved / \u5df2\u4fdd\u5b58' : 'Error', d.ok);
   }catch(e){ showSave('Error', false); }
 }
 function showSave(msg, ok){
@@ -4948,7 +4987,6 @@ function showSave(msg, ok){
   el.textContent = msg; el.className = 'save-status ' + (ok ? 'save-ok' : 'save-err');
   el.style.opacity = '1'; setTimeout(()=>{ el.style.opacity = '0'; }, 1500);
 }
-document.querySelectorAll('.inspector-bar input').forEach(el => el.addEventListener('change', scheduleSave));
 
 loadReport();
 </script></body></html>"""
@@ -5782,35 +5820,44 @@ def migrate_add_acceptance_criteria():
 try: migrate_add_acceptance_criteria()
 except Exception as e: print(f"acceptance criteria migration: {e}")
 
-def migrate_recalc_qc_status():
-    """Recalculate QC report status from data completeness (one-time fix for reports saved with hardcoded 'draft')."""
+def migrate_inspectors_to_data():
+    """Migrate legacy inspector_name/tpi_name columns into data.inspectors and recalculate status."""
     try:
         with app.app_context():
-            rows = db_fetchall("SELECT id, inspector_name, inspector_date, tpi_name, tpi_date, data FROM qc_reports WHERE 1=1")
+            rows = db_fetchall("SELECT id, project, inspector_name, inspector_date, tpi_name, tpi_date, data FROM qc_reports WHERE 1=1")
             updated = 0
+            # Cache inspector types per project
+            types_cache = {}
             for r in rows:
                 data = json.loads(r['data']) if r['data'] else {}
-                result = data.get('overall_result', '')
-                insp = r.get('inspector_name', '') or ''
-                insp_date = r.get('inspector_date', '') or ''
-                tpi = r.get('tpi_name', '') or ''
-                tpi_date = r.get('tpi_date', '') or ''
-                has_user_input = bool(insp or result)
-                if not has_user_input:
-                    status = 'not_started'
-                elif insp and insp_date and result:
-                    status = 'approved' if (tpi and tpi_date) else 'submitted'
-                else:
-                    status = 'draft'
-                db_execute("UPDATE qc_reports SET status=? WHERE id=?", (status, r['id']))
+                # Migrate old columns into data.inspectors (only if not already migrated)
+                if 'inspectors' not in data:
+                    inspectors = {}
+                    insp = r.get('inspector_name', '') or ''
+                    insp_date = r.get('inspector_date', '') or ''
+                    tpi = r.get('tpi_name', '') or ''
+                    tpi_date = r.get('tpi_date', '') or ''
+                    if insp:
+                        inspectors['qc'] = {'name': insp, 'date': insp_date}
+                    if tpi:
+                        inspectors['tpi'] = {'name': tpi, 'date': tpi_date}
+                    if inspectors:
+                        data['inspectors'] = inspectors
+                # Derive status from data using shared function
+                proj = r.get('project', '')
+                if proj not in types_cache:
+                    types_cache[proj] = get_inspector_types(proj)
+                status = _derive_qc_status(data, types_cache[proj])
+                data_json = json.dumps(data)
+                db_execute("UPDATE qc_reports SET data=?, status=? WHERE id=?", (data_json, status, r['id']))
                 updated += 1
             db_commit()
-            if updated: print(f"Recalculated status for {updated} QC reports")
+            if updated: print(f"Migrated inspectors + recalculated status for {updated} QC reports")
     except Exception as e:
-        print(f"migrate_recalc_qc_status: {e}")
+        print(f"migrate_inspectors_to_data: {e}")
 
-try: migrate_recalc_qc_status()
-except Exception as e: print(f"recalc qc status migration: {e}")
+try: migrate_inspectors_to_data()
+except Exception as e: print(f"inspector migration: {e}")
 
 
 if __name__ == '__main__':

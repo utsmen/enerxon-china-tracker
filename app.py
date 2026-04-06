@@ -4132,7 +4132,7 @@ async function loadQC(){
     const cardCls = rp.status==='approved'?'s-done':rp.status==='draft'?'s-draft':'';
     const url = `/project/${P}/spool/${S}/qc/${rp.type}${rp.subtype?'?sub='+rp.subtype:''}`;
     const holdBadge = rp.is_hold ? ' <span style="background:#EDE7F6;color:#5E35B1;font-size:8px;font-weight:700;padding:1px 5px;border-radius:3px">HOLD</span>' : '';
-    const photoBadge = rp.has_images ? ' <span style="font-size:10px" title="Photos required">\ud83d\udcf7</span>' : '';
+    const photoBadge = rp.has_images ? ' <span style="font-size:10px" title="Photos required">&#x1F4F7;</span>' : '';
     html+=`<a class="qc-card ${cardCls}" href="${url}">
       <div class="qc-icon">${rp.icon}</div>
       <div class="qc-info">

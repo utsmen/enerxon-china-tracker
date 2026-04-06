@@ -125,13 +125,7 @@ def close_db(e):
     db = g.pop('db', None)
     if db: db.close()
 
-def init_db():
-    if USE_PG:
-        import psycopg2
-        c = psycopg2.connect(DATABASE_URL.replace('postgres://','postgresql://',1)); c.autocommit = True
-        cur = c.cursor()
-        # Execute each statement separately so one failure doesn't block the rest
-        pg_statements = [
+PG_SCHEMA_STATEMENTS = [
             "CREATE TABLE IF NOT EXISTS spools (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, spool_full TEXT DEFAULT '', iso_no TEXT DEFAULT '', marking TEXT DEFAULT '', mk_number TEXT DEFAULT '', main_diameter TEXT DEFAULT '', line TEXT DEFAULT '', sequence INTEGER DEFAULT 0, project TEXT DEFAULT '', has_branches INTEGER DEFAULT 0, spool_type TEXT DEFAULT 'SPOOL', actual_weight_kg REAL DEFAULT 0, surface_m2 REAL DEFAULT 0, joint_count INTEGER DEFAULT 0, raf_inches REAL DEFAULT 0, created_at TIMESTAMP DEFAULT NOW(), UNIQUE(project, spool_id))",
             "CREATE TABLE IF NOT EXISTS progress (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER NOT NULL, completed INTEGER DEFAULT 0, completed_by TEXT DEFAULT '', completed_at TIMESTAMP, remarks TEXT DEFAULT '', UNIQUE(project, spool_id, step_number))",
             "CREATE TABLE IF NOT EXISTS activity_log (id SERIAL PRIMARY KEY, spool_id TEXT NOT NULL, project TEXT DEFAULT '', step_number INTEGER, action TEXT NOT NULL, operator TEXT DEFAULT '', timestamp TIMESTAMP DEFAULT NOW(), details TEXT DEFAULT '')",
@@ -162,8 +156,14 @@ def init_db():
             # Chat agent log (production & quality assistant)
             "CREATE TABLE IF NOT EXISTS chat_log (id SERIAL PRIMARY KEY, project TEXT NOT NULL, user_msg TEXT NOT NULL, assistant_msg TEXT NOT NULL, tools_used TEXT DEFAULT '[]', feedback TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_chat_log_project ON chat_log(project, created_at)",
-        ]
-        for stmt in pg_statements:
+]
+
+def init_db():
+    if USE_PG:
+        import psycopg2
+        c = psycopg2.connect(DATABASE_URL.replace('postgres://','postgresql://',1)); c.autocommit = True
+        cur = c.cursor()
+        for stmt in PG_SCHEMA_STATEMENTS:
             try: cur.execute(stmt)
             except Exception as e: print(f"init_db skip: {e}")
         c.close()
@@ -5753,25 +5753,13 @@ def api_migrate_frankfurt():
     dst = psycopg2.connect(target_url.replace('postgres://','postgresql://',1))
     dst.autocommit = True
     dst_cur = dst.cursor()
-    # Copy schema from source to target
+    # Create schema in target using same DDL as init_db
+    for stmt in PG_SCHEMA_STATEMENTS:
+        try: dst_cur.execute(stmt)
+        except: pass
+    # Get all tables from source
     src_cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")
     tables = [r['tablename'] for r in src_cur.fetchall()]
-    for tbl in tables:
-        src_cur.execute(f"SELECT column_name, data_type, column_default, is_nullable FROM information_schema.columns WHERE table_name='{tbl}' ORDER BY ordinal_position")
-        cols_info = src_cur.fetchall()
-        col_defs = []
-        for ci in cols_info:
-            cdef = f'"{ci["column_name"]}" {ci["data_type"]}'
-            if ci['column_default']: cdef += f' DEFAULT {ci["column_default"]}'
-            if ci['is_nullable'] == 'NO': cdef += ' NOT NULL'
-            col_defs.append(cdef)
-        try: dst_cur.execute(f'CREATE TABLE IF NOT EXISTS {tbl} ({", ".join(col_defs)})')
-        except Exception as e: print(f'DDL {tbl}: {e}')
-    # Copy indexes
-    src_cur.execute("SELECT indexdef FROM pg_indexes WHERE schemaname='public'")
-    for idx in src_cur.fetchall():
-        try: dst_cur.execute(idx['indexdef'].replace('CREATE INDEX', 'CREATE INDEX IF NOT EXISTS').replace('CREATE UNIQUE INDEX', 'CREATE UNIQUE INDEX IF NOT EXISTS'))
-        except: pass
     results = {}
     for tbl in tables:
         src_cur.execute(f'SELECT * FROM {tbl}')

@@ -5778,6 +5778,32 @@ def migrate_add_acceptance_criteria():
 try: migrate_add_acceptance_criteria()
 except Exception as e: print(f"acceptance criteria migration: {e}")
 
+def migrate_recalc_qc_status():
+    """Recalculate QC report status from data completeness (one-time fix for reports saved with hardcoded 'draft')."""
+    try:
+        with app.app_context():
+            rows = db_fetchall("SELECT id, inspector_name, inspector_date, tpi_name, tpi_date, data FROM qc_reports WHERE 1=1")
+            updated = 0
+            for r in rows:
+                data = json.loads(r['data']) if r['data'] else {}
+                result = data.get('overall_result', '')
+                insp = r.get('inspector_name', '') or ''
+                insp_date = r.get('inspector_date', '') or ''
+                tpi = r.get('tpi_name', '') or ''
+                tpi_date = r.get('tpi_date', '') or ''
+                status = 'draft'
+                if insp and insp_date and result:
+                    status = 'approved' if (tpi and tpi_date) else 'submitted'
+                db_execute("UPDATE qc_reports SET status=? WHERE id=?", (status, r['id']))
+                updated += 1
+            db_commit()
+            if updated: print(f"Recalculated status for {updated} QC reports")
+    except Exception as e:
+        print(f"migrate_recalc_qc_status: {e}")
+
+try: migrate_recalc_qc_status()
+except Exception as e: print(f"recalc qc status migration: {e}")
+
 
 if __name__ == '__main__':
     app.run(host=os.environ.get('HOST','0.0.0.0'), port=int(os.environ.get('PORT',5000)))

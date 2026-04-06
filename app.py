@@ -5647,6 +5647,9 @@ for _tpl in ('HOME_HTML', 'PROJECT_HTML', 'SPOOL_HTML', 'QC_REPORT_HTML', 'REPOR
 try: init_db(); print("DB initialized")
 except Exception as e: print(f"DB init: {e}")
 
+try: migrate_to_new_db()
+except Exception as e: print(f"DB migration: {e}")
+
 def migrate_add_photo_doc():
     """Add photo_doc report type to qc_report_defs for all projects that have defs but lack photo_doc."""
     try:
@@ -5740,43 +5743,54 @@ def migrate_add_acceptance_criteria():
 try: migrate_add_acceptance_criteria()
 except Exception as e: print(f"acceptance criteria migration: {e}")
 
-@app.route('/api/db-dump/<table_name>')
-@login_required
-def api_db_dump(table_name):
-    """Temporary: dump a single table as JSON for migration. Remove after migration."""
-    import re
-    if not re.match(r'^[a-z_]+$', table_name):
-        return jsonify({'error': 'invalid table'}), 400
+def migrate_to_new_db():
+    """One-time: copy all data from current DB to NEW_DATABASE_URL. Runs at startup, auto-removes env var after."""
+    new_url = os.environ.get('NEW_DATABASE_URL')
+    if not new_url:
+        return
+    print("=== MIGRATION: copying data to new DB ===")
+    import psycopg2, psycopg2.extras
     try:
-        rows = db_fetchall(f'SELECT * FROM {table_name}')
-        # Convert non-serializable types
-        import base64, datetime
-        clean = []
-        for r in rows:
-            row = {}
-            for k, v in r.items():
-                if isinstance(v, (bytes, bytearray, memoryview)):
-                    row[k] = {'__bytes__': base64.b64encode(bytes(v)).decode()}
-                elif isinstance(v, datetime.datetime):
-                    row[k] = v.isoformat()
-                else:
-                    row[k] = v
-            clean.append(row)
-        return jsonify({'table': table_name, 'count': len(clean), 'rows': clean})
+        with app.app_context():
+            src = get_db()
+            src_cur = src.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            dst = psycopg2.connect(new_url.replace('postgres://','postgresql://',1))
+            dst.autocommit = True
+            dst_cur = dst.cursor()
+            # Create schema
+            for stmt in PG_SCHEMA_STATEMENTS:
+                try: dst_cur.execute(stmt)
+                except: pass
+            # Get tables
+            src_cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")
+            tables = [r['tablename'] for r in src_cur.fetchall()]
+            for tbl in tables:
+                src_cur.execute(f'SELECT * FROM {tbl}')
+                rows = src_cur.fetchall()
+                if not rows:
+                    print(f"  {tbl}: 0 rows (skip)")
+                    continue
+                cols = list(rows[0].keys())
+                placeholders = ','.join(['%s'] * len(cols))
+                col_names = ','.join([f'"{c}"' for c in cols])
+                ok = 0
+                for row in rows:
+                    vals = [row[c] for c in cols]
+                    try:
+                        dst_cur.execute(f'INSERT INTO {tbl} ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING', vals)
+                        ok += 1
+                    except Exception as e:
+                        print(f"  {tbl} row error: {str(e)[:80]}")
+                        dst.rollback()
+                        dst_cur = dst.cursor()
+                print(f"  {tbl}: {ok}/{len(rows)} rows copied")
+                # Reset sequence
+                try: dst_cur.execute(f"SELECT setval(pg_get_serial_sequence('{tbl}', 'id'), COALESCE((SELECT MAX(id) FROM {tbl}), 1))")
+                except: pass
+            dst.close()
+            print("=== MIGRATION COMPLETE ===")
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/db-tables')
-@login_required
-def api_db_tables():
-    """Temporary: list all tables with row counts."""
-    rows = db_fetchall("SELECT tablename FROM pg_tables WHERE schemaname='public'")
-    tables = {}
-    for r in rows:
-        t = r['tablename']
-        cnt = db_fetchone(f'SELECT COUNT(*) as c FROM {t}')
-        tables[t] = cnt['c']
-    return jsonify(tables)
+        print(f"=== MIGRATION FAILED: {e} ===")
 
 if __name__ == '__main__':
     app.run(host=os.environ.get('HOST','0.0.0.0'), port=int(os.environ.get('PORT',5000)))

@@ -163,6 +163,11 @@ PG_SCHEMA_STATEMENTS = [
             # Chat agent log (production & quality assistant)
             "CREATE TABLE IF NOT EXISTS chat_log (id SERIAL PRIMARY KEY, project TEXT NOT NULL, user_msg TEXT NOT NULL, assistant_msg TEXT NOT NULL, tools_used TEXT DEFAULT '[]', feedback TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_chat_log_project ON chat_log(project, created_at)",
+            # Performance indexes
+            "CREATE INDEX IF NOT EXISTS idx_project_settings_pk ON project_settings(project, key)",
+            "CREATE INDEX IF NOT EXISTS idx_activity_log_pat ON activity_log(project, action, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_progress_psc ON progress(project, step_number, completed)",
+            "CREATE INDEX IF NOT EXISTS idx_spools_pd ON spools(project, main_diameter)",
 ]
 
 def init_db():
@@ -212,12 +217,16 @@ QC_CATEGORY_LABELS = {
 }
 
 def get_qc_setting(project, key, default=None):
-    """Get a QC-related project setting, parsing JSON if needed."""
-    row = db_fetchone("SELECT value FROM project_settings WHERE project=? AND key=?", (project, key))
-    if not row:
+    """Get a QC-related project setting, parsing JSON if needed. Uses cached settings when available."""
+    cache_key = f'_settings_{project}'
+    if hasattr(g, cache_key):
+        val = getattr(g, cache_key).get(key)
+    else:
+        row = db_fetchone("SELECT value FROM project_settings WHERE project=? AND key=?", (project, key))
+        val = row['value'] if row else None
+    if val is None:
         return default
-    val = row['value']
-    if val and val.startswith(('[', '{')):
+    if isinstance(val, str) and val.startswith(('[', '{')):
         return json.loads(val)
     return val
 
@@ -257,7 +266,10 @@ def get_project_steps(project):
     return rows
 
 def get_project_settings(project):
-    """Get project settings with defaults."""
+    """Get project settings with defaults. Cached per request."""
+    cache_key = f'_settings_{project}'
+    if hasattr(g, cache_key):
+        return getattr(g, cache_key)
     rows = db_fetchall("SELECT key, value FROM project_settings WHERE project=?", (project,))
     settings = {r['key']: r['value'] for r in rows}
     # Migrate old setting names to new ones
@@ -270,10 +282,14 @@ def get_project_settings(project):
                 'spools_per_day':'{}', 'secondary_phase_days':'13'}
     for k,v in defaults.items():
         if k not in settings: settings[k] = v
+    setattr(g, cache_key, settings)
     return settings
 
 def get_diameter_order(project):
-    """Get diameter order for a project, sorted descending by numeric value."""
+    """Get diameter order for a project, sorted descending by numeric value. Cached per request."""
+    cache_key = f'_diameters_{project}'
+    if hasattr(g, cache_key):
+        return getattr(g, cache_key)
     rows = db_fetchall("SELECT DISTINCT main_diameter FROM spools WHERE project=? AND main_diameter != '' AND main_diameter != ?", (project, '?'))
     diameters = []
     for r in rows:
@@ -281,7 +297,9 @@ def get_diameter_order(project):
         try: diameters.append((float(d), d))
         except ValueError: diameters.append((0, d))
     diameters.sort(reverse=True)
-    return [d[1] for d in diameters]
+    result = [d[1] for d in diameters]
+    setattr(g, cache_key, result)
+    return result
 
 # ── Helpers: Progress Calculation ─────────────────────────────────────────────
 def get_phase_order(steps_def):
@@ -852,28 +870,35 @@ def past_hold_point_count(project):
     return row['cnt'] if row else 0
 
 def daily_production_rate(project):
-    """Calculate 7-day average production rate and today's steps."""
+    """Calculate 7-day average production rate and today's steps. Single query."""
     today = date.today()
     week_ago = today - timedelta(days=7)
     two_weeks_ago = today - timedelta(days=14)
     if USE_PG:
-        this_week_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date AND timestamp::date <= ?::date", (project, str(week_ago), str(today)))
-        last_week_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date AND timestamp::date < ?::date", (project, str(two_weeks_ago), str(week_ago)))
-        today_steps = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date = ?::date", (project, str(today)))
-        today_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp::date = ?::date", (project, str(today)))
+        row = db_fetchone("""
+            SELECT
+                COUNT(DISTINCT CASE WHEN timestamp::date >= ?::date AND timestamp::date <= ?::date THEN spool_id END) as this_week,
+                COUNT(DISTINCT CASE WHEN timestamp::date >= ?::date AND timestamp::date < ?::date THEN spool_id END) as last_week,
+                COUNT(CASE WHEN timestamp::date = ?::date THEN 1 END) as today_steps,
+                COUNT(DISTINCT CASE WHEN timestamp::date = ?::date THEN spool_id END) as today_spools
+            FROM activity_log WHERE project=? AND action='completed' AND timestamp::date >= ?::date
+        """, (str(week_ago), str(today), str(two_weeks_ago), str(week_ago), str(today), str(today), project, str(two_weeks_ago)))
     else:
-        this_week_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ? AND timestamp <= ?", (project, str(week_ago), str(today) + ' 23:59:59'))
-        last_week_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ? AND timestamp < ?", (project, str(two_weeks_ago), str(week_ago)))
-        today_steps = db_fetchall("SELECT COUNT(*) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp LIKE ?", (project, str(today) + '%'))
-        today_spools = db_fetchall("SELECT COUNT(DISTINCT spool_id) as cnt FROM activity_log WHERE project=? AND action='completed' AND timestamp LIKE ?", (project, str(today) + '%'))
-    this_wk = this_week_spools[0]['cnt'] if this_week_spools else 0
-    last_wk = last_week_spools[0]['cnt'] if last_week_spools else 0
-    today_cnt = today_steps[0]['cnt'] if today_steps else 0
-    today_sp = today_spools[0]['cnt'] if today_spools else 0
+        row = db_fetchone("""
+            SELECT
+                COUNT(DISTINCT CASE WHEN timestamp >= ? AND timestamp <= ? THEN spool_id END) as this_week,
+                COUNT(DISTINCT CASE WHEN timestamp >= ? AND timestamp < ? THEN spool_id END) as last_week,
+                COUNT(CASE WHEN timestamp LIKE ? THEN 1 END) as today_steps,
+                COUNT(DISTINCT CASE WHEN timestamp LIKE ? THEN spool_id END) as today_spools
+            FROM activity_log WHERE project=? AND action='completed' AND timestamp >= ?
+        """, (str(week_ago), str(today) + ' 23:59:59', str(two_weeks_ago), str(week_ago), str(today) + '%', str(today) + '%', project, str(two_weeks_ago)))
+    this_wk = row['this_week'] if row else 0
+    last_wk = row['last_week'] if row else 0
     avg_7day = round(this_wk / 7, 1)
     avg_prev = round(last_wk / 7, 1)
     trend = round(avg_7day - avg_prev, 1)
-    return {'avg_7day': avg_7day, 'avg_prev_week': avg_prev, 'trend': trend, 'today_steps': today_cnt, 'today_spools': today_sp}
+    return {'avg_7day': avg_7day, 'avg_prev_week': avg_prev, 'trend': trend,
+            'today_steps': row['today_steps'] if row else 0, 'today_spools': row['today_spools'] if row else 0}
 
 def generate_report_data(project):
     """Build full report data for a project."""

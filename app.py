@@ -1531,11 +1531,15 @@ def api_qc_get(project, spool_id, report_type):
     defs = get_qc_report_defs(project)
     itp_step = 0
     rec_no = ''
+    report_def = {}
     for d in defs:
         if d['type'] == report_type and d.get('report_subtype','') == subtype:
             itp_step = d.get('itp_step', 0)
             rec_no = get_record_number(project, spool_id, d['rec_seq'])
+            report_def = d
             break
+    # Extract configurable fields from report definition for frontend renderers
+    def_fields = {k: report_def.get(k, '') for k in ('standard', 'ferrite_min', 'ferrite_max', 'dimensional_tolerance_mm') if report_def.get(k) is not None}
     step_date = ''
     if itp_step:
         sr = db_fetchone("SELECT completed_at FROM progress WHERE project=? AND spool_id=? AND step_number=? AND completed=1", (project, spool_id, itp_step))
@@ -1555,20 +1559,24 @@ def api_qc_get(project, spool_id, report_type):
         proj_info = get_qc_project_info(project)
         r['itp'] = proj_info.get('itp', '')
         r['material_type'] = proj_info.get('material_type', '')
+        r['material'] = proj_info.get('material', '')
         r.update(spool_info)
+        r.update(def_fields)
         img_count = db_fetchone("SELECT COUNT(*) as cnt FROM qc_images WHERE project=? AND spool_id=? AND report_type=?",
                                 (project, spool_id, report_type))
         r['image_count'] = img_count['cnt'] if img_count else 0
         return jsonify(r)
     # Return empty template
+    proj_info = get_qc_project_info(project)
     return jsonify({
         'project': project, 'spool_id': spool_id, 'report_type': report_type,
         'report_subtype': subtype, 'status': 'not_started',
         'inspector_name': '', 'inspector_date': '', 'tpi_name': '', 'tpi_date': '',
         'data': {}, 'image_count': 0, 'step_date': step_date, 'rec_no': rec_no,
-        'itp': get_qc_project_info(project).get('itp', ''),
-        'material_type': get_qc_project_info(project).get('material_type', ''),
-        **spool_info,
+        'itp': proj_info.get('itp', ''),
+        'material_type': proj_info.get('material_type', ''),
+        'material': proj_info.get('material', ''),
+        **spool_info, **def_fields,
     })
 
 @app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>', methods=['POST'])
@@ -2190,7 +2198,8 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
     elif rt == 'pmi':
         y = section_title('PMI Test Points', y)
         items = data.get('items', [])
-        rows = [[it.get('item',''), it.get('location',''), str(it.get('cr','')), str(it.get('ni','')), str(it.get('mo','')), 'S32205' if it.get('grade_ok') else '—', it.get('result','—')] for it in items]
+        pmi_grade = proj_info.get('material', '').split('/')[0].strip() if proj_info.get('material') else '—'
+        rows = [[it.get('item',''), it.get('location',''), str(it.get('cr','')), str(it.get('ni','')), str(it.get('mo','')), pmi_grade if it.get('grade_ok') else '—', it.get('result','—')] for it in items]
         y = draw_table(['Item', 'Location', 'Cr%', 'Ni%', 'Mo%', 'Grade', 'Result'], rows, yy=y)
 
     elif rt == 'ferrite':
@@ -2201,7 +2210,9 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
             r1, r2, r3 = rd.get('r1'), rd.get('r2'), rd.get('r3')
             avg = f"{((r1+r2+r3)/3):.1f}%" if all(v is not None for v in [r1,r2,r3]) else '—'
             avg_val = (r1+r2+r3)/3 if all(v is not None for v in [r1,r2,r3]) else None
-            result = 'ACC' if (avg_val and 30 <= avg_val <= 65) else ('REJ' if avg_val else '—')
+            f_min = report_def.get('ferrite_min', 30)
+            f_max = report_def.get('ferrite_max', 65)
+            result = 'ACC' if (avg_val and f_min <= avg_val <= f_max) else ('REJ' if avg_val else '—')
             rows.append([rd.get('weld_tag',''), str(r1 or ''), str(r2 or ''), str(r3 or ''), avg, result])
         y = draw_table(['Weld', 'R1 (%)', 'R2 (%)', 'R3 (%)', 'Average', 'Result'], rows, yy=y)
 
@@ -2212,7 +2223,8 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
             nom = data.get(f'nominal_{k}_mm')
             act = data.get(f'actual_{k}_mm')
             dev = f"{(act-nom):.1f}mm" if nom and act else '—'
-            ok = 'ACC' if (nom and act and abs(act-nom) <= 5) else ('REJ' if nom and act else '—')
+            dim_tol = report_def.get('dimensional_tolerance_mm', 5)
+            ok = 'ACC' if (nom and act and abs(act-nom) <= dim_tol) else ('REJ' if nom and act else '—')
             rows.append([label, str(int(nom)) if nom else '—', str(int(act)) if act else '—', dev, ok])
         y = draw_table(['Dimension', 'Nominal (mm)', 'Actual (mm)', 'Dev.', 'Result'], rows, yy=y)
         flanges = data.get('flanges', [])
@@ -4217,7 +4229,7 @@ function renderCutting(data){
 function renderFitup(data){
   const welds = data.welds || [];
   let html = sH('Fit-up & Alignment — Geometric Check / 组对校准—几何检查');
-  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME B16.25 + WPS<br>Detailed measurements in Dimensional Report / 详细测量见尺寸报告</div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ${reportData.standard||'ASME B16.25 + WPS'}<br>Detailed measurements in Dimensional Report / 详细测量见尺寸报告</div>`;
   if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
   else {
     html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
@@ -4329,7 +4341,7 @@ const VT_CHECKS = [
 ];
 function renderVT(data){
   let html = sH('Visual Testing Checklist / 目视检验清单');
-  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME B31.3 Table 341.3.2 / ASME Section V Art. 9</div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ${reportData.standard||'ASME B31.3 Table 341.3.2 / ASME Section V Art. 9'}</div>`;
   html += '<table style="width:100%;border-collapse:collapse;font-size:11px">';
   VT_CHECKS.forEach((c,i) => {
     const val = data[c.key];
@@ -4362,7 +4374,7 @@ function renderRT(data){
     <div><label style="font-size:10px;color:#888">Density Range / 黑度范围</label>${inp('density_range',data.density_range,{def:'1.8-4.0'})}</div>
     <div><label style="font-size:10px;color:#888">Technique / 透照方式</label>${inp('technique',data.technique,{def:'SWSI'})}</div>
   </div>
-  <div class="acc-box" style="margin-top:8px"><strong>Exam Standard / 检验标准:</strong> Art.2 of ASME V<br><strong>Acceptance / 验收标准:</strong> ASME B31.3</div>`;
+  <div class="acc-box" style="margin-top:8px"><strong>Standard / 标准:</strong> ${reportData.standard||'ASME V Art. 2 / ASME B31.3'}</div>`;
   html += '</div>';
   html += sH('Film Results / 底片检查结果 <span style="font-size:10px;font-weight:400;color:#888">(3 films per weld)</span>');
   if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入<br><small>Hugo will upload RT results / Hugo将上传RT结果</small></p>';}
@@ -4398,7 +4410,7 @@ function renderPT(data){
   const isDuplex = MATERIAL_TYPE==='duplex';
   let html = sH('PT Procedure / 渗透检测规程');
   if(isDuplex) html += `<div class="warn-box">⚠ Chloride-free penetrant mandatory for Duplex SS / 双相不锈钢必须使用无氯渗透剂 / 双相不锈钢必须使用无氯渗透剂</div>`;
-  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME Section V, Article 6<br><strong>Acceptance / 验收:</strong> ASME B31.3 Table 341.3.2</div></div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ${reportData.standard||'ASME Section V, Article 6 / ASME B31.3'}</div></div>`;
   html += sH('Weld Examination / 焊缝检查');
   if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
   else {
@@ -4419,12 +4431,12 @@ function renderPT(data){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 7. MT — Per weld pass/fail (ASME V Art. 7, 424 CS only)
+// 7. MT — Per weld pass/fail
 // ══════════════════════════════════════════════════════════════════════════════
 function renderMT(data){
   const welds = data.welds || [];
   let html = sH('MT Procedure / 磁粉检测规程');
-  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME Section V, Article 7<br><strong>Acceptance / 验收:</strong> ASME B31.3 Table 341.3.2</div></div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ${reportData.standard||'ASME Section V, Article 7 / ASME B31.3'}</div></div>`;
   html += sH('Weld Examination / 焊缝检查');
   if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
   else {
@@ -4445,7 +4457,7 @@ function renderMT(data){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 8. PMI (ASME B31.3 Sec 323.2.4) — 423 Duplex only
+// 8. PMI — Positive Material Identification
 // ══════════════════════════════════════════════════════════════════════════════
 function renderPMI(data){
   const items = data.items || [];
@@ -4454,7 +4466,7 @@ function renderPMI(data){
     <div><label style="font-size:10px;color:#888">Instrument / 仪器</label>${inp('instrument_model',data.instrument_model)}</div>
     <div><label style="font-size:10px;color:#888">Serial No. / Cal. Date / 序列号/校准日期</label>${inp('instrument_serial',data.instrument_serial)}</div>
   </div>`;
-  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASME B31.3 Sec 323.2.4<br><strong>Expected Grade / 期望牌号:</strong> UNS S32205 (22Cr-5Ni-3Mo)</div></div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ${reportData.standard||'ASME B31.3 Sec 323.2.4'}${reportData.material?'<br><strong>Expected Grade / 期望牌号:</strong> '+reportData.material:''}</div></div>`;
   html += sH('PMI Test Points / PMI检测点');
   if(!items.length){html += '<p style="color:#888;text-align:center;padding:12px">No data — Seed from DXF / 无数据</p>';}
   else {
@@ -4479,16 +4491,18 @@ function renderPMI(data){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 9. FERRITE — 3 readings per weld, auto average, auto pass/fail 30-65%
+// 9. FERRITE — 3 readings per weld, auto average, configurable pass/fail range
 // ══════════════════════════════════════════════════════════════════════════════
 function renderFerrite(data){
   const readings = data.readings || [];
+  const fMin = reportData.ferrite_min || 30;
+  const fMax = reportData.ferrite_max || 65;
   let html = sH('Ferrite Instrument / 铁素体测量设备');
   html += `<div class="weld-grid" style="grid-template-columns:1fr 1fr">
     <div><label style="font-size:10px;color:#888">Instrument / 仪器</label>${inp('instrument_model',data.instrument_model)}</div>
     <div><label style="font-size:10px;color:#888">Serial No. / Cal. Date / 序列号/校准日期</label>${inp('instrument_serial',data.instrument_serial)}</div>
   </div>`;
-  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ASTM A799/A800, AWS A4.2<br><strong>Acceptance Range / 验收范围:</strong> 30% – 65% (3 readings per weld → average)</div></div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ${reportData.standard||'ASTM A799/A800, AWS A4.2'}<br><strong>Acceptance Range / 验收范围:</strong> ${fMin}% – ${fMax}% (3 readings per weld → average)</div></div>`;
   html += sH('Ferrite Readings / 铁素体读数');
   if(!readings.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入</p>';}
   else {
@@ -4498,7 +4512,7 @@ function renderFerrite(data){
       <th style="padding:4px;border:1px solid #ddd">Average<br>平均</th><th style="padding:4px;border:1px solid #ddd">Result / 结果</th></tr>`;
     readings.forEach((rd,i) => {
       const avg = (rd.r1!=null&&rd.r2!=null&&rd.r3!=null)?((rd.r1+rd.r2+rd.r3)/3).toFixed(1):'';
-      const pass = avg?(parseFloat(avg)>=30&&parseFloat(avg)<=65):null;
+      const pass = avg?(parseFloat(avg)>=fMin&&parseFloat(avg)<=fMax):null;
       html += `<tr><td style="padding:4px 6px;border:1px solid #ddd;font-weight:600">${rd.weld_tag||'W'+(i+1)} <span style="font-size:9px;color:#888">${rd.size||''}</span></td>
         <td style="padding:3px;border:1px solid #ddd">${inp('readings.'+i+'.r1',rd.r1,{type:'number',style:'padding:3px;font-size:10px;width:55px'})}</td>
         <td style="padding:3px;border:1px solid #ddd">${inp('readings.'+i+'.r2',rd.r2,{type:'number',style:'padding:3px;font-size:10px;width:55px'})}</td>
@@ -4518,6 +4532,7 @@ function renderFerrite(data){
 // ══════════════════════════════════════════════════════════════════════════════
 function renderDimensional(data){
   const ref = data.drawing_ref || `${P}-${S}`;
+  const dimTol = reportData.dimensional_tolerance_mm || 5;
   let html = sH(`Overall Dimensions / 总体尺寸 <span style="font-size:10px;font-weight:400;color:#888">${ref}</span>`);
   const dims = [{k:'l',en:'Length / 长度'},{k:'w',en:'Width / 宽度'},{k:'h',en:'Height / 高度'}];
   html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
@@ -4526,7 +4541,7 @@ function renderDimensional(data){
   dims.forEach(dim=>{
     const nom=data['nominal_'+dim.k+'_mm']||'';const act=data['actual_'+dim.k+'_mm']||'';
     const dev=(nom&&act)?(parseFloat(act)-parseFloat(nom)).toFixed(1):'';
-    const ok=dev?Math.abs(parseFloat(dev))<=5:null;
+    const ok=dev?Math.abs(parseFloat(dev))<=dimTol:null;
     html += `<tr><td style="padding:4px 8px;border:1px solid #ddd;font-weight:600">${dim.en}</td>
       <td style="padding:4px;border:1px solid #ddd">${inp('nominal_'+dim.k+'_mm',nom,{type:'number',ph:'From drawing / 图纸标称'})}</td>
       <td style="padding:4px;border:1px solid #ddd">${inp('actual_'+dim.k+'_mm',act,{type:'number',ph:'Measured / 实测'})}</td>
@@ -4569,10 +4584,10 @@ function renderDimensional(data){
 // 11. FERROXYL — Full duplex scope per Danny's spec
 // ══════════════════════════════════════════════════════════════════════════════
 function renderFerroxyl(data){
-  let html = sH('Ferroxyl Test — Duplex S32205 / 铁离子检测');
+  let html = sH('铁离子检测 / Ferroxyl Test');
   html += `<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:6px;padding:10px;font-size:11px;margin-bottom:8px">
-    <div><strong>Material / 材料:</strong> UNS S32205 / Duplex 2205</div>
-    <div><strong>Standard / 标准:</strong> ASTM A380/A380M-2017</div>
+    <div><strong>Material / 材料:</strong> ${reportData.material||'—'}</div>
+    <div><strong>Standard / 标准:</strong> ${reportData.standard||'ASTM A380/A380M'}</div>
     <div><strong>Method / 方法:</strong> Copper Sulfate Test / 硫酸铜试验 (Para 7.3.4)</div>
     <div><strong>Contact Time / 接触时间:</strong> Minimum 6 minutes / 最少6分钟</div>
     <div><strong>Acceptance / 验收:</strong> No copper deposition / 无铜沉积 / no copper plating</div>
@@ -4599,14 +4614,14 @@ function renderFerroxyl(data){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 12. Passivation & Pickling / 酸洗钝化 (423 Duplex only)
+// 12. Passivation & Pickling / 酸洗钝化
 // ══════════════════════════════════════════════════════════════════════════════
 function renderPassivation(data){
   let html = sH('酸洗钝化 / Passivation & Pickling');
   html += `<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:6px;padding:12px;font-size:13px;margin-bottom:8px">
-    <div><strong>材料:</strong> UNS S32205 / Duplex 2205</div>
+    <div><strong>材料:</strong> ${reportData.material||'—'}</div>
     <div><strong>方法:</strong> 电解酸洗钝化 / Electrolytic Pickling (Cougartron)</div>
-    <div><strong>标准:</strong> NORSOK M-601 / ASTM A380</div>
+    <div><strong>标准:</strong> ${reportData.standard||'NORSOK M-601 / ASTM A380'}</div>
     <div><strong>电解液:</strong> 无氯无氟磷酸基 / Phosphoric acid, Cl/F-free</div>
     <div><strong>中和:</strong> pH 6-8</div>
     <div style="margin-top:8px;color:#8E44AD;font-size:12px"><strong>范围:</strong> 100% 焊缝 + 热影响区 + 打磨/修复区域</div>
@@ -4630,7 +4645,7 @@ function renderPassivation(data){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 13. DFT — Coating inspection (ISO 19840, 424 CS only)
+// 13. DFT — Coating inspection
 // ══════════════════════════════════════════════════════════════════════════════
 function renderDFT(data){
   let html = sH('Coating System / 涂层体系');
@@ -4640,7 +4655,7 @@ function renderDFT(data){
     <div><label style="font-size:10px;color:#888">Specified NDFT (µm) / 规定干膜厚度</label>${inp('spec_dft',data.spec_dft,{ph:'250-350 / 规定厚度'})}</div>
     <div><label style="font-size:10px;color:#888">Surface Prep / 表面处理</label>${inp('surface_prep',data.surface_prep,{ph:'ISO 8501-1 Sa 2.5 / 表面处理标准'})}</div>
   </div>`;
-  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ISO 19840 / ISO 4624 / ISO 8501<br><strong>Rule / 规则:</strong> No reading / 无读数 &lt; 80% NDFT, average ≥ NDFT</div></div>`;
+  html += `<div class="acc-box"><strong>Standard / 标准:</strong> ${reportData.standard||'ISO 19840 / ISO 4624 / ISO 8501'}<br><strong>Rule / 规则:</strong> No reading / 无读数 &lt; 80% NDFT, average ≥ NDFT</div></div>`;
   const readings = data.readings||[{point:'Spot 1',value:null},{point:'Spot 2',value:null},{point:'Spot 3',value:null},{point:'Spot 4',value:null},{point:'Spot 5',value:null}];
   if(!data.readings)reportData.data.readings=readings;
   html += sH('DFT Readings / 干膜厚度读数');
@@ -5697,6 +5712,33 @@ def migrate_add_passivation():
 
 try: migrate_add_passivation()
 except Exception as e: print(f"passivation migration: {e}")
+
+def migrate_add_acceptance_criteria():
+    """Add configurable acceptance criteria fields to report defs that need them."""
+    try:
+        with app.app_context():
+            rows = db_fetchall("SELECT project, value FROM project_settings WHERE key=?", ('qc_report_defs',))
+            for row in rows:
+                defs = json.loads(row['value']) if row['value'] else []
+                changed = False
+                for d in defs:
+                    if d['type'] == 'ferrite' and 'ferrite_min' not in d:
+                        d['ferrite_min'] = 30
+                        d['ferrite_max'] = 65
+                        changed = True
+                    if d['type'] == 'dimensional' and 'dimensional_tolerance_mm' not in d:
+                        d['dimensional_tolerance_mm'] = 5
+                        changed = True
+                if changed:
+                    db_execute("UPDATE project_settings SET value=? WHERE project=? AND key=?",
+                               (json.dumps(defs), row['project'], 'qc_report_defs'))
+                    db_commit()
+                    print(f"Added acceptance criteria to {row['project']}")
+    except Exception as e:
+        print(f"migrate_add_acceptance_criteria: {e}")
+
+try: migrate_add_acceptance_criteria()
+except Exception as e: print(f"acceptance criteria migration: {e}")
 
 if __name__ == '__main__':
     app.run(host=os.environ.get('HOST','0.0.0.0'), port=int(os.environ.get('PORT',5000)))

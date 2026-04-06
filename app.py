@@ -5740,5 +5740,70 @@ def migrate_add_acceptance_criteria():
 try: migrate_add_acceptance_criteria()
 except Exception as e: print(f"acceptance criteria migration: {e}")
 
+@app.route('/api/migrate-to-frankfurt', methods=['POST'])
+@login_required
+def api_migrate_frankfurt():
+    """Temporary: copy all data from current DB to Frankfurt DB. Remove after migration."""
+    target_url = request.json.get('target_url', '')
+    if not target_url:
+        return jsonify({'error': 'target_url required'}), 400
+    import psycopg2, psycopg2.extras
+    src = get_db()
+    src_cur = src.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    dst = psycopg2.connect(target_url.replace('postgres://','postgresql://',1))
+    dst.autocommit = True
+    dst_cur = dst.cursor()
+    # Copy schema from source to target
+    src_cur.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")
+    tables = [r['tablename'] for r in src_cur.fetchall()]
+    for tbl in tables:
+        src_cur.execute(f"SELECT column_name, data_type, column_default, is_nullable FROM information_schema.columns WHERE table_name='{tbl}' ORDER BY ordinal_position")
+        cols_info = src_cur.fetchall()
+        col_defs = []
+        for ci in cols_info:
+            cdef = f'"{ci["column_name"]}" {ci["data_type"]}'
+            if ci['column_default']: cdef += f' DEFAULT {ci["column_default"]}'
+            if ci['is_nullable'] == 'NO': cdef += ' NOT NULL'
+            col_defs.append(cdef)
+        try: dst_cur.execute(f'CREATE TABLE IF NOT EXISTS {tbl} ({", ".join(col_defs)})')
+        except Exception as e: print(f'DDL {tbl}: {e}')
+    # Copy indexes
+    src_cur.execute("SELECT indexdef FROM pg_indexes WHERE schemaname='public'")
+    for idx in src_cur.fetchall():
+        try: dst_cur.execute(idx['indexdef'].replace('CREATE INDEX', 'CREATE INDEX IF NOT EXISTS').replace('CREATE UNIQUE INDEX', 'CREATE UNIQUE INDEX IF NOT EXISTS'))
+        except: pass
+    results = {}
+    for tbl in tables:
+        src_cur.execute(f'SELECT * FROM {tbl}')
+        rows = src_cur.fetchall()
+        if not rows:
+            results[tbl] = 0
+            continue
+        cols = list(rows[0].keys())
+        # Create table in target (use source DDL)
+        src_cur.execute(f"SELECT pg_get_tabledef_ext('{tbl}')") if False else None
+        # Insert rows
+        placeholders = ','.join(['%s'] * len(cols))
+        col_names = ','.join([f'"{c}"' for c in cols])
+        for row in rows:
+            vals = [row[c] for c in cols]
+            try:
+                dst_cur.execute(f'INSERT INTO {tbl} ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING', vals)
+            except Exception as e:
+                dst.rollback()
+                dst_cur = dst.cursor()
+                results[tbl] = f'error: {str(e)[:100]}'
+                break
+        else:
+            results[tbl] = len(rows)
+    # Reset sequences
+    for tbl in tables:
+        try:
+            dst_cur.execute(f"SELECT setval(pg_get_serial_sequence('{tbl}', 'id'), COALESCE((SELECT MAX(id) FROM {tbl}), 1))")
+        except:
+            pass
+    dst.close()
+    return jsonify({'ok': True, 'tables': results})
+
 if __name__ == '__main__':
     app.run(host=os.environ.get('HOST','0.0.0.0'), port=int(os.environ.get('PORT',5000)))

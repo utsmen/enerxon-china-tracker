@@ -1616,14 +1616,19 @@ def api_qc_get(project, spool_id, report_type):
 def api_qc_save(project, spool_id, report_type):
     d = request.get_json() or {}
     subtype = d.get('report_subtype', '')
-    status = d.get('status', 'draft')
     inspector = d.get('inspector_name', '')
     inspector_date = d.get('inspector_date', '')
     tpi = d.get('tpi_name', '')
     tpi_date = d.get('tpi_date', '')
-    data_json = json.dumps(d.get('data', {}))
+    data = d.get('data', {})
+    data_json = json.dumps(data)
     created_by = d.get('created_by', inspector)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Derive status from data completeness — single source of truth
+    result = data.get('overall_result', '')
+    status = 'draft'
+    if inspector and inspector_date and result:
+        status = 'approved' if (tpi and tpi_date) else 'submitted'
     if USE_PG:
         db_execute("""INSERT INTO qc_reports (project,spool_id,report_type,report_subtype,status,inspector_name,inspector_date,tpi_name,tpi_date,data,created_by,updated_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
@@ -4923,7 +4928,7 @@ async function doSave(){
   const insp = document.getElementById('inspector').value;
   localStorage.setItem('qc_inspector', insp);
   const body = {
-    report_subtype: SUB, status: 'draft',
+    report_subtype: SUB,
     inspector_name: insp, inspector_date: document.getElementById('insp-date').value,
     tpi_name: document.getElementById('tpi').value, tpi_date: document.getElementById('tpi-date').value,
     data: reportData.data,

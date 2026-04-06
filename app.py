@@ -4161,6 +4161,7 @@ const REPORT_FIELDS = {
   ferrite:     { title:'Ferrite Content / 铁素体含量', render: renderFerrite, hasImages: true },
   dimensional: { title:'Dimensional Inspection / 尺寸检验', render: renderDimensional },
   ferroxyl:    { title:'Ferroxyl Test / 铁离子检测', render: renderFerroxyl, hasImages: true },
+  passivation: { title:'酸洗钝化 / Passivation & Pickling', render: renderPassivation, hasImages: true },
   dft:         { title:'Coating Inspection (DFT) / 涂层检验', render: renderDFT },
   photo_doc:   { title:'Photo Documentation / 照片记录', render: renderPhotoDoc, imageCategories: true },
 };
@@ -4598,7 +4599,38 @@ function renderFerroxyl(data){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 12. DFT — Coating inspection (ISO 19840, 424 CS only)
+// 12. Passivation & Pickling / 酸洗钝化 (423 Duplex only)
+// ══════════════════════════════════════════════════════════════════════════════
+function renderPassivation(data){
+  let html = sH('酸洗钝化 / Passivation & Pickling');
+  html += `<div style="background:#f8f9fa;border:1px solid #ddd;border-radius:6px;padding:12px;font-size:13px;margin-bottom:8px">
+    <div><strong>材料:</strong> UNS S32205 / Duplex 2205</div>
+    <div><strong>方法:</strong> 电解酸洗钝化 / Electrolytic Pickling (Cougartron)</div>
+    <div><strong>标准:</strong> NORSOK M-601 / ASTM A380</div>
+    <div><strong>电解液:</strong> 无氯无氟磷酸基 / Phosphoric acid, Cl/F-free</div>
+    <div><strong>中和:</strong> pH 6-8</div>
+    <div style="margin-top:8px;color:#8E44AD;font-size:12px"><strong>范围:</strong> 100% 焊缝 + 热影响区 + 打磨/修复区域</div>
+  </div></div>`;
+  html += sH('处理区域 / Areas Treated');
+  const areas = data.areas || [{area:'焊缝 + 热影响区 / Welds + HAZ',result:null},{area:'打磨/修复区域 / Ground/repaired areas',result:null}];
+  if(!data.areas) reportData.data.areas = areas;
+  html += `<table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="background:#f0f2f5">
+    <th style="padding:8px;border:1px solid #ddd;text-align:left">处理区域 / Area</th>
+    <th style="padding:8px;border:1px solid #ddd;width:100px">结果 / Result</th></tr>`;
+  areas.forEach((a,i)=>{
+    html += `<tr><td style="padding:6px 8px;border:1px solid #ddd">${inp('areas.'+i+'.area',a.area,{style:'font-size:12px;padding:6px'})}</td>
+      ${accRejCell('areas.'+i+'.result',a.result)}</tr>`;
+  });
+  html += '</table></div>';
+  html += `<div class="qc-section" style="text-align:center;padding:16px">
+    <p style="font-size:14px;color:#555;margin-bottom:4px"><strong>📷 请拍摄至少3张钝化后的照片</strong></p>
+    <p style="font-size:11px;color:#888">Take at least 3 photos after passivation</p></div>`;
+  html += sH('备注 / Remarks') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff;font-size:13px" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
+  document.getElementById('report-body').innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 13. DFT — Coating inspection (ISO 19840, 424 CS only)
 // ══════════════════════════════════════════════════════════════════════════════
 function renderDFT(data){
   let html = sH('Coating System / 涂层体系');
@@ -4634,7 +4666,7 @@ function renderDFT(data){
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 13. Photo Documentation / 照片记录 (both projects)
+// 14. Photo Documentation / 照片记录 (both projects)
 // ══════════════════════════════════════════════════════════════════════════════
 function getPhotoCategories(){
   const isSpool = reportData.spool_type !== 'STRAIGHT';
@@ -5627,6 +5659,44 @@ def migrate_add_photo_doc():
 
 try: migrate_add_photo_doc()
 except Exception as e: print(f"photo_doc migration: {e}")
+
+def migrate_add_passivation():
+    """Add passivation report to duplex projects (material_type check, not hardcoded project ID)."""
+    try:
+        with app.app_context():
+            rows = db_fetchall("SELECT project, value FROM project_settings WHERE key=?", ('qc_report_defs',))
+            for row in rows:
+                defs = json.loads(row['value']) if row['value'] else []
+                if any(d.get('type') == 'passivation' for d in defs):
+                    continue
+                # Only add to duplex projects
+                proj_info = get_qc_project_info(row['project'])
+                if proj_info.get('material_type') != 'duplex':
+                    continue
+                max_seq = max((int(d.get('rec_seq','0')) for d in defs), default=0)
+                # Insert before photo_doc (last report) if it exists, otherwise append
+                photo_idx = next((i for i,d in enumerate(defs) if d.get('type')=='photo_doc'), None)
+                entry = {
+                    'type': 'passivation', 'name_en': 'Passivation & Pickling', 'name_cn': '\u9178\u6d17\u94dd\u5316',
+                    'rec_seq': f"{max_seq + 1:03d}", 'itp_step': 0, 'category': 'surface',
+                    'icon': '\U0001f9ea', 'standard': 'NORSOK M-601 / ASTM A380', 'spool_only': True,
+                    'has_images': True,
+                }
+                if photo_idx is not None:
+                    defs.insert(photo_idx, entry)
+                    # Fix photo_doc rec_seq to stay after
+                    defs[photo_idx+1]['rec_seq'] = f"{max_seq + 2:03d}"
+                else:
+                    defs.append(entry)
+                db_execute("UPDATE project_settings SET value=? WHERE project=? AND key=?",
+                           (json.dumps(defs), row['project'], 'qc_report_defs'))
+                db_commit()
+                print(f"Added passivation to {row['project']} as rec_seq {entry['rec_seq']}")
+    except Exception as e:
+        print(f"migrate_add_passivation: {e}")
+
+try: migrate_add_passivation()
+except Exception as e: print(f"passivation migration: {e}")
 
 if __name__ == '__main__':
     app.run(host=os.environ.get('HOST','0.0.0.0'), port=int(os.environ.get('PORT',5000)))

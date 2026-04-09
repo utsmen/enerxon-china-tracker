@@ -3420,50 +3420,7 @@ def api_report_pdf(project):
             story.append(KeepTogether(gantt_elems))
             story.append(Spacer(1, 6*mm))
 
-        # ── 5. Production Rate ───────────────────────────────────────────────
-        actual_weld = fc_data.get('actual_weld_ipd', 0) or 0
-        actual_paint = fc_data.get('actual_paint_m2d', 0) or 0
-        weld_cap = fc_data.get('welding_capability', 0) or 0
-        paint_cap = fc_data.get('painting_capability', 0) or 0
-        steps_def = get_project_steps(project)
-        has_surface = any(s.get('hours_variable') == 'surface' for s in steps_def)
-
-        rate_elems = [p('PRODUCTION RATE', s_heading)]
-        rate_data = []
-        weld_color = '#27AE60' if actual_weld >= weld_cap else '#E74C3C'
-        weld_pct = min(actual_weld / max(weld_cap, 1) * 100, 100) if weld_cap else 0
-        rate_data.append([
-            p('<b>Welding</b>', s_cell_left),
-            p(f'<font color="{weld_color}" size="12"><b>{actual_weld}</b></font>', s_cell),
-            p(f'/ {weld_cap}', s_cell),
-            p('linear inches/day', s_cell),
-            p(f'<font color="{weld_color}">{weld_pct:.0f}% of target</font>', s_cell),
-        ])
-        if has_surface:
-            surface_label = phases[-1].capitalize() if len(phases) > 1 else 'Surface'
-            paint_color = '#27AE60' if actual_paint >= paint_cap else '#E74C3C'
-            paint_pct = min(actual_paint / max(paint_cap, 1) * 100, 100) if paint_cap else 0
-            rate_data.append([
-                p(f'<b>{surface_label}</b>', s_cell_left),
-                p(f'<font color="{paint_color}" size="12"><b>{actual_paint}</b></font>', s_cell),
-                p(f'/ {paint_cap}', s_cell),
-                p('m\u00b2/day', s_cell),
-                p(f'<font color="{paint_color}">{paint_pct:.0f}% of target</font>', s_cell),
-            ])
-        rate_widths = [avail_w * f for f in [0.22, 0.15, 0.1, 0.2, 0.33]]
-        rate_t = Table(rate_data, colWidths=rate_widths)
-        rate_t.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,-1), LIGHT_GRAY),
-            ('GRID', (0,0), (-1,-1), 0.5, HexColor('#D0D0D0')),
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('TOPPADDING', (0,0), (-1,-1), 4),
-            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-        ]))
-        rate_elems.append(rate_t)
-        story.append(KeepTogether(rate_elems))
-        story.append(Spacer(1, 6*mm))
-
-        # ── 6. Results Summary — Visual KPI cards ────────────────────────────
+        # ── 5. Results Summary — Visual KPI cards ────────────────────────────
         if has_expediting and std_end and commit_end:
             if not fc_end_d and fc_data and fc_data.get('overall_forecast_end'):
                 fc_end_d = date.fromisoformat(fc_data['overall_forecast_end'])

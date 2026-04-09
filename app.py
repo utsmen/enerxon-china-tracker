@@ -3511,28 +3511,49 @@ def api_report_pdf(project):
         story.append(KeepTogether([p('RESULTS SUMMARY', s_heading), card_t]))
         story.append(Spacer(1, 6*mm))
 
-        # ── 7. Sea Transit ───────────────────────────────────────────────────
-        if has_expediting and commit_end:
-            if not fc_end_d and fc_data and fc_data.get('overall_forecast_end'):
-                fc_end_d = date.fromisoformat(fc_data['overall_forecast_end'])
-            commit_arrival = commit_end + timedelta(days=transit_days)
-            fc_arrival = fc_end_d + timedelta(days=transit_days) if fc_end_d else None
-            # Visual KPI cards for transit
-            s_transit_card = ParagraphStyle('RPT_TransitCard', parent=styles['Normal'], fontSize=9, alignment=TA_CENTER, leading=20)
-            transit_row = [
-                p(f'<font color="white" size="16"><b>~{transit_days}d</b></font><br/><font size="8" color="#99BBDD"><b>SEA TRANSIT</b></font>', s_transit_card),
-                p(f'<font color="white" size="14"><b>{commit_arrival.strftime("%d %b %Y")}</b></font><br/><font size="8" color="#99BBDD"><b>COMMITTED ARRIVAL</b></font>', s_transit_card),
-                p(f'<font color="white" size="14"><b>{fc_arrival.strftime("%d %b %Y") if fc_arrival else chr(8212)}</b></font><br/><font size="8" color="#99BBDD"><b>FORECAST ARRIVAL</b></font>', s_transit_card),
+        # ── 7. Shipments ─────────────────────────────────────────────────────
+        ship_rows = rpt.get('shipment_status', [])
+        if ship_rows:
+            STATUS_COLORS = {
+                'shipped': GREEN, 'ready': HexColor('#1976D2'), 'partial': ORANGE,
+                'pending': HexColor('#7F8C8D'), 'unassigned': HexColor('#BDBDBD'),
+            }
+            STATUS_LABELS = {
+                'shipped': 'SHIPPED', 'ready': 'READY', 'partial': 'PARTIAL',
+                'pending': 'PENDING', 'unassigned': 'UNASSIGNED',
+            }
+            hdr = [p(f'<font color="white"><b>{h}</b></font>', s_cell) for h in
+                   ['Shipment', 'Description', 'Spools', 'Shipped', 'ETD', 'Transit', 'ETA', 'Status']]
+            rows = [hdr]
+            for sh in ship_rows:
+                num = sh['shipment_number']
+                rows.append([
+                    p(f'SH-{num:03d}', s_cell),
+                    p(sh.get('description', '') or '\u2014', s_cell_left),
+                    p(str(sh['assigned']), s_cell),
+                    p(f"{sh['shipped']}/{sh['assigned']}", s_cell),
+                    p(sh.get('etd') or '\u2014', s_cell),
+                    p(f"{sh['transit_days']}d" if sh.get('transit_days') else '\u2014', s_cell),
+                    p(sh.get('eta') or '\u2014', s_cell),
+                    p(f'<font color="white"><b>{STATUS_LABELS.get(sh["status"], sh["status"])}</b></font>', s_cell),
+                ])
+            ship_col_w = [avail_w * f for f in [0.08, 0.27, 0.07, 0.09, 0.13, 0.09, 0.13, 0.14]]
+            ship_t = Table(rows, colWidths=ship_col_w, repeatRows=1)
+            ship_style = [
+                ('BACKGROUND', (0, 0), (-1, 0), BLUE),
+                ('TEXTCOLOR', (0, 0), (-1, 0), WHITE),
+                ('GRID', (0, 0), (-1, -1), 0.5, HexColor('#CCCCCC')),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [WHITE, LIGHT_GRAY]),
             ]
-            transit_t = Table([transit_row], colWidths=[avail_w/3]*3)
-            transit_t.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,-1), NAVY),
-                ('VALIGN', (0,0), (-1,0), 'BOTTOM'), ('VALIGN', (0,1), (-1,1), 'TOP'),
-                ('TOPPADDING', (0,0), (-1,0), 8), ('BOTTOMPADDING', (0,0), (-1,0), 0),
-                ('TOPPADDING', (0,1), (-1,1), 0), ('BOTTOMPADDING', (0,1), (-1,1), 6),
-                ('BOX', (0,0), (-1,-1), 0.5, HexColor('#003366')),
-            ]))
-            story.append(KeepTogether([p('SEA TRANSIT', s_heading), transit_t]))
+            # Color the status cell per row
+            for ri, sh in enumerate(ship_rows, 1):
+                sc = STATUS_COLORS.get(sh['status'], HexColor('#95A5A6'))
+                ship_style.append(('BACKGROUND', (7, ri), (7, ri), sc))
+            ship_t.setStyle(TableStyle(ship_style))
+            story.append(KeepTogether([p('SHIPMENTS', s_heading), ship_t]))
 
     doc.build(story)
     return send_file(tmp.name, as_attachment=True, download_name=f"{project}_report_{today.strftime('%Y%m%d')}.pdf",

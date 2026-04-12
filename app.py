@@ -1581,7 +1581,7 @@ def api_qc_get(project, spool_id, report_type):
             report_def = d
             break
     # Extract configurable fields from report definition for frontend renderers
-    def_fields = {k: report_def.get(k, '') for k in ('standard', 'ferrite_min', 'ferrite_max', 'dimensional_tolerance_mm') if report_def.get(k) is not None}
+    def_fields = {k: report_def.get(k, '') for k in ('standard', 'acceptance_standard', 'acceptance_level', 'ferrite_min', 'ferrite_max', 'dimensional_tolerance_mm') if report_def.get(k) is not None}
     step_date = ''
     if itp_step:
         sr = db_fetchone("SELECT completed_at FROM progress WHERE project=? AND spool_id=? AND step_number=? AND completed=1", (project, spool_id, itp_step))
@@ -2241,23 +2241,30 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
             y -= 5*mm
 
     elif rt == 'rt':
+        acc_lvl = int(report_def.get('acceptance_level', 2))
+        grade_list = ['I','II','III','IV']
         y = section_title('RT Equipment', y)
-        for k, label in [('instrument','Instrument'),('source_type','Source'),('focus_size','Focus'),('sfd','SFD'),('iqi_type','IQI'),('tube_voltage','Voltage (kV)'),('tube_current','Current (mA)'),('density_range','Density Range'),('technique','Technique')]:
+        for k, label in [('instrument','Instrument'),('source_type','Source'),('focus_size','Focus'),('sfd','SFD'),('iqi_type','IQI'),('iqi_required','Wire No.'),('tube_voltage','Voltage (kV)'),('tube_current','Current (mA)'),('exposure_time','Exposure'),('film_brand','Film'),('density_range','Density Range'),('technique','Technique')]:
             if data.get(k):
                 draw_text(margin, y, f"{label}: {data[k]}", 8, grey); y -= 4*mm
+        acc_std = report_def.get('acceptance_standard', 'ASME VIII-1 UW-51')
+        draw_text(margin, y, f"Acceptance: {acc_std} — Level {acc_lvl}", 8, grey); y -= 4*mm
         y -= 2*mm
-        y = section_title('Film Results (3 films per weld)', y)
+        y = section_title('Film Evaluation', y)
         welds = data.get('welds', [])
-        headers = ['Weld','Film','Bar','Circ.','Crack','LOP','LOF','Density','Result']
         for w in welds:
             for fi, f in enumerate(w.get('films', [])):
                 y = new_page_if_needed(y, 6*mm)
                 tag = w.get('weld_tag','') if fi == 0 else ''
-                defects = ['X' if f.get(k) else '—' for k in ['bar','circular','crack','lop','lof']]
-                result = f.get('result', '—')
-                row_data = [tag, str(fi+1)] + defects + [str(f.get('density','')), result]
+                defects = ['X' if f.get(k) else '\u2014' for k in ['bar','circular','crack','lop','lof']]
+                grade = f.get('grade', '')
+                grade_ok = grade in grade_list[:acc_lvl] if grade else None
+                result = 'ACC' if grade_ok is True else ('REJ' if grade_ok is False else '\u2014')
+                desc = f.get('defect_desc', '')
+                film_id = f.get('film_id', str(fi+1))
+                row_data = [tag, film_id] + defects + [desc[:15], str(f.get('density','')), grade or '\u2014', result]
                 hx = margin
-                cws = [18*mm, 12*mm, 12*mm, 12*mm, 12*mm, 12*mm, 12*mm, 20*mm, 15*mm]
+                cws = [16*mm, 12*mm, 10*mm, 10*mm, 10*mm, 10*mm, 10*mm, 22*mm, 16*mm, 12*mm, 12*mm]
                 for j, cell in enumerate(row_data):
                     color = green if cell == 'ACC' else (red if cell in ('REJ','X') else black)
                     draw_text(hx + 1*mm, y, cell, 7, color, bold=(cell in ('ACC','REJ')))
@@ -4394,11 +4401,20 @@ function renderVT(data){
 // ══════════════════════════════════════════════════════════════════════════════
 function renderRT(data){
   const welds = data.welds || [];
-  let html = sH('RT Equipment & Parameters / 射线设备及参数');
+  const accLvl = parseInt(reportData.acceptance_level) || 2;
+  const GRADES = ['I','II','III','IV'];
+  function gradeAcc(g){if(!g)return null; const idx=GRADES.indexOf(g); return idx>=0&&idx<accLvl?'ACC':'REJ';}
+  let html = sH('Lab Report Reference / 检测报告信息');
+  html += `<div class="weld-grid" style="grid-template-columns:1fr 1fr 1fr">
+    <div><label style="font-size:10px;color:#888">Lab Name / 检测单位</label>${inp('lab_name',data.lab_name,{ph:'Testing lab / 检测单位'})}</div>
+    <div><label style="font-size:10px;color:#888">Report No. / 报告编号</label>${inp('lab_report_no',data.lab_report_no,{ph:'RT-2026-xxx'})}</div>
+    <div><label style="font-size:10px;color:#888">Report Date / 报告日期</label>${inp('lab_report_date',data.lab_report_date,{type:'date'})}</div>
+  </div></div>`;
+  html += sH('RT Equipment & Parameters / 射线设备及参数');
   html += `<div class="weld-grid" style="grid-template-columns:1fr 1fr">
     <div><label style="font-size:10px;color:#888">Instrument / 仪器型号</label>${inp('instrument',data.instrument,{ph:'XXGHz-1605 / 仪器型号'})}</div>
-    <div><label style="font-size:10px;color:#888">Source Type / 射源</label>${inp('source_type',data.source_type,{def:'Ir-192'})}</div>
-    <div><label style="font-size:10px;color:#888">Focus Size (mm) / 焦点尺寸</label>${inp('focus_size',data.focus_size,{ph:'1.0×2.4 / 焦点尺寸'})}</div>
+    <div><label style="font-size:10px;color:#888">Source Type / 射源</label>${inp('source_type',data.source_type,{def:'X-ray'})}</div>
+    <div><label style="font-size:10px;color:#888">Focus Size (mm) / 焦点尺寸</label>${inp('focus_size',data.focus_size,{ph:'2×2 / 焦点尺寸'})}</div>
     <div><label style="font-size:10px;color:#888">SFD (mm) / 焦距</label>${inp('sfd',data.sfd)}</div>
     <div><label style="font-size:10px;color:#888">IQI Type / 透度计</label>${inp('iqi_type',data.iqi_type,{def:'ASTM'})}</div>
     <div><label style="font-size:10px;color:#888">Required Sensitivity / 应识别丝号</label>${inp('iqi_required',data.iqi_required)}</div>
@@ -4406,29 +4422,39 @@ function renderRT(data){
     <div><label style="font-size:10px;color:#888">Tube Current (mA) / 管电流</label>${inp('tube_current',data.tube_current,{type:'number'})}</div>
     <div><label style="font-size:10px;color:#888">Exposure Time / 曝光时间</label>${inp('exposure_time',data.exposure_time)}</div>
     <div><label style="font-size:10px;color:#888">Film Brand / 胶片</label>${inp('film_brand',data.film_brand)}</div>
-    <div><label style="font-size:10px;color:#888">Density Range / 黑度范围</label>${inp('density_range',data.density_range,{def:'1.8-4.0'})}</div>
-    <div><label style="font-size:10px;color:#888">Technique / 透照方式</label>${inp('technique',data.technique,{def:'SWSI'})}</div>
+    <div><label style="font-size:10px;color:#888">Density Range / 黑度范围</label>${inp('density_range',data.density_range,{def:'2.0-4.0'})}</div>
+    <div><label style="font-size:10px;color:#888">Technique / 透照方式</label>${inp('technique',data.technique,{ph:'DWSI / SWSI / Center'})}</div>
   </div>
-  <div class="acc-box" style="margin-top:8px"><strong>Standard / 标准:</strong> ${reportData.standard||'ASME V Art. 2 / ASME B31.3'}</div>`;
+  <div class="acc-box" style="margin-top:8px"><strong>Exam Standard / 检验标准:</strong> ${reportData.standard||'ASME Sect. V Art. 2'}
+  <br><strong>Acceptance / 验收标准:</strong> ${reportData.acceptance_standard||'ASME VIII-1 UW-51'} — Level / 级别: ${accLvl}</div>`;
   html += '</div>';
-  html += sH('Film Results / 底片检查结果 <span style="font-size:10px;font-weight:400;color:#888">(3 films per weld)</span>');
+  html += sH('Film Evaluation / 底片评定记录');
   if(!welds.length){html += '<p style="color:#888;text-align:center;padding:12px">No weld data — Seed from DXF / 无焊缝数据，请从DXF导入<br><small>Hugo will upload RT results / Hugo将上传RT结果</small></p>';}
   else {
-    welds.forEach(w=>{if(!w.films||w.films.length<3)w.films=[0,1,2].map(fi=>(w.films&&w.films[fi])||{film_id:'',density:'',bar:false,circular:false,crack:false,lop:false,lof:false,result:null});});
+    welds.forEach(w=>{if(!w.films||!w.films.length)w.films=[{film_id:'',density:'',bar:false,circular:false,crack:false,lop:false,lof:false,defect_desc:'',grade:null}];});
     const dc=[{k:'bar',en:'Bar',cn:'条缺'},{k:'circular',en:'Circ.',cn:'圆缺'},{k:'crack',en:'Crack',cn:'裂纹'},{k:'lop',en:'LOP',cn:'未焊透'},{k:'lof',en:'LOF',cn:'未熔合'}];
     html += `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:10px"><tr style="background:#f0f2f5">
-      <th style="padding:4px;border:1px solid #ddd" rowspan="2">Weld / 焊缝</th><th style="padding:4px;border:1px solid #ddd" rowspan="2">Film / 底片</th>
+      <th style="padding:4px;border:1px solid #ddd" rowspan="2">Weld<br>焊缝</th><th style="padding:4px;border:1px solid #ddd" rowspan="2">Film<br>底片</th>
       <th style="padding:4px;border:1px solid #ddd" colspan="5">Defects / 缺陷</th>
-      <th style="padding:4px;border:1px solid #ddd" rowspan="2">Density / 黑度</th><th style="padding:4px;border:1px solid #ddd" rowspan="2">Acc/Rej / 合格</th></tr>
+      <th style="padding:4px;border:1px solid #ddd" rowspan="2">Description<br>缺陷描述</th>
+      <th style="padding:4px;border:1px solid #ddd" rowspan="2">Density<br>黑度</th>
+      <th style="padding:4px;border:1px solid #ddd" rowspan="2">Grade<br>级别</th>
+      <th style="padding:4px;border:1px solid #ddd" rowspan="2" style="width:20px"></th></tr>
       <tr style="background:#f0f2f5">${dc.map(d=>`<th style="padding:3px;border:1px solid #ddd;font-size:8px">${d.en}<br>${d.cn}</th>`).join('')}</tr>`;
     welds.forEach((w,wi)=>{
+      const fc=w.films.length;
       w.films.forEach((f,fi)=>{
-        html+=`<tr>${fi===0?`<td style="padding:4px;border:1px solid #ddd;font-weight:700;vertical-align:top" rowspan="3">${w.weld_tag||'W'+(wi+1)}<br><span style="font-size:9px;font-weight:400;color:#888">${w.size||''}</span></td>`:''}
-          <td style="padding:3px;border:1px solid #ddd"><input class="qc-input" style="padding:2px;font-size:10px;width:45px" value="${f.film_id||''}" placeholder="${fi+1}" onchange="reportData.data.welds[${wi}].films[${fi}].film_id=this.value;scheduleSave()"></td>`;
-        dc.forEach(d=>{const v=f[d.k];html+=`<td style="padding:2px;border:1px solid #ddd;text-align:center;cursor:pointer" class="${v?'fail':''}" onclick="reportData.data.welds[${wi}].films[${fi}].${d.k}=!reportData.data.welds[${wi}].films[${fi}].${d.k};reRender()">${v?'✗':'—'}</td>`;});
-        html+=`<td style="padding:2px;border:1px solid #ddd"><input class="qc-input" style="padding:2px;font-size:10px;width:55px" value="${f.density||''}" placeholder="2.0-4.0 / 黑度" onchange="reportData.data.welds[${wi}].films[${fi}].density=this.value;scheduleSave()"></td>
-          <td style="padding:2px;border:1px solid #ddd;text-align:center;cursor:pointer" class="${f.result==='ACC'?'pass':f.result==='REJ'?'fail':''}" onclick="var r=reportData.data.welds[${wi}].films[${fi}];r.result=r.result==='ACC'?'REJ':(r.result==='REJ'?null:'ACC');reRender()">${f.result==='ACC'?'✓ ACC':(f.result==='REJ'?'✗ REJ':'—')}</td></tr>`;
+        const acc=gradeAcc(f.grade);
+        const gcls=acc==='ACC'?'pass':acc==='REJ'?'fail':'';
+        html+=`<tr>${fi===0?`<td style="padding:4px;border:1px solid #ddd;font-weight:700;vertical-align:top" rowspan="${fc}">${w.weld_tag||'W'+(wi+1)}<br><span style="font-size:9px;font-weight:400;color:#888">${w.size||''}</span></td>`:''}
+          <td style="padding:3px;border:1px solid #ddd"><input class="qc-input" style="padding:2px;font-size:10px;width:40px" value="${f.film_id||''}" placeholder="${fi+1}" onchange="reportData.data.welds[${wi}].films[${fi}].film_id=this.value;scheduleSave()"></td>`;
+        dc.forEach(d=>{const v=f[d.k];html+=`<td style="padding:2px;border:1px solid #ddd;text-align:center;cursor:pointer" class="${v?'fail':''}" onclick="reportData.data.welds[${wi}].films[${fi}].${d.k}=!reportData.data.welds[${wi}].films[${fi}].${d.k};reRender()">${v?'\\u2717':'\\u2014'}</td>`;});
+        html+=`<td style="padding:2px;border:1px solid #ddd"><input class="qc-input" style="padding:2px;font-size:9px;width:70px" value="${f.defect_desc||''}" placeholder="\\u03A62\\u00D71 / 缺陷" onchange="reportData.data.welds[${wi}].films[${fi}].defect_desc=this.value;scheduleSave()"></td>
+          <td style="padding:2px;border:1px solid #ddd"><input class="qc-input" style="padding:2px;font-size:10px;width:50px" value="${f.density||''}" placeholder="2.0-4.0" onchange="reportData.data.welds[${wi}].films[${fi}].density=this.value;scheduleSave()"></td>
+          <td style="padding:2px;border:1px solid #ddd;text-align:center;cursor:pointer;font-weight:700" class="${gcls}" onclick="var g=reportData.data.welds[${wi}].films[${fi}].grade;var gs=['I','II','III','IV'];var ni=g?gs.indexOf(g)+1:-1;reportData.data.welds[${wi}].films[${fi}].grade=ni>=gs.length?null:gs[Math.max(0,ni)];reRender()">${f.grade?(f.grade+(acc==='ACC'?' \\u2713':' \\u2717')):'\\u2014'}</td>
+          <td style="padding:1px;border:1px solid #ddd;text-align:center"><span style="cursor:pointer;color:#ccc;font-size:12px" onclick="if(reportData.data.welds[${wi}].films.length>1){reportData.data.welds[${wi}].films.splice(${fi},1);reRender()}" title="Remove film / 删除底片">\\u2212</span></td></tr>`;
       });
+      html+=`<tr><td colspan="11" style="border:1px solid #eee;padding:2px;text-align:center"><span style="cursor:pointer;color:#1976d2;font-size:10px" onclick="reportData.data.welds[${wi}].films.push({film_id:'',density:'',bar:false,circular:false,crack:false,lop:false,lof:false,defect_desc:'',grade:null});reRender()">+ Add Film / 添加底片</span></td></tr>`;
     });
     html += '</table></div>';
   }

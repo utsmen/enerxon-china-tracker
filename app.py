@@ -2341,8 +2341,8 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
     y = new_page_if_needed(y, 25*mm)
     draw_line(y, black, 1.5); y -= 8*mm
     draw_text(margin, y, 'Inspection Result:', 11, black, bold=True)
-    result_text = 'CONFORMING' if overall == 'ACC' else ('NON-CONFORMING' if overall == 'REJ' else 'PENDING')
-    result_color = green if overall == 'ACC' else (red if overall == 'REJ' else grey)
+    result_text = 'CONFORMING' if overall == 'ACC' else ('NON-CONFORMING' if overall == 'REJ' else ('NOT APPLICABLE' if overall == 'N/A' else 'PENDING'))
+    result_color = green if overall == 'ACC' else (red if overall == 'REJ' else (HexColor('#7f8c8d') if overall == 'N/A' else grey))
     draw_text(W - margin - 50*mm, y, result_text, 12, result_color, bold=True)
     y -= 10*mm
 
@@ -4160,6 +4160,7 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 .pf-btn{flex:1;padding:10px 8px;border:2px solid #ddd;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;text-align:center;background:#fff;transition:all .15s}
 .pf-btn.sel-pass{border-color:#27ae60;background:#e8f5e9;color:#1B7A1B}
 .pf-btn.sel-fail{border-color:#e74c3c;background:#fce4ec;color:#c0392b}
+.pf-btn.sel-na{border-color:#7f8c8d;background:#ecf0f1;color:#555}
 .pf-btn:active{transform:scale(.97)}
 .overall-result{margin:8px 16px;padding:16px;background:#fff;border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,.05);text-align:center}
 .overall-result h3{font-size:14px;color:#333;margin-bottom:12px}
@@ -4193,6 +4194,7 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
   <div class="result-btns">
     <div class="pf-btn" onclick="setResult('ACC')" id="res-pass">✓ ACC 合格</div>
     <div class="pf-btn" onclick="setResult('REJ')" id="res-fail">✗ REJ 不合格</div>
+    <div class="pf-btn" onclick="setResult('N/A')" id="res-na">— N/A 不适用</div>
   </div>
 </div>
 <div class="save-status" id="save-status"></div>
@@ -4971,6 +4973,7 @@ async function loadReport(){
 function updateResult(val){
   document.getElementById('res-pass').className = 'pf-btn' + (val==='ACC'?' sel-pass':'');
   document.getElementById('res-fail').className = 'pf-btn' + (val==='REJ'?' sel-fail':'');
+  document.getElementById('res-na').className = 'pf-btn' + (val==='N/A'?' sel-na':'');
 }
 function setResult(val){
   const cur = reportData.data.overall_result;

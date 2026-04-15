@@ -2399,56 +2399,57 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         draw_text(margin, y, 'Remarks:', 9, grey, bold=True); y -= 5*mm
         draw_text(margin, y, remarks[:200], 8, black); y -= 6*mm
 
-    # ── OVERALL RESULT + SIGNATURES (keep together — never orphan sigs on a page) ──
+    # ── OVERALL RESULT + SIGNATURES (keep together — never orphan on a page) ──
     import base64 as _b64
     from reportlab.lib.utils import ImageReader
     insp_types = get_inspector_types(project)
     n_types = max(len(insp_types), 1)
-    result_sig_height = 45*mm  # result block (~18mm) + signature boxes (~27mm)
-    # Only break to new page if there's enough content already on this page
-    # to justify the break — prevents an orphaned signature-only page
+    # Adaptive layout: fit result+sigs into available space, only break
+    # if there is absolutely no room (< 28mm). Signature box height shrinks
+    # to fit — never creates an orphan signature-only page.
+    result_h = 14*mm   # line + result text + spacing
+    sig_max = 20*mm    # preferred signature box height
+    sig_min = 15*mm    # minimum signature box height (still readable)
     space_left = y - footer_zone
-    if space_left < result_sig_height:
-        # Would need a new page — but check if the new page would be orphan
-        # (only result+sigs with no data above). If so, squeeze onto current page.
-        page_content_above = (H - 15*mm) - y  # how much content is already on this page
-        if page_content_above < 30*mm:
-            # Very little content on this page — don't break, this IS the orphan page
-            # from a prior break. Just draw here.
-            pass
-        else:
-            # Enough content above — safe to break
-            draw_footer()
-            c.showPage()
-            y = H - 15*mm
+    total_needed = result_h + sig_max
+    if space_left >= total_needed:
+        sig_h = sig_max  # plenty of room
+    elif space_left >= result_h + sig_min:
+        sig_h = space_left - result_h  # squeeze sigs to fit
+    else:
+        # Truly not enough — break to new page
+        draw_footer()
+        c.showPage()
+        y = H - 15*mm
+        sig_h = sig_max
 
-    y -= 3*mm
-    draw_line(y, black, 1.5); y -= 8*mm
-    draw_text(margin, y, 'Inspection Result:', 11, black, bold=True)
+    draw_line(y, black, 1.0); y -= 5*mm
+    draw_text(margin, y, 'Inspection Result:', 10, black, bold=True)
     result_text = 'CONFORMING' if overall == 'ACC' else ('NON-CONFORMING' if overall == 'REJ' else ('NOT APPLICABLE' if overall == 'N/A' else 'PENDING'))
     result_color = green if overall == 'ACC' else (red if overall == 'REJ' else (HexColor('#7f8c8d') if overall == 'N/A' else grey))
-    draw_text(W - margin - 50*mm, y, result_text, 12, result_color, bold=True)
-    y -= 10*mm
+    draw_text(W - margin - 50*mm, y, result_text, 11, result_color, bold=True)
+    y -= 7*mm
     sig_w = cw / n_types - 3*mm
     for i, t in enumerate(insp_types):
         sx = margin + i * (sig_w + 4*mm)
-        draw_rect(sx, y - 22*mm, sig_w, 22*mm, stroke=grey)
+        draw_rect(sx, y - sig_h, sig_w, sig_h, stroke=grey)
         draw_text(sx + 2*mm, y - 4*mm, t['label_en'], 7, grey)
-        draw_line(y - 18*mm, grey, 0.3)
+        name_line_y = y - sig_h + 6*mm  # name near bottom
+        date_line_y = y - sig_h + 1*mm  # date at bottom
         slot = inspectors_data.get(t['key'], {})
         slot_name = slot.get('name', '')
         slot_date = slot.get('date', '')
         if slot_name:
-            # Load signature from registry
             sig_row = db_fetchone("SELECT signature_data FROM qc_inspectors WHERE name=?", (slot_name,))
             if sig_row and (sig_row.get('signature_data','') or '').startswith('data:image'):
                 try:
                     sig_bytes = _b64.b64decode(sig_row['signature_data'].split(',')[1])
                     sig_img = ImageReader(BytesIO(sig_bytes))
-                    c.drawImage(sig_img, sx + 5*mm, y - 17*mm, width=sig_w - 10*mm, height=10*mm, preserveAspectRatio=True, mask='auto')
+                    sig_img_h = max(sig_h - 12*mm, 6*mm)
+                    c.drawImage(sig_img, sx + 5*mm, y - 4*mm - sig_img_h, width=sig_w - 10*mm, height=sig_img_h, preserveAspectRatio=True, mask='auto')
                 except: pass
-            draw_text(sx + 5*mm, y - 15*mm, slot_name, 9, blue)
-            draw_text(sx + 2*mm, y - 21*mm, slot_date, 7, grey)
+            draw_text(sx + 5*mm, name_line_y, slot_name, 9, blue)
+            draw_text(sx + 2*mm, date_line_y, slot_date, 7, grey)
 
     # ── FOOTER ──
     draw_footer()

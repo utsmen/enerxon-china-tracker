@@ -2127,15 +2127,16 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         c.rect(x, yy, w, h, fill=bool(fill), stroke=bool(stroke))
 
     def new_page_if_needed(yy, need=40*mm):
-        if yy < margin + need:
+        if yy < footer_zone + need:
             draw_footer()
             c.showPage()
             return H - 15*mm
         return yy
 
+    footer_zone = margin + 5*mm  # content must stay above this line
+
     def draw_footer():
         fy = margin - 5*mm
-        draw_line(fy + 8*mm, grey, 0.3)
         draw_text(margin, fy + 2*mm, 'ENERXON (Cangzhou) Pipeline Co., Ltd. · ISO 9001:2015 · IQNet', 7, grey)
         draw_text(margin, fy - 2*mm, 'EN 10204 Type 3.1 Inspection Certificate', 7, grey)
         draw_text(W-margin, fy, '3.1', 8, grey, align='right', max_w=0)
@@ -2406,7 +2407,7 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
     result_sig_height = 45*mm  # result block (~18mm) + signature boxes (~27mm)
     # Only break to new page if there's enough content already on this page
     # to justify the break — prevents an orphaned signature-only page
-    space_left = y - margin
+    space_left = y - footer_zone
     if space_left < result_sig_height:
         # Would need a new page — but check if the new page would be orphan
         # (only result+sigs with no data above). If so, squeeze onto current page.

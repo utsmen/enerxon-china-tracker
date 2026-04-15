@@ -4227,7 +4227,7 @@ function inp(key,val,opts={}){const t=opts.type||'text',ph=opts.ph||'',st=opts.s
 function setD(path,val){let o=reportData.data,parts=path.split('.');for(let i=0;i<parts.length-1;i++){if(!o[parts[i]])o[parts[i]]={};o=o[parts[i]];}o[parts[parts.length-1]]=val;}
 function sH(t){return `<div class="qc-section"><h3>${t}</h3>`;}
 function reRender(){const cfg=REPORT_FIELDS[RT];if(cfg){cfg.render(reportData.data);appendImageSection(cfg);}scheduleSave();}
-function appendImageSection(cfg){if(!cfg.hasImages)return;const body=document.getElementById('report-body');body.innerHTML+=`<div class="qc-section"><h3>Photos / 照片 (Optional / 可选)</h3><div class="img-grid" id="img-grid"></div><label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files)">📷 Upload Photos / 上传照片</label></div>`;loadImages();}
+function appendImageSection(cfg){if(!cfg.hasImages)return;const body=document.getElementById('report-body');body.innerHTML+=`<div class="qc-section"><h3>Photos / 照片 (Optional / 可选)</h3><div class="img-grid" id="img-grid"></div><label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files,null,event)">📷 Upload Photos / 上传照片</label></div>`;loadImages();}
 function pfCell(key,val){const cls=val===true?'pass':val===false?'fail':'';const txt=val===true?'✓ ACC 合格':val===false?'✗ REJ 不合格':'—';return `<td style="padding:4px;border:1px solid #ddd;text-align:center;cursor:pointer;font-size:11px" class="${cls}" onclick="setD('${key}',${val===true?'false':(val===false?'null':'true')});reRender()">${txt}</td>`;}
 function accRejCell(key,val){const cls=val==='ACC'?'pass':val==='REJ'?'fail':'';const txt=val==='ACC'?'✓ ACC 合格':val==='REJ'?'✗ REJ 不合格':'—';return `<td style="padding:4px;border:1px solid #ddd;text-align:center;cursor:pointer;font-size:11px" class="${cls}" onclick="var c=getDV('${key}');setD('${key}',c==='ACC'?'REJ':(c==='REJ'?null:'ACC'));reRender()">${txt}</td>`;}
 function getDV(path){let o=reportData.data,parts=path.split('.');for(let i=0;i<parts.length;i++){if(!o)return null;o=o[parts[i]];}return o;}
@@ -4775,7 +4775,7 @@ function renderPhotoDoc(data){
   cats.forEach(cat=>{
     html += `<div class="qc-section"><h3>${cat.label}${cat.min ? ' <span style="color:#e74c3c;font-size:10px">(min '+cat.min+' / 至少'+cat.min+'张)</span>' : ' <span style="color:#888;font-size:10px">(optional / 可选)</span>'}</h3>`;
     html += `<div class="img-grid" id="img-grid-${cat.key}"></div>`;
-    html += `<label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files,'${cat.key}')">📷 Upload / 上传</label></div>`;
+    html += `<label class="upload-btn"><input type="file" accept="image/*" multiple style="display:none" onchange="uploadImages(this.files,'${cat.key}',event)">📷 Upload / 上传</label></div>`;
   });
   html += `<div class="qc-section" id="photo-doc-summary" style="display:none"><h3>Summary / 总计</h3><div id="photo-doc-count" style="font-size:12px;padding:8px"></div></div>`;
   html += sH('Remarks / 备注') + `<textarea class="qc-input" style="text-align:left;font-weight:400;height:50px;resize:vertical;background:#fff" onchange="setD('remarks',this.value);scheduleSave()">${data.remarks||''}</textarea></div>`;
@@ -4812,9 +4812,34 @@ async function loadPhotoDocImages(){
 
 // ── IMAGE UPLOAD ──
 async function loadImages(){const r=await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/images`);const imgs=await r.json();const grid=document.getElementById('img-grid');if(!grid)return;grid.innerHTML=imgs.map(img=>`<div class="img-thumb"><img src="/api/project/${P}/qc/image/${img.id}" loading="lazy"><button class="del" onclick="delImage(${img.id})">×</button></div>`).join('');}
-async function uploadImages(files,caption){const op=(Object.values((reportData.data||{}).inspectors||{}).find(v=>v.name)||{}).name||'';for(const f of files){const c=await compressImage(f,1200,0.70);const fd=new FormData();fd.append('file',c,f.name);fd.append('operator',op);if(caption)fd.append('caption',caption);await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`,{method:'POST',body:fd});}const cfg=REPORT_FIELDS[RT];if(cfg&&cfg.imageCategories){loadPhotoDocImages();}else{loadImages();}}
+async function uploadImages(files,caption,evt){
+  if(!files||!files.length)return;
+  const btn=evt&&evt.target?evt.target.closest('.upload-btn'):null;
+  const origLabel=btn?btn.textContent:'';
+  try{
+    let uploaded=0;
+    for(const f of files){
+      if(btn)btn.textContent='⏳ '+(uploaded+1)+'/'+files.length+'...';
+      const c=await compressImage(f,1200,0.70);
+      if(!c){showSave('Image compress failed / 图片压缩失败',false);return;}
+      const fd=new FormData();fd.append('file',c,f.name);fd.append('operator',getOperatorName());
+      if(caption)fd.append('caption',caption);
+      const resp=await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`,{method:'POST',body:fd});
+      if(!resp.ok){showSave('Upload failed / 上传失败 ('+resp.status+')',false);return;}
+      uploaded++;
+    }
+    showSave(uploaded+' photo(s) uploaded / 已上传'+uploaded+'张照片',true);
+  }catch(e){showSave('Upload error / 上传错误: '+e.message,false);}
+  finally{if(btn)btn.textContent=origLabel;}
+  const cfg=REPORT_FIELDS[RT];if(cfg&&cfg.imageCategories){loadPhotoDocImages();}else{loadImages();}
+}
+function getOperatorName(){
+  const ins=(reportData.data||{}).inspectors||{};
+  for(const k of Object.keys(ins)){if(ins[k]&&ins[k].name)return ins[k].name;}
+  return '';
+}
 async function delImage(id){if(!confirm('Delete? / 删除？'))return;await fetch(`/api/project/${P}/qc/image/${id}`,{method:'DELETE'});const cfg=REPORT_FIELDS[RT];if(cfg&&cfg.imageCategories){loadPhotoDocImages();}else{loadImages();}}
-function compressImage(file,maxDim,quality){return new Promise(r=>{const img=new Image();img.onload=()=>{let w=img.width,h=img.height;if(w>maxDim||h>maxDim){const ratio=Math.min(maxDim/w,maxDim/h);w=Math.round(w*ratio);h=Math.round(h*ratio);}const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h);c.toBlob(b=>r(b),'image/jpeg',quality);};img.src=URL.createObjectURL(file);});}
+function compressImage(file,maxDim,quality){return new Promise((resolve)=>{const img=new Image();img.onload=()=>{let w=img.width,h=img.height;if(w>maxDim||h>maxDim){const ratio=Math.min(maxDim/w,maxDim/h);w=Math.round(w*ratio);h=Math.round(h*ratio);}const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h);c.toBlob(b=>{URL.revokeObjectURL(img.src);resolve(b);},'image/jpeg',quality);};img.onerror=()=>{URL.revokeObjectURL(img.src);resolve(null);};img.src=URL.createObjectURL(file);});}
 
 
 // ── Inspector Registry + Signature Pad ──

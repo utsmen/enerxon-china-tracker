@@ -4814,12 +4814,14 @@ async function loadPhotoDocImages(){
 async function loadImages(){const r=await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/images`);const imgs=await r.json();const grid=document.getElementById('img-grid');if(!grid)return;grid.innerHTML=imgs.map(img=>`<div class="img-thumb"><img src="/api/project/${P}/qc/image/${img.id}" loading="lazy"><button class="del" onclick="delImage(${img.id})">×</button></div>`).join('');}
 async function uploadImages(files,caption,evt){
   if(!files||!files.length)return;
-  const btn=evt&&evt.target?evt.target.closest('.upload-btn'):null;
+  const list=Array.from(files);
+  const inp=evt&&evt.target;if(inp)inp.value=null;
+  const btn=inp?inp.closest('.upload-btn'):null;
   const origLabel=btn?btn.textContent:'';
   try{
     let uploaded=0;
-    for(const f of files){
-      if(btn)btn.textContent='⏳ '+(uploaded+1)+'/'+files.length+'...';
+    for(const f of list){
+      if(btn)btn.textContent='⏳ '+(uploaded+1)+'/'+list.length+'...';
       const c=await compressImage(f,1200,0.70);
       if(!c){showSave('Image compress failed / 图片压缩失败',false);return;}
       const fd=new FormData();fd.append('file',c,f.name);fd.append('operator',getOperatorName());

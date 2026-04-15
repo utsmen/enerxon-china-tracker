@@ -4816,23 +4816,18 @@ async function uploadImages(files,caption,evt){
   if(!files||!files.length)return;
   const list=Array.from(files);
   const inp=evt&&evt.target;if(inp)inp.value=null;
-  const btn=inp?inp.closest('.upload-btn'):null;
-  const origLabel=btn?btn.textContent:'';
   try{
-    let uploaded=0;
-    for(const f of list){
-      if(btn)btn.textContent='⏳ '+(uploaded+1)+'/'+list.length+'...';
-      const c=await compressImage(f,1200,0.70);
+    for(let i=0;i<list.length;i++){
+      showSave('⏳ '+(i+1)+'/'+list.length+'...',true);
+      const c=await compressImage(list[i],1200,0.70);
       if(!c){showSave('Image compress failed / 图片压缩失败',false);return;}
-      const fd=new FormData();fd.append('file',c,f.name);fd.append('operator',getOperatorName());
+      const fd=new FormData();fd.append('file',c,list[i].name);fd.append('operator',getOperatorName());
       if(caption)fd.append('caption',caption);
       const resp=await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`,{method:'POST',body:fd});
       if(!resp.ok){showSave('Upload failed / 上传失败 ('+resp.status+')',false);return;}
-      uploaded++;
     }
-    showSave(uploaded+' photo(s) uploaded / 已上传'+uploaded+'张照片',true);
+    showSave(list.length+' photo(s) uploaded / 已上传'+list.length+'张照片',true);
   }catch(e){showSave('Upload error / 上传错误: '+e.message,false);}
-  finally{if(btn)btn.textContent=origLabel;}
   const cfg=REPORT_FIELDS[RT];if(cfg&&cfg.imageCategories){loadPhotoDocImages();}else{loadImages();}
 }
 function getOperatorName(){

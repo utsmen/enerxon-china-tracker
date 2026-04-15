@@ -2213,6 +2213,18 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         yy -= 4*mm
         return yy
 
+    def draw_kv_grid(pairs, yy, cols=2):
+        """Draw key-value pairs in a compact multi-column grid."""
+        col_w = cw / cols
+        for i, (label, val) in enumerate(pairs):
+            col = i % cols
+            if col == 0 and i > 0: yy -= 3.5*mm
+            yy = new_page_if_needed(yy, 6*mm)
+            x = margin + col * col_w
+            draw_text(x, yy, f"{label}: {val}", 8, grey)
+        yy -= 5*mm
+        return yy
+
     # Render data section based on report type
     rt = report_def['type']
     if rt == 'cutting':
@@ -2263,12 +2275,10 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         acc_lvl = int(report_def.get('acceptance_level', 2))
         grade_list = ['I','II','III','IV']
         y = section_title('RT Equipment', y)
-        for k, label in [('instrument','Instrument'),('source_type','Source'),('focus_size','Focus'),('sfd','SFD'),('iqi_type','IQI'),('iqi_required','Wire No.'),('tube_voltage','Voltage (kV)'),('tube_current','Current (mA)'),('exposure_time','Exposure'),('film_brand','Film'),('density_range','Density Range'),('technique','Technique')]:
-            if data.get(k):
-                draw_text(margin, y, f"{label}: {data[k]}", 8, grey); y -= 4*mm
+        equip_pairs = [(label, data[k]) for k, label in [('instrument','Instrument'),('source_type','Source'),('focus_size','Focus'),('sfd','SFD (mm)'),('iqi_type','IQI'),('iqi_required','Wire No.'),('tube_voltage','Voltage (kV)'),('tube_current','Current (mA)'),('exposure_time','Exposure'),('film_brand','Film'),('density_range','Density Range'),('technique','Technique')] if data.get(k)]
         acc_std = report_def.get('acceptance_standard', 'ASME VIII-1 UW-51')
-        draw_text(margin, y, f"Acceptance: {acc_std} — Level {acc_lvl}", 8, grey); y -= 4*mm
-        y -= 2*mm
+        equip_pairs.append(('Acceptance', f"{acc_std} \u2014 Level {acc_lvl}"))
+        y = draw_kv_grid(equip_pairs, y, cols=2)
         y = section_title('Film Evaluation', y)
         welds = data.get('welds', [])
         for w in welds:
@@ -2350,9 +2360,7 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         if data.get('surface_prep'): coat_info.append(('Surface Prep', data['surface_prep']))
         if coat_info:
             y = section_title('Coating System', y)
-            for label, val in coat_info:
-                draw_text(margin, y, f"{label}: {val}", 8, grey); y -= 4*mm
-            y -= 2*mm
+            y = draw_kv_grid(coat_info, y, cols=2)
         y = section_title('DFT Readings', y)
         readings = data.get('readings', [])
         # Parse spec_dft for acceptance: 80% rule per ISO 19840
@@ -2390,22 +2398,36 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         draw_text(margin, y, 'Remarks:', 9, grey, bold=True); y -= 5*mm
         draw_text(margin, y, remarks[:200], 8, black); y -= 6*mm
 
-    # ── OVERALL RESULT ──
+    # ── OVERALL RESULT + SIGNATURES (keep together — never orphan sigs on a page) ──
+    import base64 as _b64
+    from reportlab.lib.utils import ImageReader
+    insp_types = get_inspector_types(project)
+    n_types = max(len(insp_types), 1)
+    result_sig_height = 45*mm  # result block (~18mm) + signature boxes (~27mm)
+    # Only break to new page if there's enough content already on this page
+    # to justify the break — prevents an orphaned signature-only page
+    space_left = y - margin
+    if space_left < result_sig_height:
+        # Would need a new page — but check if the new page would be orphan
+        # (only result+sigs with no data above). If so, squeeze onto current page.
+        page_content_above = (H - 15*mm) - y  # how much content is already on this page
+        if page_content_above < 30*mm:
+            # Very little content on this page — don't break, this IS the orphan page
+            # from a prior break. Just draw here.
+            pass
+        else:
+            # Enough content above — safe to break
+            draw_footer()
+            c.showPage()
+            y = H - 15*mm
+
     y -= 3*mm
-    y = new_page_if_needed(y, 25*mm)
     draw_line(y, black, 1.5); y -= 8*mm
     draw_text(margin, y, 'Inspection Result:', 11, black, bold=True)
     result_text = 'CONFORMING' if overall == 'ACC' else ('NON-CONFORMING' if overall == 'REJ' else ('NOT APPLICABLE' if overall == 'N/A' else 'PENDING'))
     result_color = green if overall == 'ACC' else (red if overall == 'REJ' else (HexColor('#7f8c8d') if overall == 'N/A' else grey))
     draw_text(W - margin - 50*mm, y, result_text, 12, result_color, bold=True)
     y -= 10*mm
-
-    # ── SIGNATURES — driven by inspector types config ──
-    import base64 as _b64
-    from reportlab.lib.utils import ImageReader
-    insp_types = get_inspector_types(project)
-    n_types = max(len(insp_types), 1)
-    y = new_page_if_needed(y, 30*mm)
     sig_w = cw / n_types - 3*mm
     for i, t in enumerate(insp_types):
         sx = margin + i * (sig_w + 4*mm)

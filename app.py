@@ -2089,8 +2089,25 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
     inspectors_data = data.get('inspectors', {})
     overall = data.get('overall_result', '')
 
+    # Register CJK font for Chinese text
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    try: pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+    except: pass
+    _has_cjk_re = None
+    def _has_cjk(s):
+        nonlocal _has_cjk_re
+        if _has_cjk_re is None:
+            import re
+            _has_cjk_re = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]')
+        return bool(_has_cjk_re.search(str(s)))
+
     def draw_text(x, yy, text, size=9, color=black, bold=False, align='left', max_w=None):
-        font = 'Helvetica-Bold' if bold else 'Helvetica'
+        text = str(text)[:120]
+        if _has_cjk(text):
+            font = 'STSong-Light'
+        else:
+            font = 'Helvetica-Bold' if bold else 'Helvetica'
         c.setFont(font, size); c.setFillColor(color)
         if align == 'center' and max_w:
             tw = c.stringWidth(text, font, size)
@@ -2098,7 +2115,7 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         elif align == 'right' and max_w:
             tw = c.stringWidth(text, font, size)
             x = x + max_w - tw
-        c.drawString(x, yy, str(text)[:120])
+        c.drawString(x, yy, text)
 
     def draw_line(yy, color=black, width=0.5):
         c.setStrokeColor(color); c.setLineWidth(width)
@@ -2124,7 +2141,9 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         draw_text(W-margin, fy, '3.1', 8, grey, align='right', max_w=0)
 
     # ── LOGO + TITLE ──
-    logo_path = os.path.join(os.path.expanduser('~'), 'Library', 'CloudStorage', 'Dropbox', 'OB', 'Logos', 'Enerxon Logo Especifications 1.png')
+    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'enerxon_logo.png')
+    if not os.path.exists(logo_path):
+        logo_path = os.path.join(os.path.expanduser('~'), 'Library', 'CloudStorage', 'Dropbox-Enerxon', 'Enerxon Ltd', 'OB', 'Logos', 'Enerxon Logo Especifications 1.png')
     if os.path.exists(logo_path):
         try: c.drawImage(logo_path, margin, y - 14*mm, width=35*mm, height=14*mm, preserveAspectRatio=True, mask='auto')
         except: pass
@@ -2323,9 +2342,44 @@ def build_qc_pdf(project, spool_id, report_def, report_row, proj_info, step_date
         y = draw_table(['Area', 'Surface', 'Cu Deposit', 'Result'], rows, yy=y)
 
     elif rt == 'dft':
+        # Coating system info
+        coat_info = []
+        if data.get('coat_desc'): coat_info.append(('System', data['coat_desc']))
+        if data.get('product_batch'): coat_info.append(('Manufacturer', data['product_batch']))
+        if data.get('spec_dft'): coat_info.append(('Target NDFT', f"{data['spec_dft']} \u00b5m"))
+        if data.get('surface_prep'): coat_info.append(('Surface Prep', data['surface_prep']))
+        if coat_info:
+            y = section_title('Coating System', y)
+            for label, val in coat_info:
+                draw_text(margin, y, f"{label}: {val}", 8, grey); y -= 4*mm
+            y -= 2*mm
         y = section_title('DFT Readings', y)
         readings = data.get('readings', [])
-        rows = [[r.get('point',''), str(r.get('value','')) + ' um' if r.get('value') else '—', '—'] for r in readings]
+        # Parse spec_dft for acceptance: 80% rule per ISO 19840
+        spec_raw = str(data.get('spec_dft', '') or '')
+        ndft = None
+        if spec_raw:
+            try:
+                ndft = float(spec_raw.split('-')[0].strip()) if '-' in spec_raw else float(spec_raw)
+            except (ValueError, IndexError):
+                ndft = None
+        min_ok = ndft * 0.8 if ndft else None
+        rows = []
+        for r in readings:
+            val = r.get('value')
+            if val is not None and val != '':
+                val_f = float(val)
+                reading_str = f"{val_f:.0f} \u00b5m"
+                if min_ok is not None:
+                    result = 'ACC' if val_f >= min_ok else 'REJ'
+                elif overall == 'ACC':
+                    result = 'ACC'
+                else:
+                    result = '\u2014'
+            else:
+                reading_str = '\u2014'
+                result = '\u2014'
+            rows.append([r.get('point', ''), reading_str, result])
         y = draw_table(['Point', 'Reading', 'Result'], rows, yy=y)
 
     # ── REMARKS ──

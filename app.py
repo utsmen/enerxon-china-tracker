@@ -3898,11 +3898,25 @@ async function load(){
 function render(sp){
   document.getElementById('list').innerHTML=sp.map(s=>{
     const p=s.progress_pct,c=p>=100?'pct-green':p>0?'pct-yellow':'pct-red',bg=p>=100?'#27ae60':p>0?'#f39c12':'#e8e8e8',l=s.spool.line||'?';
-    return`<div class="spool-row" onclick="location.href='/project/${P}/spool/${s.spool.spool_id}'">
+    return`<div class="spool-row" id="spool-${s.spool.spool_id}" onclick="location.href='/project/${P}/spool/${s.spool.spool_id}'">
       <span class="line-badge line-${l}">${l}</span>
       <div class="info"><div class="name">${s.spool.spool_id}</div><div class="meta">${s.spool.main_diameter||''} \u00b7 ${s.spool.iso_no||''}</div></div>
       <div class="bar"><div class="pbar-bg"><div class="pbar-fill" style="width:${p}%;background:${bg}"></div></div></div>
       <div class="pct ${c}">${p}%</div></div>`;}).join('');
+  scrollToHashSpool();
+}
+let _didHashScroll=false;
+function scrollToHashSpool(){
+  if(_didHashScroll) return;
+  const h=window.location.hash;
+  if(!h) return;
+  const el=document.getElementById(h.slice(1));
+  if(!el) return;
+  el.scrollIntoView({block:'center'});
+  el.style.transition='background .8s';
+  el.style.background='#fff3cd';
+  setTimeout(()=>{el.style.background='';},1200);
+  _didHashScroll=true;
 }
 function filter(){
   const q=document.getElementById('q').value.toLowerCase(),d=document.getElementById('fd').value,l=document.getElementById('fl').value,s=document.getElementById('fs').value;
@@ -4040,7 +4054,7 @@ SPOOL_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
 .qc-cat-header{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:12px 16px 4px;color:#888}
 </style></head><body>
 <div class="header">
-  <a class="back" href="/project/{{ project }}">\u2190 {{ project }}</a>
+  <a class="back" href="/project/{{ project }}#spool-{{ spool_id }}">\u2190 {{ project }}</a>
   <h1>{{ spool_id }}</h1>
   <div class="sub" id="sub-info">Loading... / 加载中...</div>
 </div>

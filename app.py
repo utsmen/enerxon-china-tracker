@@ -1700,10 +1700,16 @@ def api_qc_image_upload(project, spool_id, report_type):
         return jsonify({'error': 'No image data'}), 400
     caption = request.form.get('caption', '') if 'file' in request.files else request.headers.get('X-Caption', '')
     operator = request.form.get('operator', '') if 'file' in request.files else request.headers.get('X-Operator', '')
-    db_execute("INSERT INTO qc_images (project,spool_id,report_type,image_data,filename,mime_type,caption,uploaded_by) VALUES (?,?,?,?,?,?,?,?)",
-        (project, spool_id, report_type, img_data, fname, mime, caption, operator))
+    if USE_PG:
+        cur = db_execute("INSERT INTO qc_images (project,spool_id,report_type,image_data,filename,mime_type,caption,uploaded_by) VALUES (?,?,?,?,?,?,?,?) RETURNING id",
+            (project, spool_id, report_type, img_data, fname, mime, caption, operator))
+        image_id = cur.fetchone()['id']
+    else:
+        cur = db_execute("INSERT INTO qc_images (project,spool_id,report_type,image_data,filename,mime_type,caption,uploaded_by) VALUES (?,?,?,?,?,?,?,?)",
+            (project, spool_id, report_type, img_data, fname, mime, caption, operator))
+        image_id = cur.lastrowid
     db_commit()
-    return jsonify({'ok': True, 'size_kb': round(len(img_data)/1024, 1)})
+    return jsonify({'ok': True, 'image_id': image_id, 'size_kb': round(len(img_data)/1024, 1)})
 
 @app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>/images')
 @login_required
@@ -1728,6 +1734,85 @@ def api_qc_image_delete(project, image_id):
     db_execute("DELETE FROM qc_images WHERE id=? AND project=?", (image_id, project))
     db_commit()
     return jsonify({'ok': True})
+
+# ── QC Autofill from photo (VLM) ─────────────────────────────────────────────
+# Registry of prompts keyed by report_type. Adding a new instrument-read report
+# (e.g. DFT gauge) = add one entry. Nothing else in the code changes.
+AUTOFILL_SCHEMAS = {
+    'pmi': (
+        "You are reading the display of a handheld XRF alloy analyzer (Niton, "
+        "Olympus Vanta, Oxford, Innov-X, or similar). Extract the element "
+        "percentages shown on the screen.\n\n"
+        "Return ONLY a single JSON object — no prose, no code fences. Use these "
+        "keys (omit any element that is not clearly visible):\n"
+        '{"cr": <number>, "ni": <number>, "mo": <number>, "fe": <number>, '
+        '"mn": <number>, "grade_match": "<string or null>", '
+        '"confidence": "high"|"medium"|"low"}\n\n'
+        "Rules: numeric values must be numbers, not strings. Never invent "
+        "values that are not clearly visible on the screen. If the screen is "
+        'unreadable return {"confidence":"low"} with no numbers.'
+    ),
+    'ferrite': (
+        "You are reading the display of a ferrite meter / Feritscope (Fischer "
+        "FMP30, Helmut Fischer MP30, Foerster, or similar). Extract the ferrite "
+        "reading(s) shown on the display.\n\n"
+        "Return ONLY a single JSON object — no prose, no code fences:\n"
+        '{"r1": <number>, "r2": <number or null>, "r3": <number or null>, '
+        '"unit": "FN"|"%", "confidence": "high"|"medium"|"low"}\n\n'
+        "If only one reading is shown use r1 and set r2 and r3 to null. "
+        "Numeric values must be numbers."
+    ),
+}
+
+@app.route('/api/project/<project>/spool/<spool_id>/qc/<report_type>/autofill', methods=['POST'])
+@login_required
+def api_qc_autofill(project, spool_id, report_type):
+    prompt = AUTOFILL_SCHEMAS.get(report_type)
+    if not prompt:
+        return jsonify({'error': f'Autofill not supported for {report_type}'}), 400
+    body = request.get_json() or {}
+    image_id = body.get('image_id')
+    if not image_id:
+        return jsonify({'error': 'image_id required'}), 400
+    row = db_fetchone("SELECT image_data, mime_type FROM qc_images WHERE id=? AND project=?",
+                      (int(image_id), project))
+    if not row:
+        return jsonify({'error': 'Image not found'}), 404
+    try:
+        import anthropic
+    except ImportError:
+        return jsonify({'error': 'Anthropic SDK not installed'}), 503
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
+    if not api_key:
+        return jsonify({'error': 'ANTHROPIC_API_KEY not configured'}), 503
+    import base64, json as _json, re as _re
+    client = anthropic.Anthropic(api_key=api_key, max_retries=0)
+    mime = row.get('mime_type') or 'image/jpeg'
+    if mime not in ('image/jpeg', 'image/png', 'image/gif', 'image/webp'):
+        mime = 'image/jpeg'
+    b64 = base64.standard_b64encode(row['image_data']).decode()
+    try:
+        resp = client.messages.create(
+            model=get_qc_setting(project, 'chat_model') or 'claude-haiku-4-5',
+            max_tokens=400,
+            messages=[{'role': 'user', 'content': [
+                {'type': 'image', 'source': {'type': 'base64', 'media_type': mime, 'data': b64}},
+                {'type': 'text', 'text': prompt},
+            ]}],
+        )
+    except anthropic.RateLimitError:
+        return jsonify({'error': 'Rate limited, try again in a minute'}), 429
+    except Exception as e:
+        return jsonify({'error': f'VLM call failed: {e}'}), 502
+    text = ''.join(b.text for b in resp.content if getattr(b, 'type', '') == 'text').strip()
+    m = _re.search(r'\{[\s\S]*\}', text)
+    if not m:
+        return jsonify({'error': 'VLM did not return JSON', 'raw': text[:500]}), 502
+    try:
+        fields = _json.loads(m.group(0))
+    except Exception as e:
+        return jsonify({'error': f'JSON parse: {e}', 'raw': text[:500]}), 502
+    return jsonify({'fields': fields})
 
 # ── API: QC Seed from DXF SQLite ─────────────────────────────────────────────
 @app.route('/api/project/<project>/spool/<spool_id>/qc/seed', methods=['POST'])
@@ -4269,6 +4354,29 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 .weld-card{background:#f8f9fa;border-radius:8px;padding:12px;margin-bottom:8px;border-left:3px solid #8E44AD}
 .weld-card .weld-tag{font-size:14px;font-weight:700;color:#333}.weld-card .weld-size{font-size:11px;color:#888}
 .weld-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
+.af-btn{padding:4px 8px;font-size:11px;background:#fff;border:1px solid #2F5496;color:#2F5496;border-radius:4px;cursor:pointer;font-weight:600}
+.af-btn:hover{background:#eef4fc}
+.af-bd{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:200;display:none;align-items:flex-start;justify-content:center;padding:16px;overflow-y:auto}
+.af-bd.open{display:flex}
+.af-modal{background:#fff;border-radius:12px;max-width:820px;width:100%;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.3);margin:auto}
+.af-head{background:linear-gradient(135deg,#2F5496,#1a3a6e);color:#fff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center}
+.af-head h3{font-size:14px;margin:0;font-weight:600}
+.af-head button{background:none;border:none;color:#fff;font-size:22px;cursor:pointer;opacity:.8}
+.af-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px}
+@media(max-width:700px){.af-cols{grid-template-columns:1fr}}
+.af-photo{background:#000;border-radius:8px;overflow:hidden;position:relative;min-height:220px;display:flex;align-items:center;justify-content:center}
+.af-photo img{max-width:100%;max-height:420px;display:block}
+.af-overlay{position:absolute;inset:0;background:rgba(0,0,0,.65);display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;gap:10px;font-size:13px;font-weight:600}
+.af-spinner{width:36px;height:36px;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:af-spin .8s linear infinite}
+@keyframes af-spin{to{transform:rotate(360deg)}}
+.af-foot{display:flex;gap:8px;padding:10px 12px;border-top:1px solid #f0f2f5;background:#fafbfc}
+.af-foot button{flex:1;padding:10px;border-radius:8px;border:none;font-size:13px;font-weight:600;cursor:pointer}
+.af-cancel{background:#f0f2f5;color:#555}
+.af-confirm{background:#27ae60;color:#fff}
+.af-confirm:disabled{opacity:.4;cursor:not-allowed}
+.af-field label{font-size:10px;color:#888;text-transform:uppercase;font-weight:600;display:block;margin-bottom:3px}
+.af-field input{width:100%;padding:8px;border:2px solid #f39c12;border-radius:6px;font-size:15px;text-align:center;font-weight:700;background:#fff9e6}
+.af-field input:focus{border-color:#2F5496;outline:none;background:#fff}
 </style></head><body>
 <div class="header">
   <a class="back" href="/project/{{ project }}/spool/{{ spool_id }}?tab=qc">\u2190 {{ spool_id }}</a>
@@ -4290,6 +4398,19 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
   </div>
 </div>
 <div class="save-status" id="save-status"></div>
+<div class="af-bd" id="af-bd">
+  <div class="af-modal">
+    <div class="af-head"><h3 id="af-title">⚡ Autofill from Photo / 照片自动填写</h3><button onclick="afCancel()">×</button></div>
+    <div class="af-cols">
+      <div class="af-photo"><img id="af-img" alt=""><div id="af-overlay" class="af-overlay"><div class="af-spinner"></div><div>⚡ Extracting… / 提取中…</div></div></div>
+      <div id="af-fields"></div>
+    </div>
+    <div class="af-foot">
+      <button class="af-cancel" onclick="afCancel()">Cancel / 取消</button>
+      <button class="af-confirm" id="af-confirm" onclick="afConfirm()" disabled>✓ Confirm &amp; Save / 确认保存</button>
+    </div>
+  </div>
+</div>
 <script>
 const P='{{project}}',S='{{spool_id}}',RT='{{report_type}}',SUB='{{report_subtype}}';
 let reportData = {};
@@ -4628,7 +4749,7 @@ function renderPMI(data){
     html += `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:10px"><tr style="background:#f0f2f5">
       <th style="padding:4px;border:1px solid #ddd;text-align:left">Item / 项目</th><th style="padding:4px;border:1px solid #ddd">Location / 位置</th>
       <th style="padding:4px;border:1px solid #ddd">Cr%</th><th style="padding:4px;border:1px solid #ddd">Ni%</th><th style="padding:4px;border:1px solid #ddd">Mo%</th>
-      <th style="padding:4px;border:1px solid #ddd">Grade OK / 牌号确认</th><th style="padding:4px;border:1px solid #ddd">Result / 结果</th></tr>`;
+      <th style="padding:4px;border:1px solid #ddd">Grade OK / 牌号确认</th><th style="padding:4px;border:1px solid #ddd">Result / 结果</th><th style="padding:4px;border:1px solid #ddd">📷</th></tr>`;
     items.forEach((it,i) => {
       html += `<tr><td style="padding:3px;border:1px solid #ddd;font-size:9px;font-weight:600">${it.item||'Point '+(i+1)}</td>
         <td style="padding:3px;border:1px solid #ddd">${inp('items.'+i+'.location',it.location,{ph:'Base/Weld/HAZ 母材/焊缝/热影响区',style:'padding:2px;font-size:9px;width:65px'})}</td>
@@ -4636,7 +4757,8 @@ function renderPMI(data){
         <td style="padding:3px;border:1px solid #ddd">${inp('items.'+i+'.ni',it.ni,{type:'number',style:'padding:2px;font-size:9px;width:45px'})}</td>
         <td style="padding:3px;border:1px solid #ddd">${inp('items.'+i+'.mo',it.mo,{type:'number',style:'padding:2px;font-size:9px;width:45px'})}</td>
         ${pfCell('items.'+i+'.grade_ok',it.grade_ok)}
-        ${accRejCell('items.'+i+'.result',it.result)}</tr>`;
+        ${accRejCell('items.'+i+'.result',it.result)}
+        <td style="padding:3px;border:1px solid #ddd;text-align:center"><button class="af-btn" title="Autofill from photo / 从照片自动填写" onclick="startAutofill('items.${i}.')">📷</button></td></tr>`;
     });
     html += '</table></div>';
   }
@@ -4664,7 +4786,7 @@ function renderFerrite(data){
     html += `<table style="width:100%;border-collapse:collapse;font-size:11px"><tr style="background:#f0f2f5">
       <th style="padding:4px;border:1px solid #ddd;text-align:left">Weld / 焊缝</th>
       <th style="padding:4px;border:1px solid #ddd">R1 (%) / 读数1</th><th style="padding:4px;border:1px solid #ddd">R2 (%) / 读数2</th><th style="padding:4px;border:1px solid #ddd">R3 (%) / 读数3</th>
-      <th style="padding:4px;border:1px solid #ddd">Average<br>平均</th><th style="padding:4px;border:1px solid #ddd">Result / 结果</th></tr>`;
+      <th style="padding:4px;border:1px solid #ddd">Average<br>平均</th><th style="padding:4px;border:1px solid #ddd">Result / 结果</th><th style="padding:4px;border:1px solid #ddd">📷</th></tr>`;
     readings.forEach((rd,i) => {
       const avg = (rd.r1!=null&&rd.r2!=null&&rd.r3!=null)?((rd.r1+rd.r2+rd.r3)/3).toFixed(1):'';
       const pass = avg?(parseFloat(avg)>=fMin&&parseFloat(avg)<=fMax):null;
@@ -4673,7 +4795,8 @@ function renderFerrite(data){
         <td style="padding:3px;border:1px solid #ddd">${inp('readings.'+i+'.r2',rd.r2,{type:'number',style:'padding:3px;font-size:10px;width:55px'})}</td>
         <td style="padding:3px;border:1px solid #ddd">${inp('readings.'+i+'.r3',rd.r3,{type:'number',style:'padding:3px;font-size:10px;width:55px'})}</td>
         <td style="padding:4px;border:1px solid #ddd;text-align:center;font-weight:700;color:${pass===true?'#27ae60':pass===false?'#e74c3c':'#888'}">${avg?avg+'%':'—'}</td>
-        <td style="padding:4px;border:1px solid #ddd;text-align:center" class="${pass===true?'pass':pass===false?'fail':''}">${pass===true?'ACC':pass===false?'REJ':'—'}</td></tr>`;
+        <td style="padding:4px;border:1px solid #ddd;text-align:center" class="${pass===true?'pass':pass===false?'fail':''}">${pass===true?'ACC':pass===false?'REJ':'—'}</td>
+        <td style="padding:4px;border:1px solid #ddd;text-align:center"><button class="af-btn" title="Autofill from photo / 从照片自动填写" onclick="startAutofill('readings.${i}.')">📷</button></td></tr>`;
     });
     html += '</table>';
   }
@@ -5108,6 +5231,106 @@ function showSave(msg, ok){
   const el = document.getElementById('save-status');
   el.textContent = msg; el.className = 'save-status ' + (ok ? 'save-ok' : 'save-err');
   el.style.opacity = '1'; setTimeout(()=>{ el.style.opacity = '0'; }, 1500);
+}
+
+// ── Autofill from photo (PMI / Ferrite) ──
+// One flow, report-type-agnostic. The per-row handler supplies the dot-path
+// prefix into reportData.data (e.g. "items.0." or "readings.2.") and the
+// server-returned JSON fills whatever keys exist under that prefix.
+const AUTOFILL_META_KEYS = new Set(['confidence','grade_match','unit']);
+let AF_STATE = null;
+function startAutofill(pathPrefix){
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*'; inp.capture = 'environment';
+  inp.onchange = async e => {
+    const f = e.target.files && e.target.files[0];
+    if(!f) return;
+    await runAutofill(pathPrefix, f);
+  };
+  inp.click();
+}
+async function runAutofill(pathPrefix, file){
+  showSave('⏳ Uploading photo…', true);
+  const c = await compressImage(file, 1200, 0.70);
+  if(!c){showSave('Compress failed / 压缩失败', false); return;}
+  const fd = new FormData();
+  fd.append('file', c, file.name); fd.append('operator', getOperatorName());
+  const up = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/image`, {method:'POST', body: fd});
+  if(!up.ok){showSave('Upload failed / 上传失败', false); return;}
+  const upJson = await up.json();
+  const imageId = upJson.image_id;
+  AF_STATE = {pathPrefix, imageId, fields: null};
+  document.getElementById('af-img').src = `/api/project/${P}/qc/image/${imageId}`;
+  document.getElementById('af-fields').innerHTML = '';
+  document.getElementById('af-overlay').style.display = 'flex';
+  document.getElementById('af-confirm').disabled = true;
+  document.getElementById('af-bd').classList.add('open');
+  try{
+    const r = await fetch(`/api/project/${P}/spool/${S}/qc/${RT}/autofill`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({image_id: imageId})
+    });
+    const j = await r.json();
+    if(!r.ok){ afShowError(j.error || 'Extraction failed'); return; }
+    AF_STATE.fields = j.fields || {};
+    afPaintFields(AF_STATE.fields);
+  }catch(e){ afShowError(e.message); }
+}
+function afPaintFields(fields){
+  document.getElementById('af-overlay').style.display = 'none';
+  const conf = fields.confidence;
+  const confColor = conf==='high'?'#27ae60':conf==='medium'?'#f39c12':'#e74c3c';
+  let html = '';
+  if(conf){
+    html += `<div style="padding:6px 10px;background:#fff9e6;border-left:3px solid ${confColor};border-radius:4px;font-size:11px;margin-bottom:10px">
+      <strong>Reading confidence / 置信度:</strong> <span style="color:${confColor};font-weight:700;text-transform:uppercase">${conf}</span>
+      ${fields.grade_match?` · Gun grade / 牌号: <strong>${fields.grade_match}</strong>`:''}
+      ${fields.unit?` · Unit / 单位: <strong>${fields.unit}</strong>`:''}
+    </div>`;
+  }
+  html += '<div style="font-size:11px;color:#666;margin-bottom:8px">Compare each value against the photo on the left — edit if wrong. / 对照左侧图片核对，不对请修改。</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
+  let shown = 0;
+  Object.entries(fields).forEach(([k,v]) => {
+    if(AUTOFILL_META_KEYS.has(k) || v==null) return;
+    shown++;
+    html += `<div class="af-field"><label>${k}</label><input id="af-f-${k}" value="${v}"></div>`;
+  });
+  html += '</div>';
+  if(!shown) html += '<div style="padding:10px;background:#fce4ec;border-left:3px solid #e74c3c;border-radius:4px;font-size:12px">No numeric readings extracted — review photo and enter manually. / 未提取到数值，请手动输入。</div>';
+  document.getElementById('af-fields').innerHTML = html;
+  document.getElementById('af-confirm').disabled = (shown === 0);
+}
+function afShowError(msg){
+  document.getElementById('af-overlay').style.display = 'none';
+  document.getElementById('af-fields').innerHTML = `<div style="padding:10px;background:#fce4ec;border-left:3px solid #e74c3c;border-radius:4px;font-size:12px">
+    <strong>Extraction failed / 提取失败:</strong> ${msg}<br>
+    <span style="color:#888;font-size:10px">Photo kept — you can enter values manually after closing. / 照片已保留，关闭后可手动输入。</span></div>`;
+  document.getElementById('af-confirm').disabled = true;
+}
+function afConfirm(){
+  if(!AF_STATE || !AF_STATE.fields){ return; }
+  const {pathPrefix, fields} = AF_STATE;
+  Object.keys(fields).forEach(k => {
+    if(AUTOFILL_META_KEYS.has(k)) return;
+    const el = document.getElementById('af-f-'+k);
+    if(!el) return;
+    let v = el.value;
+    if(v!=='' && /^-?\d+(\.\d+)?$/.test(v.trim())) v = parseFloat(v);
+    setD(pathPrefix + k, v);
+  });
+  AF_STATE = null;
+  document.getElementById('af-bd').classList.remove('open');
+  reRender();
+}
+async function afCancel(){
+  if(AF_STATE && AF_STATE.imageId){
+    // Discard the photo — don't clutter the Photos grid with abandoned autofills
+    try{ await fetch(`/api/project/${P}/qc/image/${AF_STATE.imageId}`, {method:'DELETE'}); }catch(e){}
+  }
+  AF_STATE = null;
+  document.getElementById('af-bd').classList.remove('open');
+  const cfg = REPORT_FIELDS[RT]; if(cfg && cfg.hasImages) loadImages();
 }
 
 loadReport();

@@ -3813,6 +3813,14 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
 .rs-lbl{font-size:8px;color:#888;text-transform:uppercase}.rs-val{font-size:20px;font-weight:700}
 .rs-badge{padding:3px 10px;border-radius:8px;font-size:9px;font-weight:700;margin-left:auto;white-space:nowrap}
 .rs-good{background:#e8f5e9;color:#27ae60}.rs-bad{background:#fce4ec;color:#e74c3c}
+/* Tab bar — shared widget+layout registry pattern */
+.tab-bar{background:#fff;display:flex;padding:0 16px;gap:0;box-shadow:0 1px 2px rgba(0,0,0,.05);border-bottom:1px solid #e8e8e8}
+.tab-btn{padding:14px 22px;font-size:13px;font-weight:600;color:#888;cursor:pointer;border-bottom:3px solid transparent;transition:all .15s;user-select:none}
+.tab-btn:hover{color:#2F5496;background:#f8f9fb}
+.tab-btn.active{color:#2F5496;border-bottom-color:#2F5496}
+.tab-btn.disabled{color:#bbb;cursor:not-allowed;background:transparent}
+.tab-btn.disabled:hover{color:#bbb;background:transparent}
+.tab-btn .pill{display:inline-block;font-size:9px;background:#eef4fc;color:#2F5496;padding:1px 7px;border-radius:8px;margin-left:6px;font-weight:700;text-transform:uppercase;letter-spacing:.3px}
 </style></head><body>
 <div class="header">
   <div style="display:flex;align-items:center;gap:12px">
@@ -3835,130 +3843,179 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
     <div id="settings-shipments"></div>
   </div>
 </div>
-<div class="toolbar">
-  <a class="btn" href="/api/project/{{ project }}/export">\U0001f4e5 Export Excel</a>
-  <a class="btn" href="/project/{{ project }}/report" style="background:#27ae60">\U0001f4ca Report / \u62a5\u544a</a>
-  <a class="btn" href="/api/project/{{ project }}/report/download" style="background:#ED7D31">\U0001f4ca Report Excel</a>
-  <a class="btn" href="/api/project/{{ project }}/report/pdf" style="background:#E74C3C">\U0001f4c4 Report PDF</a>
+<div class="tab-bar" id="tab-bar">
+  <div class="tab-btn" data-tab="overview"   onclick="switchTab('overview')">Overview / \u6982\u89c8</div>
+  <div class="tab-btn" data-tab="operations" onclick="switchTab('operations')">Operations / \u64cd\u4f5c</div>
+  <div class="tab-btn" data-tab="reports"    onclick="switchTab('reports')">Reports / \u62a5\u544a</div>
 </div>
-<div id="target-banner"></div>
-<div id="rate-strip"></div>
-<div class="stats-grid" id="stats"></div>
-<div id="diam" class="diam-grid"></div>
-<div class="filter-row">
-  <input id="q" placeholder="Search spool / \u641c\u7d22..." oninput="filter()">
-  <select id="fd" onchange="filter()"><option value="">All Diameters</option></select>
-  <select id="fl" onchange="filter()"><option value="">All Lines</option><option value="A">A</option><option value="B">B</option><option value="C">C</option></select>
-  <select id="fs" onchange="filter()"><option value="">All Status</option><option value="done">Done / \u5b8c\u6210</option><option value="wip">WIP / \u8fdb\u884c\u4e2d</option><option value="todo">Pending / \u5f85\u5f00\u59cb</option></select>
-</div>
-<div id="list"></div>
-<div id="act" class="section"></div>
+<div id="tab-content"></div>
 <script>
 const P='{{project}}';
-let all=[];
-async function load(){
-  const [dr, sr] = await Promise.all([fetch(`/api/project/${P}/dashboard`), fetch(`/api/project/${P}/spools`)]);
-  const st = await dr.json(); all = await sr.json();
-  const fc = st.forecast||{}, sett = st.settings||{}, schd = st.schedule_data, pr = st.production_rate||{};
-  const phases = st.phase_order || schd?.phase_order || ['fab'];
-  const phaseColors = ['#4472C4', '#ED7D31', '#8E44AD', '#27AE60'];
+let all=[];                        // alias kept for filter() \u2014 populated from state.spools
+let state = {dashboard:null, spools:null};
+
+// \u2500\u2500 LAYOUTS: which widgets render in each tab. Adding a tab = add an entry. \u2500\u2500
+const LAYOUTS = {
+  overview:   ['expediting_banner','rate_strip','stats_cards','diameter_cards','spool_list','recent_activity'],
+  operations: ['operations_placeholder'],
+  reports:    ['report_buttons','shipments_table'],
+};
+
+// \u2500\u2500 WIDGETS: each is a self-contained renderer over the shared state. \u2500\u2500
+// Optional `mount` runs AFTER the HTML is in the DOM (for fetches, listeners).
+const WIDGETS = {
+  expediting_banner:      {render: w_expediting_banner},
+  rate_strip:             {render: w_rate_strip},
+  stats_cards:            {render: w_stats_cards},
+  diameter_cards:         {render: w_diameter_cards},
+  spool_list:             {render: w_spool_list,        mount: m_spool_list},
+  recent_activity:        {render: w_recent_activity},
+  operations_placeholder: {render: w_operations_placeholder},
+  report_buttons:         {render: w_report_buttons},
+  shipments_table:        {render: w_shipments_table,   mount: m_shipments_table},
+};
+
+// \u2500\u2500 Tab switching (URL hash = source of truth) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function getCurrentTab(){
+  const h = (window.location.hash || '').slice(1);
+  if (LAYOUTS[h]) return h;
+  return 'overview';                                 // default for everyone
+}
+function switchTab(tab){
+  if (!LAYOUTS[tab]) tab = 'overview';
+  // Clear any spool-anchor hash when explicitly switching tabs
+  history.replaceState(null,'','#'+tab);
+  renderCurrentTab();
+}
+window.addEventListener('hashchange', () => {
+  const h = (window.location.hash || '').slice(1);
+  if (LAYOUTS[h]) renderCurrentTab();                // only re-render if hash is a tab
+});
+
+function renderCurrentTab(){
+  if (!state.dashboard || !state.spools) return;
+  const tab = getCurrentTab();
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  const st = state.dashboard;
+  document.getElementById('subtitle').textContent =
+    `${st.total} spools \u00b7 ${st.overall_pct}% \u00b7 ${st.completed} done / \u5b8c\u6210 ${st.completed}`;
+  // Render layout: each widget paints into its own mount div.
+  const layout = LAYOUTS[tab];
+  document.getElementById('tab-content').innerHTML =
+    layout.map(k => `<div id="w-${k}" class="widget" data-widget="${k}">${WIDGETS[k].render(state)}</div>`).join('');
+  // Run any post-mount hooks (fetches, scroll, listeners).
+  layout.forEach(k => { if (WIDGETS[k].mount) WIDGETS[k].mount(state); });
+}
+
+// \u2500\u2500 Shared helpers used by multiple widgets \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function _scheduleCtx(state){
+  const sett = state.dashboard.settings||{}, schd = state.dashboard.schedule_data, fc = state.dashboard.forecast||{};
+  const totalSaved = parseInt(sett.committed_weeks_saved||'0')*7 + parseInt(sett.committed_days_saved||'0');
+  if (!totalSaved || !schd || !schd.diameters || !schd.diameters.length) return null;
+  const starts = schd.diameters.map(x=>x.total_start).filter(x=>x).sort();
+  if (!starts.length) return null;
+  const stdWeeks = parseInt(sett.standard_weeks||'9');
   const toLocal = s => {const [y,m,d]=s.split('-');return new Date(+y,+m-1,+d);};
   const addDays = (dt,n) => new Date(dt.getFullYear(),dt.getMonth(),dt.getDate()+n);
-  const fmt = d => d.toLocaleDateString('en',{day:'2-digit',month:'short'});
-  document.getElementById('subtitle').textContent=`${st.total} spools \u00b7 ${st.overall_pct}% \u00b7 ${st.completed} done / \u5b8c\u6210 ${st.completed}`;
-  document.getElementById('stats').innerHTML=[
+  const psDate = toLocal(starts[0]);
+  const stdEnd = addDays(psDate, stdWeeks*7 - 1);
+  const commitEnd = addDays(stdEnd, -totalSaved);
+  const fcEnd = fc.overall_forecast_end ? toLocal(fc.overall_forecast_end) : null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  return {totalSaved, stdEnd, commitEnd, fcEnd, daysToTarget: Math.round((commitEnd-today)/86400000),
+          fcSaved: fcEnd ? Math.ceil((stdEnd-fcEnd)/86400000) : 0,
+          fcDiff:  fcEnd ? Math.ceil((commitEnd-fcEnd)/86400000) : 0,
+          fmt: d => d.toLocaleDateString('en',{day:'2-digit',month:'short'})};
+}
+
+// \u2500\u2500 Widget renderers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function w_stats_cards(state){
+  const st = state.dashboard;
+  return '<div class="stats-grid">'+[
     {v:st.total,l:'Total / \u603b\u6570'},{v:st.completed,l:'Done / \u5b8c\u6210',c:'#27ae60'},
     {v:st.in_progress,l:'WIP / \u8fdb\u884c\u4e2d',c:'#f39c12'},{v:st.not_started,l:'Pending / \u5f85\u5f00\u59cb',c:'#e74c3c'},
     {v:st.past_rt||0,l:'Past RT / \u8fc7RT',c:'#4472C4'}
-  ].map(x=>`<div class="stat-card"><div class="value" style="color:${x.c||'#2F5496'}">${x.v}</div><div class="label">${x.l}</div></div>`).join('');
+  ].map(x=>`<div class="stat-card"><div class="value" style="color:${x.c||'#2F5496'}">${x.v}</div><div class="label">${x.l}</div></div>`).join('')+'</div>';
+}
 
-  // Expediting banner
-  const stdWeeks = parseInt(sett.standard_weeks||'9');
-  const wksSaved = parseInt(sett.committed_weeks_saved||'0');
-  const daysSaved = parseInt(sett.committed_days_saved||'0');
-  const totalSaved = wksSaved*7+daysSaved;
-  const hasExpediting = totalSaved > 0;
-  if(hasExpediting && schd && schd.diameters && schd.diameters.length){
-    const starts = schd.diameters.map(x=>x.total_start).filter(x=>x).sort();
-    if(starts.length){
-      const psDate = toLocal(starts[0]);
-      const stdEnd = addDays(psDate, stdWeeks*7 - 1);
-      const commitEnd = addDays(stdEnd, -totalSaved);
-      const fcEnd = fc.overall_forecast_end ? toLocal(fc.overall_forecast_end) : null;
-      const today = new Date(); today.setHours(0,0,0,0);
-      const daysToTarget = Math.round((commitEnd - today) / 86400000);
-      const fcSaved = fcEnd ? Math.ceil((stdEnd - fcEnd) / 86400000) : 0;
-      const fcDiff = fcEnd ? Math.ceil((commitEnd - fcEnd) / 86400000) : 0;
-      const statusCls = fcDiff >= 0 ? 'tb-ok' : 'tb-warn';
-      const pillCls = fcDiff >= 0 ? 'sp-green' : 'sp-red';
-      const pillText = fcDiff >= 0 ? `\u2713 ${fcDiff}d ahead / \u8d85\u524d` : `\u2717 ${Math.abs(fcDiff)}d behind / \u843d\u540e`;
-      document.getElementById('target-banner').innerHTML=`<div class="target-banner ${statusCls}">
-        <div class="tb-section"><div class="tb-label">Expediting Target / \u52a0\u6025\u76ee\u6807</div><div class="tb-value" style="color:#4472C4">${fmt(commitEnd)}</div><div class="tb-sub">Committed / \u627f\u8bfa\u5b8c\u5de5</div></div>
-        <div class="tb-section"><div class="tb-label">Forecast End / \u9884\u6d4b\u5b8c\u5de5</div><div class="tb-value" style="color:#27ae60">${fmt(fcEnd||new Date())}</div><div class="tb-sub">Based on rate / \u57fa\u4e8e\u8fdb\u5ea6</div></div>
-        <div class="tb-section"><div class="tb-label">Days to Target / \u8ddd\u76ee\u6807</div><div class="tb-value" style="color:#2F5496">${daysToTarget}</div><div class="tb-sub">days left / \u5269\u4f59\u5929\u6570</div></div>
-        <div class="tb-section"><div class="tb-label">Expediting Saved / \u52a0\u6025\u8282\u7701</div><div class="tb-value" style="color:#4472C4">${totalSaved}<span style="font-size:10px;font-weight:400"> days</span></div><div class="tb-sub">vs standard / \u8f83\u6807\u51c6</div></div>
-        <div class="tb-section"><div class="tb-label">Forecast Saved / \u9884\u6d4b\u8282\u7701</div><div class="tb-value" style="color:#27ae60">${fcSaved}<span style="font-size:10px;font-weight:400"> days</span></div><div class="tb-sub">predicted / \u9884\u6d4b</div></div>
-        <div class="tb-section" style="border-right:none;margin-left:auto"><div class="status-pill ${pillCls}">${pillText}</div><div style="font-size:8px;color:#888;margin-top:2px">vs commitment / \u8f83\u627f\u8bfa</div></div>
-      </div>`;
-      // Daily rate + bottleneck
-      const avgRate = pr.avg_7day || 0;
-      const trend = pr.trend || 0;
-      const todaySteps = pr.today_steps || 0;
-      const remaining = st.total - st.completed;
-      const targetRate = daysToTarget > 0 ? (remaining / daysToTarget).toFixed(1) : '\u2014';
-      const aboveTarget = avgRate >= parseFloat(targetRate);
-      const trendArrow = trend >= 0 ? `<span style="color:#27ae60;font-size:10px;font-weight:600">\u25b2${trend}</span>` : `<span style="color:#e74c3c;font-size:10px;font-weight:600">\u25bc${Math.abs(trend)}</span>`;
-      let bottleneck = null;
-      if(schd && schd.diameters){
-        let worstRatio = 999;
-        schd.diameters.forEach(dm => {
-          if(dm.actual_pct >= 100 || dm.status === 'not_started') return;
-          const ratio = dm.actual_pct / Math.max(dm.expected_pct, 1);
-          if(ratio < worstRatio){ worstRatio = ratio; bottleneck = dm; }
-        });
-      }
-      let bnHtml = '';
-      if(bottleneck && bottleneck.actual_pct < 100){
-        const fcDiam = fc.diameters ? fc.diameters[bottleneck.diameter] : null;
-        const fcEndDiam = fcDiam ? fcDiam.forecast_end : '\u2014';
-        const neededRate = daysToTarget > 0 ? ((100 - bottleneck.actual_pct) / 100 * bottleneck.spool_count / daysToTarget).toFixed(1) : '\u2014';
-        bnHtml = `<div style="background:#fff;border-radius:8px;padding:10px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05);min-width:240px;border-left:4px solid #e74c3c;display:flex;flex-direction:column;justify-content:center">
-          <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.3px">Critical Path / \u5173\u952e\u8def\u5f84</div>
-          <div style="display:flex;align-items:baseline;gap:5px;margin:2px 0"><span style="font-size:20px;font-weight:700;color:#e74c3c">${bottleneck.diameter}</span><span style="font-size:11px;color:#888">${bottleneck.spool_count} spools \u00b7 slowest / \u6700\u6162</span></div>
-          <div style="font-size:10px;color:#666">Need / \u9700\u8981 <strong>${neededRate} spools/day / \u6bcf\u65e5</strong> to hit target / \u8fbe\u5230\u76ee\u6807</div>
-          <div style="font-size:9px;color:#999;margin-top:2px">${bottleneck.actual_pct}% done \u00b7 Forecast / \u9884\u6d4b: ${fcEndDiam}</div>
-        </div>`;
-      }
-      document.getElementById('rate-strip').innerHTML = `<div style="display:flex;gap:10px;margin:0 16px 8px;flex-wrap:wrap">
-        <div class="rate-strip" style="flex:1;min-width:400px;margin:0">
-          <div class="rs-title">\U0001f4ca Daily Rate / \u6bcf\u65e5\u751f\u4ea7\u7387</div>
-          <div class="rs-item"><div><div class="rs-lbl">Target / \u76ee\u6807</div><div class="rs-val" style="color:#2F5496">${targetRate}</div></div><div class="rs-lbl">spools/day<br>\u6bcf\u65e5\u9700\u5b8c\u6210</div></div>
-          <div class="rs-item"><div><div class="rs-lbl">7-day avg / 7\u5929\u5747\u503c</div><div style="display:flex;align-items:baseline;gap:3px"><div class="rs-val" style="color:${aboveTarget?'#27ae60':'#e74c3c'}">${avgRate}</div>${trendArrow}</div></div><div class="rs-lbl">spools/day<br>\u8f83\u4e0a\u5468</div></div>
-          <div class="rs-item" style="border-right:none"><div><div class="rs-lbl">Steps today / \u4eca\u65e5\u6b65\u9aa4</div><div class="rs-val" style="color:#4472C4">${todaySteps}</div></div><div class="rs-lbl">completed<br>\u4eca\u65e5\u5b8c\u6210</div></div>
-          <div class="rs-badge ${aboveTarget?'rs-good':'rs-bad'}">${aboveTarget?'\u2713 Above target / \u8d85\u8fc7\u76ee\u6807':'\u26a0 Below target / \u4f4e\u4e8e\u76ee\u6807'}</div>
-        </div>
-        ${bnHtml}
-      </div>`;
-    }
+function w_expediting_banner(state){
+  const ctx = _scheduleCtx(state); if (!ctx) return '';
+  const pillCls = ctx.fcDiff >= 0 ? 'sp-green' : 'sp-red';
+  const pillText = ctx.fcDiff >= 0 ? `\u2713 ${ctx.fcDiff}d ahead / \u8d85\u524d` : `\u2717 ${Math.abs(ctx.fcDiff)}d behind / \u843d\u540e`;
+  return `<div class="target-banner">
+    <div class="tb-section"><div class="tb-label">Expediting Target / \u52a0\u6025\u76ee\u6807</div><div class="tb-value" style="color:#4472C4">${ctx.fmt(ctx.commitEnd)}</div><div class="tb-sub">Committed / \u627f\u8bfa\u5b8c\u5de5</div></div>
+    <div class="tb-section"><div class="tb-label">Forecast End / \u9884\u6d4b\u5b8c\u5de5</div><div class="tb-value" style="color:#27ae60">${ctx.fmt(ctx.fcEnd||new Date())}</div><div class="tb-sub">Based on rate / \u57fa\u4e8e\u8fdb\u5ea6</div></div>
+    <div class="tb-section"><div class="tb-label">Days to Target / \u8ddd\u76ee\u6807</div><div class="tb-value" style="color:#2F5496">${ctx.daysToTarget}</div><div class="tb-sub">days left / \u5269\u4f59\u5929\u6570</div></div>
+    <div class="tb-section"><div class="tb-label">Expediting Saved / \u52a0\u6025\u8282\u7701</div><div class="tb-value" style="color:#4472C4">${ctx.totalSaved}<span style="font-size:10px;font-weight:400"> days</span></div><div class="tb-sub">vs standard / \u8f83\u6807\u51c6</div></div>
+    <div class="tb-section"><div class="tb-label">Forecast Saved / \u9884\u6d4b\u8282\u7701</div><div class="tb-value" style="color:#27ae60">${ctx.fcSaved}<span style="font-size:10px;font-weight:400"> days</span></div><div class="tb-sub">predicted / \u9884\u6d4b</div></div>
+    <div class="tb-section" style="border-right:none;margin-left:auto"><div class="status-pill ${pillCls}">${pillText}</div><div style="font-size:8px;color:#888;margin-top:2px">vs commitment / \u8f83\u627f\u8bfa</div></div>
+  </div>`;
+}
+
+function w_rate_strip(state){
+  const ctx = _scheduleCtx(state); if (!ctx) return '';
+  const st = state.dashboard, pr = st.production_rate||{}, schd = st.schedule_data, fc = st.forecast||{};
+  const remaining = st.total - st.completed;
+  const targetRate = ctx.daysToTarget > 0 ? (remaining / ctx.daysToTarget).toFixed(1) : '\u2014';
+  const avgRate = pr.avg_7day || 0, trend = pr.trend || 0, todaySteps = pr.today_steps || 0;
+  const aboveTarget = avgRate >= parseFloat(targetRate);
+  const trendArrow = trend >= 0
+    ? `<span style="color:#27ae60;font-size:10px;font-weight:600">\u25b2${trend}</span>`
+    : `<span style="color:#e74c3c;font-size:10px;font-weight:600">\u25bc${Math.abs(trend)}</span>`;
+  let bottleneck = null;
+  if (schd && schd.diameters){
+    let worstRatio = 999;
+    schd.diameters.forEach(dm => {
+      if (dm.actual_pct >= 100 || dm.status === 'not_started') return;
+      const ratio = dm.actual_pct / Math.max(dm.expected_pct, 1);
+      if (ratio < worstRatio){ worstRatio = ratio; bottleneck = dm; }
+    });
   }
+  let bnHtml = '';
+  if (bottleneck && bottleneck.actual_pct < 100){
+    const fcDiam = fc.diameters ? fc.diameters[bottleneck.diameter] : null;
+    const fcEndDiam = fcDiam ? fcDiam.forecast_end : '\u2014';
+    const neededRate = ctx.daysToTarget > 0
+      ? ((100 - bottleneck.actual_pct) / 100 * bottleneck.spool_count / ctx.daysToTarget).toFixed(1) : '\u2014';
+    bnHtml = `<div style="background:#fff;border-radius:8px;padding:10px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05);min-width:240px;border-left:4px solid #e74c3c;display:flex;flex-direction:column;justify-content:center">
+      <div style="font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.3px">Critical Path / \u5173\u952e\u8def\u5f84</div>
+      <div style="display:flex;align-items:baseline;gap:5px;margin:2px 0"><span style="font-size:20px;font-weight:700;color:#e74c3c">${bottleneck.diameter}</span><span style="font-size:11px;color:#888">${bottleneck.spool_count} spools \u00b7 slowest / \u6700\u6162</span></div>
+      <div style="font-size:10px;color:#666">Need / \u9700\u8981 <strong>${neededRate} spools/day / \u6bcf\u65e5</strong> to hit target / \u8fbe\u5230\u76ee\u6807</div>
+      <div style="font-size:9px;color:#999;margin-top:2px">${bottleneck.actual_pct}% done \u00b7 Forecast / \u9884\u6d4b: ${fcEndDiam}</div>
+    </div>`;
+  }
+  return `<div style="display:flex;gap:10px;margin:0 16px 8px;flex-wrap:wrap">
+    <div class="rate-strip" style="flex:1;min-width:400px;margin:0">
+      <div class="rs-title">\U0001f4ca Daily Rate / \u6bcf\u65e5\u751f\u4ea7\u7387</div>
+      <div class="rs-item"><div><div class="rs-lbl">Target / \u76ee\u6807</div><div class="rs-val" style="color:#2F5496">${targetRate}</div></div><div class="rs-lbl">spools/day<br>\u6bcf\u65e5\u9700\u5b8c\u6210</div></div>
+      <div class="rs-item"><div><div class="rs-lbl">7-day avg / 7\u5929\u5747\u503c</div><div style="display:flex;align-items:baseline;gap:3px"><div class="rs-val" style="color:${aboveTarget?'#27ae60':'#e74c3c'}">${avgRate}</div>${trendArrow}</div></div><div class="rs-lbl">spools/day<br>\u8f83\u4e0a\u5468</div></div>
+      <div class="rs-item" style="border-right:none"><div><div class="rs-lbl">Steps today / \u4eca\u65e5\u6b65\u9aa4</div><div class="rs-val" style="color:#4472C4">${todaySteps}</div></div><div class="rs-lbl">completed<br>\u4eca\u65e5\u5b8c\u6210</div></div>
+      <div class="rs-badge ${aboveTarget?'rs-good':'rs-bad'}">${aboveTarget?'\u2713 Above target / \u8d85\u8fc7\u76ee\u6807':'\u26a0 Below target / \u4f4e\u4e8e\u76ee\u6807'}</div>
+    </div>
+    ${bnHtml}
+  </div>`;
+}
 
-  // Diameter cards
-  const ds=Object.entries(st.by_diameter).sort((a,b)=>(parseInt(b[0])||0)-(parseInt(a[0])||0));
-  document.getElementById('diam').innerHTML=ds.map(([d,v])=>{
+function w_diameter_cards(state){
+  const st = state.dashboard, schd = st.schedule_data;
+  const phases = st.phase_order || (schd && schd.phase_order) || ['fab'];
+  const phaseColors = ['#4472C4', '#ED7D31', '#8E44AD', '#27AE60'];
+  const ds = Object.entries(st.by_diameter).sort((a,b)=>(parseInt(b[0])||0)-(parseInt(a[0])||0));
+  const html = ds.map(([d,v])=>{
     let cls='d-pending',badge='PENDING / \u5f85\u5f00\u59cb',badgeCls='pb-pending',paceText='',barColor='#ccc';
-    if(schd && schd.diameters){
+    if (schd && schd.diameters){
       const dm = schd.diameters.find(x=>x.diameter===d);
-      if(dm){
+      if (dm){
         const diff = dm.actual_pct - dm.expected_pct;
-        if(dm.status==='not_started'){cls='d-pending';badge='PENDING / \u5f85\u5f00\u59cb';badgeCls='pb-pending';barColor='#ccc';}
-        else if(diff >= 5){cls='d-ahead';badge='AHEAD / \u8d85\u524d';badgeCls='pb-ahead';barColor='#27ae60';paceText=`+${Math.round(diff)}% ahead / \u8d85\u524d`;}
-        else if(diff >= -5){cls='d-ontrack';badge='ON TRACK / \u8fbe\u6807';badgeCls='pb-ontrack';barColor='#4472C4';paceText=`${diff>=0?'+':''}${Math.round(diff)}% on pace / \u8fbe\u6807`;}
-        else if(diff >= -15){cls='d-atrisk';badge='AT RISK / \u6709\u98ce\u9669';badgeCls='pb-atrisk';barColor='#f39c12';paceText=`${Math.round(diff)}% behind / \u843d\u540e`;}
-        else{cls='d-behind';badge='BEHIND / \u843d\u540e';badgeCls='pb-behind';barColor='#e74c3c';paceText=`${Math.round(diff)}% behind / \u843d\u540e`;}
-        if(dm.expected_pct===0 && dm.actual_pct>0){cls='d-ahead';badge='AHEAD / \u8d85\u524d';badgeCls='pb-ahead';barColor='#27ae60';paceText='Started early / \u63d0\u524d\u5f00\u59cb';}
-      } else if(v.avg_pct > 0){cls='d-ontrack';badge='WIP';badgeCls='pb-ontrack';barColor='#4472C4';}
-    } else if(v.avg_pct > 0){cls='d-ontrack';barColor='#4472C4';}
-    else if(v.avg_pct >= 100){cls='d-ahead';barColor='#27ae60';}
+        if (dm.status==='not_started'){cls='d-pending';badge='PENDING / \u5f85\u5f00\u59cb';badgeCls='pb-pending';barColor='#ccc';}
+        else if (diff >= 5){cls='d-ahead';badge='AHEAD / \u8d85\u524d';badgeCls='pb-ahead';barColor='#27ae60';paceText=`+${Math.round(diff)}% ahead / \u8d85\u524d`;}
+        else if (diff >= -5){cls='d-ontrack';badge='ON TRACK / \u8fbe\u6807';badgeCls='pb-ontrack';barColor='#4472C4';paceText=`${diff>=0?'+':''}${Math.round(diff)}% on pace / \u8fbe\u6807`;}
+        else if (diff >= -15){cls='d-atrisk';badge='AT RISK / \u6709\u98ce\u9669';badgeCls='pb-atrisk';barColor='#f39c12';paceText=`${Math.round(diff)}% behind / \u843d\u540e`;}
+        else {cls='d-behind';badge='BEHIND / \u843d\u540e';badgeCls='pb-behind';barColor='#e74c3c';paceText=`${Math.round(diff)}% behind / \u843d\u540e`;}
+        if (dm.expected_pct===0 && dm.actual_pct>0){cls='d-ahead';badge='AHEAD / \u8d85\u524d';badgeCls='pb-ahead';barColor='#27ae60';paceText='Started early / \u63d0\u524d\u5f00\u59cb';}
+      } else if (v.avg_pct > 0){cls='d-ontrack';badge='WIP';badgeCls='pb-ontrack';barColor='#4472C4';}
+    } else if (v.avg_pct > 0){cls='d-ontrack';barColor='#4472C4';}
+    else if (v.avg_pct >= 100){cls='d-ahead';barColor='#27ae60';}
     const phAvgs = v.phase_avgs || {};
     const phaseBars = phases.map((ph,pi) => {
       const pv = phAvgs[ph]||0;
@@ -3969,51 +4026,132 @@ async function load(){
       <div style="font-size:12px;margin-top:4px;font-weight:600;color:${barColor}">${v.avg_pct}%</div>
       ${paceText?`<div style="font-size:9px;color:#888;margin-top:2px">${paceText}</div>`:''}</div>`;
   }).join('');
-  render(all);
-  const diamsSet = [...new Set(all.map(s=>s.spool.main_diameter||'?'))].sort((a,b)=>(parseInt(b)||0)-(parseInt(a)||0));
-  const fdEl = document.getElementById('fd');
-  const curFd = fdEl.value;
-  fdEl.innerHTML = '<option value="">All Diameters</option>';
-  diamsSet.forEach(d=>{ const o=document.createElement('option'); o.value=d; o.textContent=d; fdEl.appendChild(o); });
-  fdEl.value = curFd;
-  if(st.recent_activity&&st.recent_activity.length)
-    document.getElementById('act').innerHTML='<h2 style="font-size:16px;color:#2F5496;margin:8px 0">Recent / \u6700\u8fd1\u52a8\u6001</h2>'+
-      st.recent_activity.slice(0,10).map(a=>`<div class="activity-item"><strong>${a.spool_id}</strong> \u2014 ${a.details||a.action} <span style="color:#aaa;font-size:11px">${a.timestamp||''}</span></div>`).join('');
+  return `<div class="diam-grid">${html}</div>`;
 }
-function render(sp){
-  document.getElementById('list').innerHTML=sp.map(s=>{
-    const p=s.progress_pct,c=p>=100?'pct-green':p>0?'pct-yellow':'pct-red',bg=p>=100?'#27ae60':p>0?'#f39c12':'#e8e8e8',l=s.spool.line||'?';
-    return`<div class="spool-row" id="spool-${s.spool.spool_id}" onclick="location.href='/project/${P}/spool/${s.spool.spool_id}'">
+
+function _spoolListRows(spools){
+  return spools.map(s=>{
+    const p=s.progress_pct, c=p>=100?'pct-green':p>0?'pct-yellow':'pct-red',
+          bg=p>=100?'#27ae60':p>0?'#f39c12':'#e8e8e8',
+          l=s.spool.line||'?';
+    return `<div class="spool-row" id="spool-${s.spool.spool_id}" onclick="location.href='/project/${P}/spool/${s.spool.spool_id}'">
       <span class="line-badge line-${l}">${l}</span>
       <div class="info"><div class="name">${s.spool.spool_id}</div><div class="meta">${s.spool.main_diameter||''} \u00b7 ${s.spool.iso_no||''}</div></div>
       <div class="bar"><div class="pbar-bg"><div class="pbar-fill" style="width:${p}%;background:${bg}"></div></div></div>
-      <div class="pct ${c}">${p}%</div></div>`;}).join('');
-  scrollToHashSpool();
+      <div class="pct ${c}">${p}%</div></div>`;
+  }).join('');
 }
+function w_spool_list(state){
+  const diams = [...new Set(state.spools.map(s=>s.spool.main_diameter||'?'))].sort((a,b)=>(parseInt(b)||0)-(parseInt(a)||0));
+  const diamOpts = diams.map(d=>`<option value="${d}">${d}</option>`).join('');
+  return `<div class="filter-row">
+    <input id="q" placeholder="Search spool / \u641c\u7d22..." oninput="filter()">
+    <select id="fd" onchange="filter()"><option value="">All Diameters</option>${diamOpts}</select>
+    <select id="fl" onchange="filter()"><option value="">All Lines</option><option value="A">A</option><option value="B">B</option><option value="C">C</option></select>
+    <select id="fs" onchange="filter()"><option value="">All Status</option><option value="done">Done / \u5b8c\u6210</option><option value="wip">WIP / \u8fdb\u884c\u4e2d</option><option value="todo">Pending / \u5f85\u5f00\u59cb</option></select>
+  </div>
+  <div id="list">${_spoolListRows(state.spools)}</div>`;
+}
+function m_spool_list(state){ scrollToHashSpool(); }
 let _didHashScroll=false;
 function scrollToHashSpool(){
-  if(_didHashScroll) return;
-  const h=window.location.hash;
-  if(!h) return;
-  const el=document.getElementById(h.slice(1));
-  if(!el) return;
+  if (_didHashScroll) return;
+  const h = window.location.hash;
+  if (!h || LAYOUTS[h.slice(1)]) return;             // tab hashes (#operations) are not spool anchors
+  const el = document.getElementById(h.slice(1));
+  if (!el) return;
   el.scrollIntoView({block:'center'});
   el.style.transition='background .8s';
   el.style.background='#fff3cd';
   setTimeout(()=>{el.style.background='';},1200);
-  _didHashScroll=true;
+  _didHashScroll = true;
 }
 function filter(){
-  const q=document.getElementById('q').value.toLowerCase(),d=document.getElementById('fd').value,l=document.getElementById('fl').value,s=document.getElementById('fs').value;
-  render(all.filter(x=>{
-    if(q&&!x.spool.spool_id.toLowerCase().includes(q)&&!(x.spool.iso_no||'').toLowerCase().includes(q))return false;
-    if(d&&(x.spool.main_diameter||'?')!==d)return false;
-    if(l&&x.spool.line!==l)return false;
-    if(s==='done'&&x.progress_pct<100)return false;
-    if(s==='wip'&&(x.progress_pct<=0||x.progress_pct>=100))return false;
-    if(s==='todo'&&x.progress_pct>0)return false;
+  const q=document.getElementById('q').value.toLowerCase(),
+        d=document.getElementById('fd').value,
+        l=document.getElementById('fl').value,
+        s=document.getElementById('fs').value;
+  const filtered = all.filter(x=>{
+    if (q && !x.spool.spool_id.toLowerCase().includes(q) && !(x.spool.iso_no||'').toLowerCase().includes(q)) return false;
+    if (d && (x.spool.main_diameter||'?')!==d) return false;
+    if (l && x.spool.line!==l) return false;
+    if (s==='done' && x.progress_pct<100) return false;
+    if (s==='wip'  && (x.progress_pct<=0 || x.progress_pct>=100)) return false;
+    if (s==='todo' && x.progress_pct>0) return false;
     return true;
-  }));
+  });
+  document.getElementById('list').innerHTML = _spoolListRows(filtered);
+}
+
+function w_recent_activity(state){
+  const acts = state.dashboard.recent_activity;
+  if (!acts || !acts.length) return '';
+  return '<div class="section"><h2 style="font-size:16px;color:#2F5496;margin:8px 0">Recent / \u6700\u8fd1\u52a8\u6001</h2>' +
+    acts.slice(0,10).map(a=>`<div class="activity-item"><strong>${a.spool_id}</strong> \u2014 ${a.details||a.action} <span style="color:#aaa;font-size:11px">${a.timestamp||''}</span></div>`).join('') +
+    '</div>';
+}
+
+function w_operations_placeholder(state){
+  return `<div style="text-align:center;padding:80px 20px;background:#fff;margin:16px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
+    <div style="font-size:48px;margin-bottom:14px">\U0001f6e0</div>
+    <h2 style="font-size:17px;color:#2F5496;margin-bottom:6px;font-weight:600">Operations Matrix \u2014 Coming in next deploy</h2>
+    <div style="font-size:14px;color:#666;margin-bottom:14px">\u64cd\u4f5c\u77e9\u9635 \u2014 \u4e0b\u6b21\u90e8\u7f72\u4e0a\u7ebf</div>
+    <p style="color:#888;font-size:13px;max-width:540px;margin:0 auto;line-height:1.55">Per-spool checklist + QC status, grouped by diameter, with step / status / diameter filters. <br>\u6309\u53e3\u5f84\u5206\u7ec4\u7684\u9010\u7ba1\u68c0\u67e5\u8868\u4e0e\u8d28\u68c0\u72b6\u6001\uff0c\u53ef\u6309\u6b65\u9aa4 / \u72b6\u6001 / \u53e3\u5f84\u8fc7\u6ee4\u3002</p>
+  </div>`;
+}
+
+function w_report_buttons(state){
+  return `<div class="toolbar" style="padding:18px 16px;justify-content:center">
+    <a class="btn" href="/api/project/${P}/export">\U0001f4e5 Export Excel</a>
+    <a class="btn" href="/project/${P}/report" style="background:#27ae60">\U0001f4ca Report / \u62a5\u544a</a>
+    <a class="btn" href="/api/project/${P}/report/download" style="background:#ED7D31">\U0001f4ca Report Excel</a>
+    <a class="btn" href="/api/project/${P}/report/pdf" style="background:#E74C3C">\U0001f4c4 Report PDF</a>
+  </div>`;
+}
+
+function w_shipments_table(state){
+  return `<div class="section"><h2>Shipments / \u53d1\u8fd0</h2>
+    <div id="shipments-content" style="background:#fff;border-radius:10px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
+      <div style="color:#888;text-align:center;padding:14px;font-size:12px">Loading\u2026 / \u52a0\u8f7d\u4e2d\u2026</div>
+    </div></div>`;
+}
+async function m_shipments_table(state){
+  const r = await fetch(`/api/project/${P}/shipments`);
+  const ships = await r.json();
+  const el = document.getElementById('shipments-content');
+  if (!el) return;
+  if (!ships.length){
+    el.innerHTML = '<div style="color:#888;text-align:center;padding:14px;font-size:12px">No shipments configured / \u672a\u914d\u7f6e\u53d1\u8fd0<br><span style="font-size:10px">Configure via \u2699 Settings panel / \u8bf7\u4f7f\u7528 \u2699 \u8bbe\u7f6e\u9762\u677f</span></div>';
+    return;
+  }
+  let html = `<table style="width:100%;border-collapse:collapse;font-size:12px">
+    <tr style="background:#f0f2f5">
+      <th style="padding:8px;border:1px solid #ddd;text-align:center">#</th>
+      <th style="padding:8px;border:1px solid #ddd;text-align:left">Description / \u63cf\u8ff0</th>
+      <th style="padding:8px;border:1px solid #ddd">ETD / \u79bb\u6e2f</th>
+      <th style="padding:8px;border:1px solid #ddd">Transit / \u8fd0\u8f93</th>
+      <th style="padding:8px;border:1px solid #ddd">ETA / \u5230\u8fbe</th>
+    </tr>`;
+  ships.forEach(s => {
+    html += `<tr>
+      <td style="padding:6px 8px;border:1px solid #ddd;font-weight:700;color:#2F5496;text-align:center">${s.shipment_number}</td>
+      <td style="padding:6px 8px;border:1px solid #ddd">${s.description||''}</td>
+      <td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${(s.etd||'').substring(0,10)||'\u2014'}</td>
+      <td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${s.transit_days||'\u2014'} d</td>
+      <td style="padding:6px 8px;border:1px solid #ddd;text-align:center;font-weight:700;color:#003366">${s.eta||'\u2014'}</td>
+    </tr>`;
+  });
+  html += '</table><div style="font-size:10px;color:#888;margin-top:10px;text-align:right">Edit shipments via \u2699 Settings panel / \u7f16\u8f91\u8bf7\u4f7f\u7528 \u2699 \u8bbe\u7f6e\u9762\u677f</div>';
+  el.innerHTML = html;
+}
+
+// \u2500\u2500 Boot + auto-refresh \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+async function load(){
+  const [dr, sr] = await Promise.all([fetch(`/api/project/${P}/dashboard`), fetch(`/api/project/${P}/spools`)]);
+  state.dashboard = await dr.json();
+  state.spools    = await sr.json();
+  all = state.spools;                                // keep filter() compat
+  renderCurrentTab();
 }
 // ── Settings Panel ──
 const SETTINGS_SCHEMA = [

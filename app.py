@@ -1461,6 +1461,127 @@ def api_project_spools(project):
         result.append({'spool': s, 'progress_pct': p})
     return jsonify(result)
 
+# ── API: Operations (per-spool blob for the matrix view) ─────────────────────
+# Returns one row per spool with current_step, per-step status, per-QC status,
+# and derived flags (stuck / failed / hold_pending). The client computes the
+# matrix and step funnel from this single payload — no per-step or per-QC
+# count endpoints needed.
+_SHORT_LABELS = {
+    'cutting':'Cut','cut':'Cut','fit-up':'Fit','fit':'Fit',
+    'welding':'Wld','weld':'Wld','visual':'VT','radiographic':'RT',
+    'magnetic':'MT','penetrant':'PT','pmi':'PMI','ferrite':'Fer',
+    'ferroxyl':'Frx','pickling':'Pck','passivation':'Pas',
+    'dimensional':'Dim','marking':'Mrk','packing':'Ship','painting':'Pnt',
+    'coating':'DFT','dft':'DFT','blasting':'Bls','cleaning':'Cln',
+    'documentation':'Doc','material':'Mat','final':'Fin','hold':'Hld',
+    'branch':'Brn','bevelling':'Bvl','bevel':'Bvl','end preparation':'Bvl',
+}
+def _step_short_label(name):
+    """Heuristic short label for ITP step names — used as matrix column header."""
+    import re as _re
+    if not name: return ''
+    m = _re.search(r'\(([A-Z]{2,4})\)', name)
+    if m: return m.group(1)
+    low = name.lower()
+    for k, v in _SHORT_LABELS.items():
+        if k in low: return v
+    words = _re.split(r'\W+', name.strip())
+    return (words[0][:3].title() if words and words[0] else name[:3])
+
+@app.route('/api/project/<project>/operations')
+@login_required
+def api_project_operations(project):
+    import json as _json, re as _re
+    from datetime import datetime as _dt
+    settings = get_project_settings(project)
+    bulk = bulk_spool_progress(project, settings)
+    steps_def = get_project_steps(project)
+    spools_rows = db_fetchall("SELECT * FROM spools WHERE project=? ORDER BY sequence", (project,))
+    progress_rows = db_fetchall("SELECT spool_id, step_number, completed, completed_at FROM progress WHERE project=?", (project,))
+    qc_rows = db_fetchall("SELECT spool_id, report_type, status, data FROM qc_reports WHERE project=?", (project,))
+
+    progress_by_spool = {}
+    for r in progress_rows:
+        progress_by_spool.setdefault(r['spool_id'], {})[r['step_number']] = r
+    qc_by_spool = {}
+    for r in qc_rows:
+        try: d = _json.loads(r.get('data') or '{}')
+        except Exception: d = {}
+        overall = d.get('overall_result')
+        qc_by_spool.setdefault(r['spool_id'], {})[r['report_type']] = {
+            'status': r.get('status') or 'draft', 'overall_result': overall}
+
+    hold_step_nums = {s['step_number'] for s in steps_def if s.get('is_hold_point')}
+    today = _dt.now()
+    STUCK_DAYS = 3
+
+    def _parse_dt(s):
+        if not s: return None
+        try: return _dt.fromisoformat(str(s).replace(' ', 'T').rstrip('Z'))
+        except Exception: return None
+
+    spools_out = []
+    for sp in spools_rows:
+        sid = sp['spool_id']
+        prog = progress_by_spool.get(sid, {})
+        applicable = sorted(
+            [s for s in steps_def if step_applies_to_spool(s, sp)],
+            key=lambda x: x.get('display_order', 0))
+        step_status = {}
+        last_done_dt = None
+        for s in applicable:
+            sn = s['step_number']
+            p = prog.get(sn)
+            if p and p.get('completed'):
+                step_status[sn] = 'done'
+                pdt = _parse_dt(p.get('completed_at'))
+                if pdt and (last_done_dt is None or pdt > last_done_dt):
+                    last_done_dt = pdt
+            else:
+                step_status[sn] = 'pending'
+        current_step = next((s['step_number'] for s in applicable
+                             if step_status.get(s['step_number']) != 'done'), None)
+        qc_status = {}
+        failed = False
+        for rt, q in qc_by_spool.get(sid, {}).items():
+            res = q['overall_result']; stat = q['status']
+            if res == 'REJ':
+                qc_status[rt] = 'failed'; failed = True
+            elif res == 'ACC' or stat == 'approved': qc_status[rt] = 'approved'
+            elif stat == 'submitted': qc_status[rt] = 'submitted'
+            elif stat == 'draft':     qc_status[rt] = 'draft'
+            else:                     qc_status[rt] = 'started'
+        b = bulk.get(sid) if isinstance(bulk, dict) else None
+        progress_pct = (b.get('progress_pct', 0) if isinstance(b, dict) else (b or 0))
+        stuck = bool(0 < progress_pct < 100 and last_done_dt
+                     and (today - last_done_dt).days >= STUCK_DAYS)
+        hold_pending = current_step in hold_step_nums
+        spools_out.append({
+            'spool_id': sid,
+            'main_diameter': sp.get('main_diameter') or '?',
+            'iso_no': sp.get('iso_no'),
+            'line': sp.get('line'),
+            'progress_pct': progress_pct,
+            'current_step': current_step,
+            'step_status': {str(k): v for k, v in step_status.items()},
+            'qc_status': qc_status,
+            'stuck': stuck, 'failed': failed, 'hold_pending': hold_pending,
+            'last_step_at': last_done_dt.strftime('%Y-%m-%d %H:%M:%S') if last_done_dt else None,
+        })
+
+    steps_out = [{
+        'step_number': s['step_number'],
+        'name_en': s['name_en'], 'name_cn': s['name_cn'],
+        'short': _step_short_label(s['name_en']),
+        'phase': s.get('phase', 'fab'),
+        'is_hold_point': bool(s.get('is_hold_point')),
+        'is_conditional': bool(s.get('is_conditional')),
+        'display_order': s.get('display_order'),
+    } for s in sorted(steps_def, key=lambda x: x.get('display_order', 0))]
+
+    return jsonify({'steps': steps_out, 'spools': spools_out,
+                    'stuck_threshold_days': STUCK_DAYS})
+
 # ── API: Spool Detail ─────────────────────────────────────────────────────────
 @app.route('/project/<project>/spool/<spool_id>')
 @login_required
@@ -3821,6 +3942,63 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
 .tab-btn.disabled{color:#bbb;cursor:not-allowed;background:transparent}
 .tab-btn.disabled:hover{color:#bbb;background:transparent}
 .tab-btn .pill{display:inline-block;font-size:9px;background:#eef4fc;color:#2F5496;padding:1px 7px;border-radius:8px;margin-left:6px;font-weight:700;text-transform:uppercase;letter-spacing:.3px}
+/* ── Operations Matrix (Phase 2) ── */
+.fbar{background:#fff;border-bottom:1px solid #e8e8e8;display:flex;flex-direction:column;margin:0 16px;border-radius:10px 10px 0 0;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.06);margin-top:12px}
+.chip-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 14px;border-bottom:1px solid #f0f2f5}
+.chip-row:last-child{border-bottom:none}
+.chip-row .reset-wrap{margin-left:auto}
+.chip-grp-label{font-size:10px;color:#666;text-transform:uppercase;font-weight:700;letter-spacing:.4px;min-width:96px}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:18px;background:#fff;font-size:11px;font-weight:600;color:#666;cursor:pointer;border:1px solid #e2e6ec;transition:all .12s;white-space:nowrap}
+.chip:hover{background:#f3f5f8;color:#333}
+.chip.active{color:#fff;border-color:transparent}
+.chip .count{background:rgba(0,0,0,.10);padding:1px 6px;border-radius:8px;font-size:10px;font-weight:700}
+.chip.active .count{background:rgba(255,255,255,.25)}
+.reset-btn{padding:5px 11px;border-radius:18px;border:1px solid #ddd;background:#fff;font-size:11px;cursor:pointer;color:#666;font-weight:600}
+.reset-btn:hover{background:#f3f5f8}
+.active-filters{padding:8px 14px;background:#fffaeb;border-bottom:2px solid #f39c12;display:flex;align-items:center;gap:10px;font-size:12px;color:#856404;flex-wrap:wrap}
+.active-filters .summary{font-weight:700}
+.active-filters .pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:14px;background:#fff;font-weight:700;color:#333;border:1px solid #f0d090}
+.active-filters .pill .x{margin-left:2px;cursor:pointer;color:#c0392b;font-weight:900}
+.diam-section{background:#fff;margin:8px 16px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden}
+.diam-head{display:flex;align-items:center;gap:14px;padding:10px 14px;cursor:pointer;background:#fafbfc;border-bottom:1px solid #f0f2f5;user-select:none}
+.diam-head:hover{background:#f3f5f8}
+.diam-head .caret{font-size:12px;color:#888;transition:transform .15s}
+.diam-section.collapsed .caret{transform:rotate(-90deg)}
+.diam-section.collapsed .diam-body{display:none}
+.diam-name{font-size:18px;font-weight:700;color:#2F5496;min-width:60px}
+.diam-stats{font-size:11px;color:#666;display:flex;gap:14px;flex:1;flex-wrap:wrap}
+.diam-stats .item{display:flex;flex-direction:column}
+.diam-stats .lbl{font-size:9px;color:#999;text-transform:uppercase;letter-spacing:.3px}
+.diam-stats .val{font-weight:700;font-size:13px;color:#333}
+.diam-bar{flex:1;max-width:240px;height:6px;background:#eee;border-radius:3px;overflow:hidden}
+.diam-bar .fill{height:100%;background:linear-gradient(90deg,#27ae60,#4472C4)}
+.diam-pct{font-size:14px;font-weight:700;color:#2F5496;min-width:46px;text-align:right}
+.diam-body{overflow-x:auto}
+.matrix{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}
+.matrix th,.matrix td{padding:0;border-bottom:1px solid #f0f2f5;border-right:1px solid #f0f2f5;text-align:center}
+.matrix th{background:#fafbfc;font-size:9px;color:#888;font-weight:700;text-transform:uppercase;letter-spacing:.3px;padding:10px 4px;border-bottom:2px solid #ddd;white-space:nowrap}
+.matrix th.spool-h{text-align:left;padding-left:14px;background:#f0f2f5;color:#2F5496;font-size:10px;min-width:110px;border-right:2px solid #ddd}
+.matrix th.pct-h{background:#f0f2f5;border-left:2px solid #ddd;min-width:48px}
+.matrix th .ph-fab{border-bottom-color:#4472C4 !important}
+.matrix th sup{color:#1565c0;font-size:10px}
+.matrix td.spool-c{text-align:left;padding:7px 14px;font-weight:600;color:#2F5496;background:#fff;border-right:2px solid #ddd;font-size:11px;cursor:pointer}
+.matrix td.spool-c:hover{background:#eef4fc}
+.matrix td.cell{height:30px;width:38px;font-size:14px;cursor:pointer;font-weight:700;transition:transform .08s}
+.matrix td.cell:hover{transform:scale(1.18);position:relative}
+.matrix td.pct-c{font-weight:700;font-size:11px;background:#fafbfc;border-left:2px solid #ddd;color:#666}
+.s-done{background:#d5f5d5;color:#1B7A1B}
+.s-wip{background:#fff3cd;color:#856404;animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+.s-fail{background:#fce4ec;color:#c0392b}
+.s-pending{background:#fff;color:#ddd}
+.s-hold{background:#e3f2fd;color:#1565c0;font-weight:900}
+.row-stuck{background:#fffaf0}
+.row-stuck:hover td{background:#fef3e0}
+.row-stuck td.spool-c::before{content:'⚠ ';color:#e74c3c;font-weight:900}
+.matrix-legend{padding:10px 14px;background:#fff;margin:8px 16px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.06);font-size:11px;display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+.matrix-legend strong{color:#2F5496;font-size:11px;text-transform:uppercase;letter-spacing:.3px;margin-right:6px}
+.matrix-legend .item{display:inline-flex;align-items:center;gap:6px;color:#666}
+.matrix-legend .cell{width:24px;height:20px;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;border:1px solid #e8e8e8}
 </style></head><body>
 <div class="header">
   <div style="display:flex;align-items:center;gap:12px">
@@ -3857,7 +4035,7 @@ let state = {dashboard:null, spools:null};
 // \u2500\u2500 LAYOUTS: which widgets render in each tab. Adding a tab = add an entry. \u2500\u2500
 const LAYOUTS = {
   overview:   ['expediting_banner','rate_strip','stats_cards','diameter_cards','spool_list','recent_activity'],
-  operations: ['operations_placeholder'],
+  operations: ['ops_filter_bar','ops_matrix_legend','ops_spool_matrix'],
   reports:    ['report_buttons','shipments_table'],
 };
 
@@ -3870,10 +4048,82 @@ const WIDGETS = {
   diameter_cards:         {render: w_diameter_cards},
   spool_list:             {render: w_spool_list,        mount: m_spool_list},
   recent_activity:        {render: w_recent_activity},
-  operations_placeholder: {render: w_operations_placeholder},
+  ops_filter_bar:         {render: w_ops_filter_bar},
+  ops_matrix_legend:      {render: w_ops_matrix_legend},
+  ops_spool_matrix:       {render: w_ops_spool_matrix},
   report_buttons:         {render: w_report_buttons},
   shipments_table:        {render: w_shipments_table,   mount: m_shipments_table},
 };
+
+// \u2500\u2500 FILTER_GROUPS: registry-driven filter chips for Operations tab \u2500\u2500
+// Adding a group (e.g. Welder, Shift, Phase) = one entry, no other code change.
+const FILTER_GROUPS = {
+  step:     {label_en:'Step',     label_cn:'\u6b65\u9aa4', color:'#2F5496',
+             // options is a function so it can derive from current data
+             options: () => {
+               const ops = state.operations; if (!ops) return [{key:'all',label:'All'}];
+               // Active step keys = step_numbers that at least one spool is currently at, plus 'done'
+               const present = new Set(ops.spools.map(sp => sp.current_step === null ? 'done' : sp.current_step));
+               const out = [{key:'all', label:'All'}];
+               ops.steps.forEach(s => {
+                 if (present.has(s.step_number)) out.push({key:String(s.step_number), label:'@ '+s.short});
+               });
+               if (present.has('done')) out.push({key:'done', label:'Done / \u5b8c\u6210'});
+               return out;
+             },
+             label_for: (v, st) => {
+               if (v === 'done') return 'Done';
+               const s = st.operations.steps.find(x => String(x.step_number) === String(v));
+               return s ? s.short : v;
+             },
+             match: (sp, v) => v === 'all'
+                || (v === 'done' ? sp.current_step === null
+                                 : String(sp.current_step) === String(v))},
+  status:   {label_en:'Status',   label_cn:'\u72b6\u6001', color:'#ED7D31',
+             options: [{key:'all',label:'All'},
+                       {key:'stuck', label:'Stuck >3d / \u6ede\u7559\u8d853\u5929'},
+                       {key:'failed',label:'Failed QC / \u4e0d\u5408\u683c'},
+                       {key:'hold',  label:'Hold pending / \u5f85\u653e\u884c'}],
+             label_for: v => ({all:'All',stuck:'Stuck >3d',failed:'Failed QC',hold:'Hold pending'})[v] || v,
+             match: (sp, v) => v === 'all'
+                || (v === 'stuck'  && sp.stuck)
+                || (v === 'failed' && sp.failed)
+                || (v === 'hold'   && sp.hold_pending)},
+  diameter: {label_en:'Diameter', label_cn:'\u53e3\u5f84', color:'#27ae60',
+             options: () => {
+               const ops = state.operations; if (!ops) return [{key:'all',label:'All'}];
+               const diams = [...new Set(ops.spools.map(s=>s.main_diameter||'?'))]
+                              .sort((a,b)=>(parseInt(b)||0)-(parseInt(a)||0));
+               return [{key:'all',label:'All'}, ...diams.map(d => ({key:d, label:d+'\u2033'}))];
+             },
+             label_for: v => v === 'all' ? 'All' : (v + '\u2033'),
+             match: (sp, v) => v === 'all' || sp.main_diameter === v},
+};
+
+// Active filters per group \u2014 initialise to 'all' for every registered group.
+const FILTERS = Object.fromEntries(Object.keys(FILTER_GROUPS).map(k => [k,'all']));
+
+function _spoolMatchesAllFilters(sp){
+  for (const [g, def] of Object.entries(FILTER_GROUPS)){
+    if (!def.match(sp, FILTERS[g])) return false;
+  }
+  return true;
+}
+function _countWithFilter(group, value){
+  // Count spools that would match if the given group's value were `value`,
+  // honouring the current values of all OTHER groups.
+  if (!state.operations) return 0;
+  return state.operations.spools.filter(sp => {
+    for (const [g, def] of Object.entries(FILTER_GROUPS)){
+      const v = (g === group) ? value : FILTERS[g];
+      if (!def.match(sp, v)) return false;
+    }
+    return true;
+  }).length;
+}
+function setFilter(group, value){ FILTERS[group] = value; renderCurrentTab(); }
+function clearFilter(group){ FILTERS[group] = 'all'; renderCurrentTab(); }
+function resetFilters(){ for (const k of Object.keys(FILTERS)) FILTERS[k] = 'all'; renderCurrentTab(); }
 
 // \u2500\u2500 Tab switching (URL hash = source of truth) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 function getCurrentTab(){
@@ -3892,18 +4142,29 @@ window.addEventListener('hashchange', () => {
   if (LAYOUTS[h]) renderCurrentTab();                // only re-render if hash is a tab
 });
 
-function renderCurrentTab(){
+async function ensureOperationsData(){
+  if (state.operations) return;
+  const r = await fetch(`/api/project/${P}/operations`);
+  if (!r.ok) { state.operations = {steps:[], spools:[], _error:r.status}; return; }
+  state.operations = await r.json();
+}
+
+async function renderCurrentTab(){
   if (!state.dashboard || !state.spools) return;
   const tab = getCurrentTab();
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   const st = state.dashboard;
   document.getElementById('subtitle').textContent =
     `${st.total} spools \u00b7 ${st.overall_pct}% \u00b7 ${st.completed} done / \u5b8c\u6210 ${st.completed}`;
-  // Render layout: each widget paints into its own mount div.
+  // Lazy-load tab-specific data (operations payload only fetched once per page load).
+  if (tab === 'operations'){
+    document.getElementById('tab-content').innerHTML =
+      '<div style="padding:60px 20px;text-align:center;color:#888">Loading operations data\u2026 / \u52a0\u8f7d\u4e2d\u2026</div>';
+    await ensureOperationsData();
+  }
   const layout = LAYOUTS[tab];
   document.getElementById('tab-content').innerHTML =
     layout.map(k => `<div id="w-${k}" class="widget" data-widget="${k}">${WIDGETS[k].render(state)}</div>`).join('');
-  // Run any post-mount hooks (fetches, scroll, listeners).
   layout.forEach(k => { if (WIDGETS[k].mount) WIDGETS[k].mount(state); });
 }
 
@@ -4091,12 +4352,124 @@ function w_recent_activity(state){
     '</div>';
 }
 
-function w_operations_placeholder(state){
-  return `<div style="text-align:center;padding:80px 20px;background:#fff;margin:16px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
-    <div style="font-size:48px;margin-bottom:14px">\U0001f6e0</div>
-    <h2 style="font-size:17px;color:#2F5496;margin-bottom:6px;font-weight:600">Operations Matrix \u2014 Coming in next deploy</h2>
-    <div style="font-size:14px;color:#666;margin-bottom:14px">\u64cd\u4f5c\u77e9\u9635 \u2014 \u4e0b\u6b21\u90e8\u7f72\u4e0a\u7ebf</div>
-    <p style="color:#888;font-size:13px;max-width:540px;margin:0 auto;line-height:1.55">Per-spool checklist + QC status, grouped by diameter, with step / status / diameter filters. <br>\u6309\u53e3\u5f84\u5206\u7ec4\u7684\u9010\u7ba1\u68c0\u67e5\u8868\u4e0e\u8d28\u68c0\u72b6\u6001\uff0c\u53ef\u6309\u6b65\u9aa4 / \u72b6\u6001 / \u53e3\u5f84\u8fc7\u6ee4\u3002</p>
+function _escAttr(s){ return String(s).replace(/['"&<>]/g, c => ({"'":'&#39;','"':'&quot;','&':'&amp;','<':'&lt;','>':'&gt;'})[c]); }
+
+function w_ops_filter_bar(state){
+  const ops = state.operations;
+  if (!ops || ops._error) return `<div style="padding:30px;text-align:center;color:#e74c3c">Failed to load operations data (HTTP ${ops?._error}) / \u52a0\u8f7d\u5931\u8d25</div>`;
+  let html = '<div class="fbar">';
+  for (const [g, def] of Object.entries(FILTER_GROUPS)){
+    const opts = typeof def.options === 'function' ? def.options() : def.options;
+    html += `<div class="chip-row" style="border-left:4px solid ${def.color};background:${def.color}11">
+      <span class="chip-grp-label">${def.label_en} / ${def.label_cn}</span>
+      ${opts.map(o => {
+        const isActive = FILTERS[g] === o.key;
+        const cnt = (o.key !== 'all') ? _countWithFilter(g, o.key) : ops.spools.filter(_spoolMatchesAllFilters).length;
+        const style = isActive ? `background:${def.color};border-color:${def.color};color:#fff` : '';
+        return `<div class="chip${isActive?' active':''}" style="${style}" onclick="setFilter('${g}','${_escAttr(o.key)}')">${o.label} <span class="count">${cnt}</span></div>`;
+      }).join('')}
+      ${g === Object.keys(FILTER_GROUPS).slice(-1)[0] ? '<div class="reset-wrap"><button class="reset-btn" onclick="resetFilters()">\u21ba Reset all / \u91cd\u7f6e\u5168\u90e8</button></div>' : ''}
+    </div>`;
+  }
+  // Active-filters breadcrumb (only when at least one group is non-default)
+  const active = Object.entries(FILTERS).filter(([g,v]) => v !== 'all');
+  if (active.length){
+    const visibleCount = ops.spools.filter(_spoolMatchesAllFilters).length;
+    html += `<div class="active-filters">
+      <span class="summary">\u26a0 Filters active / \u5f53\u524d\u8fc7\u6ee4:</span>
+      ${active.map(([g,v]) => `<span class="pill">${FILTER_GROUPS[g].label_en}: ${FILTER_GROUPS[g].label_for(v, state)}<span class="x" onclick="clearFilter('${g}')" title="Remove this filter">\u00d7</span></span>`).join('')}
+      <span style="margin-left:auto;font-weight:700">Showing ${visibleCount} of ${ops.spools.length} spools / \u663e\u793a ${visibleCount}/${ops.spools.length}</span>
+    </div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function w_ops_matrix_legend(state){
+  return `<div class="matrix-legend">
+    <strong>Legend / \u56fe\u4f8b:</strong>
+    <span class="item"><span class="cell s-done">\u2713</span> Done / \u5b8c\u6210</span>
+    <span class="item"><span class="cell s-wip">\u25b6</span> In progress / \u8fdb\u884c\u4e2d</span>
+    <span class="item"><span class="cell s-hold">H</span> Hold pending / \u5f85\u653e\u884c</span>
+    <span class="item"><span class="cell s-fail">\u26a0</span> Failed QC / \u4e0d\u5408\u683c</span>
+    <span class="item"><span class="cell s-pending">\u2013</span> Pending / \u5f85\u5f00\u59cb</span>
+    <span class="item" style="color:#e74c3c">\u26a0 row = stuck >${state.operations?.stuck_threshold_days||3} days / \u6ede\u7559</span>
+    <span class="item" style="color:#1565c0">\u2605 = hold point / \u653e\u884c\u70b9</span>
+  </div>`;
+}
+
+function w_ops_spool_matrix(state){
+  const ops = state.operations;
+  if (!ops || ops._error) return '';
+  const visible = ops.spools.filter(_spoolMatchesAllFilters);
+  if (!visible.length){
+    return `<div style="padding:50px 20px;text-align:center;background:#fff;margin:8px 16px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.06)">
+      <div style="font-size:14px;color:#888">No spools match the current filters / \u5f53\u524d\u8fc7\u6ee4\u6761\u4ef6\u65e0\u5339\u914d\u7684\u710a\u7ba1</div>
+      <div style="margin-top:14px"><button class="reset-btn" onclick="resetFilters()">\u21ba Reset all filters / \u91cd\u7f6e\u5168\u90e8</button></div>
+    </div>`;
+  }
+  // Group by diameter, sort numerically descending
+  const byDiam = {};
+  visible.forEach(sp => { const d = sp.main_diameter || '?'; (byDiam[d]=byDiam[d]||[]).push(sp); });
+  const diams = Object.keys(byDiam).sort((a,b)=>(parseInt(b)||0)-(parseInt(a)||0));
+  return diams.map(d => _renderDiamMatrix(d, byDiam[d], ops.steps)).join('');
+}
+
+function _renderDiamMatrix(diameter, spools, steps){
+  const total = spools.length;
+  const done  = spools.filter(s => s.progress_pct >= 100).length;
+  const stuck = spools.filter(s => s.stuck).length;
+  const fail  = spools.filter(s => s.failed).length;
+  const hold  = spools.filter(s => s.hold_pending).length;
+  const wip   = total - done;
+  const avgPct = Math.round(spools.reduce((a,s)=>a+s.progress_pct,0) / Math.max(total,1));
+  const headers = steps.map(s => {
+    const phaseColor = ({fab:'#4472C4', paint:'#ED7D31'})[s.phase] || '#888';
+    return `<th style="border-bottom:2px solid ${phaseColor}" title="${_escAttr(s.name_en)}">${s.short}${s.is_hold_point?'<sup>\u2605</sup>':''}</th>`;
+  }).join('');
+  const rows = spools.map(sp => {
+    const cells = steps.map(s => {
+      const status = sp.step_status[String(s.step_number)] || 'pending';
+      const isCurrent = sp.current_step === s.step_number;
+      let cls = 's-pending', glyph = '\u2013', titleExtra = '';
+      if (status === 'done'){ cls = 's-done'; glyph = '\u2713'; }
+      else if (isCurrent && sp.failed){ cls = 's-fail'; glyph = '\u26a0'; titleExtra = ' \u2014 has failed QC'; }
+      else if (isCurrent && s.is_hold_point){ cls = 's-hold'; glyph = 'H'; titleExtra = ' \u2014 hold pending'; }
+      else if (isCurrent){ cls = 's-wip'; glyph = '\u25b6'; titleExtra = ' \u2014 in progress'; }
+      return `<td class="cell ${cls}" title="${_escAttr(s.name_en)}: ${status}${titleExtra}">${glyph}</td>`;
+    }).join('');
+    const pctColor = sp.progress_pct>=100?'#27ae60':sp.progress_pct>0?'#f39c12':'#e74c3c';
+    const stuckCls = sp.stuck ? 'row-stuck' : '';
+    const stuckTitle = sp.stuck ? ` title="Stuck \u2014 last step ${sp.last_step_at||'unknown'}"` : '';
+    return `<tr class="${stuckCls}"${stuckTitle}>
+      <td class="spool-c" onclick="location.href='/project/${P}/spool/${sp.spool_id}'">${sp.spool_id}</td>
+      ${cells}
+      <td class="pct-c" style="color:${pctColor}">${sp.progress_pct}</td>
+    </tr>`;
+  }).join('');
+  // Auto-collapse if 100% done
+  const collapsed = (done === total) ? 'collapsed' : '';
+  return `<div class="diam-section ${collapsed}" id="d-${diameter}">
+    <div class="diam-head" onclick="this.parentElement.classList.toggle('collapsed')">
+      <span class="caret">\u25bc</span>
+      <span class="diam-name">${diameter}\u2033</span>
+      <div class="diam-stats">
+        <div class="item"><span class="lbl">Spools / \u710a\u7ba1</span><span class="val">${total}</span></div>
+        <div class="item"><span class="lbl">Done / \u5b8c\u6210</span><span class="val" style="color:#27ae60">${done}</span></div>
+        <div class="item"><span class="lbl">WIP</span><span class="val" style="color:#f39c12">${wip}</span></div>
+        ${stuck>0?`<div class="item"><span class="lbl">Stuck / \u6ede\u7559</span><span class="val" style="color:#e74c3c">${stuck}</span></div>`:''}
+        ${fail>0?`<div class="item"><span class="lbl">Failed QC</span><span class="val" style="color:#c0392b">${fail}</span></div>`:''}
+        ${hold>0?`<div class="item"><span class="lbl">Hold</span><span class="val" style="color:#1565c0">${hold}</span></div>`:''}
+      </div>
+      <div class="diam-bar"><div class="fill" style="width:${avgPct}%"></div></div>
+      <div class="diam-pct">${avgPct}%</div>
+    </div>
+    <div class="diam-body">
+      <table class="matrix">
+        <thead><tr><th class="spool-h">Spool / \u710a\u7ba1</th>${headers}<th class="pct-h">%</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
   </div>`;
 }
 

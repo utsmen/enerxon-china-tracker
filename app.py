@@ -1577,6 +1577,13 @@ def api_project_operations(project):
             'last_step_at': last_done_dt.strftime('%Y-%m-%d %H:%M:%S') if last_done_dt else None,
         })
 
+    # Map ITP step number → QC report type (for cells that should navigate
+    # to a QC form instead of the step page). Single source of truth: the
+    # qc_report_defs settings array.
+    qc_defs = get_qc_report_defs(project)
+    step_to_qc = {d.get('itp_step'): d.get('type') for d in qc_defs
+                  if d.get('itp_step') and d.get('type')}
+
     steps_out = [{
         'step_number': s['step_number'],
         'name_en': s['name_en'], 'name_cn': s['name_cn'],
@@ -1585,6 +1592,7 @@ def api_project_operations(project):
         'is_hold_point': bool(s.get('is_hold_point')),
         'is_conditional': bool(s.get('is_conditional')),
         'display_order': s.get('display_order'),
+        'qc_report_type': step_to_qc.get(s['step_number']),  # None if step has no QC form
     } for s in sorted(steps_def, key=lambda x: x.get('display_order', 0))]
 
     return jsonify({'steps': steps_out, 'spools': spools_out,
@@ -1647,8 +1655,12 @@ def api_update_step(project, spool_id, step):
 @login_required
 def qc_report_page(project, spool_id, report_type):
     subtype = request.args.get('sub', '')
+    from_tab = request.args.get('from', '') or ''
+    if from_tab and from_tab not in ('overview', 'operations', 'reports'):
+        from_tab = ''
     return render_template_string(QC_REPORT_HTML, project=project, spool_id=spool_id,
-                                  report_type=report_type, report_subtype=subtype)
+                                  report_type=report_type, report_subtype=subtype,
+                                  from_tab=from_tab)
 
 @app.route('/api/project/<project>/spool/<spool_id>/qc')
 @login_required
@@ -4476,7 +4488,16 @@ function _renderDiamMatrix(diameter, spools, steps){
       else if (isCurrent && s.is_hold_point){ cls = 's-hold'; glyph = 'H'; titleExtra = ' \u2014 hold pending'; }
       else if (isCurrent){ cls = 's-wip'; glyph = '\u25b6'; titleExtra = ' \u2014 in progress'; }
       else { cls = 's-pending'; glyph = '\u2013'; }
-      return `<td class="cell ${cls}" title="${_escAttr(s.name_en)}: ${status}${titleExtra}">${glyph}</td>`;
+      // Click target: QC report form if step has a linked QC report; otherwise
+      // the spool detail page anchored at this step. N/A cells are not clickable.
+      let onclick = '';
+      if (status !== 'na'){
+        const url = s.qc_report_type
+          ? `/project/${P}/spool/${sp.spool_id}/qc/${s.qc_report_type}?from=operations`
+          : `/project/${P}/spool/${sp.spool_id}?from=operations#step-${s.step_number}`;
+        onclick = ` onclick="event.stopPropagation();location.href='${url}'" style="cursor:pointer"`;
+      }
+      return `<td class="cell ${cls}"${onclick} title="${_escAttr(s.name_en)}: ${status}${titleExtra}${status==='na'?'':' \u2014 click to open'}">${glyph}</td>`;
     }).join('');
     const pctColor = sp.progress_pct>=100?'#27ae60':sp.progress_pct>0?'#f39c12':'#e74c3c';
     const stuckCls = sp.stuck ? 'row-stuck' : '';
@@ -4786,6 +4807,20 @@ async function load(){
       document.getElementById('ship-assign-wrap').style.display = 'block';
     }
   }catch(e){}
+  scrollToHashStep();
+}
+let _didStepScroll = false;
+function scrollToHashStep(){
+  if (_didStepScroll) return;
+  const h = (window.location.hash || '').slice(1);
+  if (!h.startsWith('step-')) return;
+  const el = document.getElementById(h);
+  if (!el) return;
+  el.scrollIntoView({block:'center'});
+  el.style.transition = 'background .8s, box-shadow .8s';
+  el.style.boxShadow = '0 0 0 3px #f39c12';
+  setTimeout(() => { el.style.boxShadow = ''; }, 1500);
+  _didStepScroll = true;
 }
 async function assignShipment(v){
   const body = {shipment_number: v === '' ? null : parseInt(v)};
@@ -4930,7 +4965,7 @@ QC_REPORT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name=
 .af-field input:focus{border-color:#2F5496;outline:none;background:#fff}
 </style></head><body>
 <div class="header">
-  <a class="back" href="/project/{{ project }}/spool/{{ spool_id }}?tab=qc">\u2190 {{ spool_id }}</a>
+  <a class="back" href="{% if from_tab == 'operations' %}/project/{{ project }}#operations:spool-{{ spool_id }}{% else %}/project/{{ project }}/spool/{{ spool_id }}?tab=qc{% endif %}">\u2190 {% if from_tab == 'operations' %}Operations{% else %}{{ spool_id }}{% endif %}</a>
   <h1 id="rpt-title">QC Report</h1>
   <div class="sub" id="rpt-sub">Loading... / 加载中...</div>
 </div>

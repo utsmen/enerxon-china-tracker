@@ -1527,10 +1527,17 @@ def api_project_operations(project):
         applicable = sorted(
             [s for s in steps_def if step_applies_to_spool(s, sp)],
             key=lambda x: x.get('display_order', 0))
+        applicable_set = {s['step_number'] for s in applicable}
+        # Contract: step_status has an entry for EVERY step in steps_def.
+        # Values: 'done' | 'pending' | 'na'. Client must not infer N/A from
+        # absence — that contract is fragile. Be explicit.
         step_status = {}
         last_done_dt = None
-        for s in applicable:
+        for s in steps_def:
             sn = s['step_number']
+            if sn not in applicable_set:
+                step_status[sn] = 'na'
+                continue
             p = prog.get(sn)
             if p and p.get('completed'):
                 step_status[sn] = 'done'
@@ -1540,7 +1547,7 @@ def api_project_operations(project):
             else:
                 step_status[sn] = 'pending'
         current_step = next((s['step_number'] for s in applicable
-                             if step_status.get(s['step_number']) != 'done'), None)
+                             if step_status.get(s['step_number']) == 'pending'), None)
         qc_status = {}
         failed = False
         for rt, q in qc_by_spool.get(sid, {}).items():
@@ -3996,6 +4003,7 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 .s-fail{background:#fce4ec;color:#c0392b}
 .s-pending{background:#fff;color:#ddd}
+.s-na{background:repeating-linear-gradient(135deg,#f4f4f4,#f4f4f4 4px,#ececec 4px,#ececec 8px);color:#bbb;font-weight:400;font-size:11px}
 .s-hold{background:#e3f2fd;color:#1565c0;font-weight:900}
 .row-stuck{background:#fffaf0}
 .row-stuck:hover td{background:#fef3e0}
@@ -4419,6 +4427,7 @@ function w_ops_matrix_legend(state){
     <span class="item"><span class="cell s-hold">H</span> Hold pending / \u5f85\u653e\u884c</span>
     <span class="item"><span class="cell s-fail">\u26a0</span> Failed QC / \u4e0d\u5408\u683c</span>
     <span class="item"><span class="cell s-pending">\u2013</span> Pending / \u5f85\u5f00\u59cb</span>
+    <span class="item"><span class="cell s-na">\u00b7</span> N/A \u2014 step does not apply / \u4e0d\u9002\u7528</span>
     <span class="item" style="color:#e74c3c">\u26a0 row = stuck >${state.operations?.stuck_threshold_days||3} days / \u6ede\u7559</span>
     <span class="item" style="color:#1565c0">\u2605 = hold point / \u653e\u884c\u70b9</span>
   </div>`;
@@ -4455,13 +4464,17 @@ function _renderDiamMatrix(diameter, spools, steps){
   }).join('');
   const rows = spools.map(sp => {
     const cells = steps.map(s => {
-      const status = sp.step_status[String(s.step_number)] || 'pending';
+      // Contract from server: step_status has an entry for every step;
+      // value is 'done' | 'pending' | 'na'. No undefined.
+      const status = sp.step_status[String(s.step_number)];
       const isCurrent = sp.current_step === s.step_number;
-      let cls = 's-pending', glyph = '\u2013', titleExtra = '';
-      if (status === 'done'){ cls = 's-done'; glyph = '\u2713'; }
+      let cls, glyph, titleExtra = '';
+      if (status === 'na'){ cls = 's-na'; glyph = '\u00b7'; titleExtra = ' \u2014 N/A for this spool / \u4e0d\u9002\u7528'; }
+      else if (status === 'done'){ cls = 's-done'; glyph = '\u2713'; }
       else if (isCurrent && sp.failed){ cls = 's-fail'; glyph = '\u26a0'; titleExtra = ' \u2014 has failed QC'; }
       else if (isCurrent && s.is_hold_point){ cls = 's-hold'; glyph = 'H'; titleExtra = ' \u2014 hold pending'; }
       else if (isCurrent){ cls = 's-wip'; glyph = '\u25b6'; titleExtra = ' \u2014 in progress'; }
+      else { cls = 's-pending'; glyph = '\u2013'; }
       return `<td class="cell ${cls}" title="${_escAttr(s.name_en)}: ${status}${titleExtra}">${glyph}</td>`;
     }).join('');
     const pctColor = sp.progress_pct>=100?'#27ae60':sp.progress_pct>0?'#f39c12':'#e74c3c';

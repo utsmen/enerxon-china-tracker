@@ -4000,6 +4000,15 @@ PROJECT_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="v
 .row-stuck{background:#fffaf0}
 .row-stuck:hover td{background:#fef3e0}
 .row-stuck td.spool-c::before{content:'⚠ ';color:#e74c3c;font-weight:900}
+/* Flash highlight when returning from a spool — works for both <div> (overview list) and <tr> (matrix). */
+@keyframes flashHL { 0%,60%{background:#fff3cd} 100%{background:transparent} }
+.flash-highlight{animation:flashHL 1.4s ease-out}
+@keyframes flashHLcell { 0%,60%{box-shadow:inset 0 3px 0 #f39c12,inset 0 -3px 0 #f39c12} 100%{box-shadow:none} }
+@keyframes flashHLfirst { 0%,60%{box-shadow:inset 3px 0 0 #f39c12,inset 0 3px 0 #f39c12,inset 0 -3px 0 #f39c12} 100%{box-shadow:none} }
+@keyframes flashHLlast  { 0%,60%{box-shadow:inset -3px 0 0 #f39c12,inset 0 3px 0 #f39c12,inset 0 -3px 0 #f39c12} 100%{box-shadow:none} }
+tr.flash-highlight td{animation:flashHLcell 1.4s ease-out;position:relative}
+tr.flash-highlight td:first-child{animation:flashHLfirst 1.4s ease-out}
+tr.flash-highlight td:last-child{animation:flashHLlast 1.4s ease-out}
 .matrix-legend{padding:10px 14px;background:#fff;margin:8px 16px;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.06);font-size:11px;display:flex;flex-wrap:wrap;gap:14px;align-items:center}
 .matrix-legend strong{color:#2F5496;font-size:11px;text-transform:uppercase;letter-spacing:.3px;margin-right:6px}
 .matrix-legend .item{display:inline-flex;align-items:center;gap:6px;color:#666}
@@ -4339,9 +4348,9 @@ function scrollToHashSpool(){
   const el = document.getElementById(anchor);
   if (!el) return;
   el.scrollIntoView({block:'center'});
-  el.style.transition='background .8s';
-  el.style.background='#fff3cd';
-  setTimeout(()=>{el.style.background='';},1200);
+  // CSS-class highlight — works for <div> (overview .spool-row) AND <tr> (matrix row)
+  el.classList.add('flash-highlight');
+  setTimeout(() => el.classList.remove('flash-highlight'), 1500);
   _didHashScroll = true;
 }
 function filter(){

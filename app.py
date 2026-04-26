@@ -1586,7 +1586,12 @@ def api_project_operations(project):
 @app.route('/project/<project>/spool/<spool_id>')
 @login_required
 def spool_page(project, spool_id):
-    return render_template_string(SPOOL_HTML, project=project, spool_id=spool_id)
+    # `from_tab` lets the back link return to the tab the spool was opened from
+    # (e.g. operations matrix). Default empty → behaves as before (Overview).
+    from_tab = request.args.get('from', '') or ''
+    if from_tab and from_tab not in ('overview', 'operations', 'reports'):
+        from_tab = ''
+    return render_template_string(SPOOL_HTML, project=project, spool_id=spool_id, from_tab=from_tab)
 
 @app.route('/api/project/<project>/spool/<spool_id>')
 @login_required
@@ -4126,20 +4131,31 @@ function clearFilter(group){ FILTERS[group] = 'all'; renderCurrentTab(); }
 function resetFilters(){ for (const k of Object.keys(FILTERS)) FILTERS[k] = 'all'; renderCurrentTab(); }
 
 // \u2500\u2500 Tab switching (URL hash = source of truth) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-function getCurrentTab(){
+// Hash formats supported (in order):
+//   #<tab>:<anchor>   \u2192 switch to <tab>, scroll to #<anchor> (e.g. #operations:spool-SPL-001)
+//   #<tab>            \u2192 switch to <tab>, no scroll
+//   #spool-<id>       \u2192 legacy: default to Overview, scroll to #spool-<id>
+function _parseHash(){
   const h = (window.location.hash || '').slice(1);
-  if (LAYOUTS[h]) return h;
-  return 'overview';                                 // default for everyone
+  if (!h) return {tab:'overview', anchor:null};
+  if (h.indexOf(':') >= 0){
+    const i = h.indexOf(':');
+    const t = h.slice(0,i), a = h.slice(i+1);
+    return {tab: LAYOUTS[t] ? t : 'overview', anchor: a || null};
+  }
+  if (LAYOUTS[h]) return {tab:h, anchor:null};
+  return {tab:'overview', anchor:h};                  // legacy: bare #spool-X
 }
+function getCurrentTab(){ return _parseHash().tab; }
 function switchTab(tab){
   if (!LAYOUTS[tab]) tab = 'overview';
-  // Clear any spool-anchor hash when explicitly switching tabs
   history.replaceState(null,'','#'+tab);
   renderCurrentTab();
 }
 window.addEventListener('hashchange', () => {
-  const h = (window.location.hash || '').slice(1);
-  if (LAYOUTS[h]) renderCurrentTab();                // only re-render if hash is a tab
+  // Re-render only if the hash points to one of our tabs (any of the three forms)
+  const {tab} = _parseHash();
+  if (tab) renderCurrentTab();
 });
 
 async function ensureOperationsData(){
@@ -4166,6 +4182,7 @@ async function renderCurrentTab(){
   document.getElementById('tab-content').innerHTML =
     layout.map(k => `<div id="w-${k}" class="widget" data-widget="${k}">${WIDGETS[k].render(state)}</div>`).join('');
   layout.forEach(k => { if (WIDGETS[k].mount) WIDGETS[k].mount(state); });
+  scrollToHashSpool();   // central post-mount hook — works for any widget that emits id="spool-<id>"
 }
 
 // \u2500\u2500 Shared helpers used by multiple widgets \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -4313,13 +4330,13 @@ function w_spool_list(state){
   </div>
   <div id="list">${_spoolListRows(state.spools)}</div>`;
 }
-function m_spool_list(state){ scrollToHashSpool(); }
+function m_spool_list(state){ /* scroll handled centrally in renderCurrentTab */ }
 let _didHashScroll=false;
 function scrollToHashSpool(){
   if (_didHashScroll) return;
-  const h = window.location.hash;
-  if (!h || LAYOUTS[h.slice(1)]) return;             // tab hashes (#operations) are not spool anchors
-  const el = document.getElementById(h.slice(1));
+  const {anchor} = _parseHash();
+  if (!anchor) return;
+  const el = document.getElementById(anchor);
   if (!el) return;
   el.scrollIntoView({block:'center'});
   el.style.transition='background .8s';
@@ -4441,8 +4458,8 @@ function _renderDiamMatrix(diameter, spools, steps){
     const pctColor = sp.progress_pct>=100?'#27ae60':sp.progress_pct>0?'#f39c12':'#e74c3c';
     const stuckCls = sp.stuck ? 'row-stuck' : '';
     const stuckTitle = sp.stuck ? ` title="Stuck \u2014 last step ${sp.last_step_at||'unknown'}"` : '';
-    return `<tr class="${stuckCls}"${stuckTitle}>
-      <td class="spool-c" onclick="location.href='/project/${P}/spool/${sp.spool_id}'">${sp.spool_id}</td>
+    return `<tr class="${stuckCls}" id="spool-${sp.spool_id}"${stuckTitle}>
+      <td class="spool-c" onclick="location.href='/project/${P}/spool/${sp.spool_id}?from=operations'">${sp.spool_id}</td>
       ${cells}
       <td class="pct-c" style="color:${pctColor}">${sp.progress_pct}</td>
     </tr>`;
@@ -4650,7 +4667,7 @@ SPOOL_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="vie
 .qc-cat-header{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:12px 16px 4px;color:#888}
 </style></head><body>
 <div class="header">
-  <a class="back" href="/project/{{ project }}#spool-{{ spool_id }}">\u2190 {{ project }}</a>
+  <a class="back" href="/project/{{ project }}#{% if from_tab %}{{ from_tab }}:{% endif %}spool-{{ spool_id }}">\u2190 {{ project }}</a>
   <h1>{{ spool_id }}</h1>
   <div class="sub" id="sub-info">Loading... / 加载中...</div>
 </div>

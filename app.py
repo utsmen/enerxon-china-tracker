@@ -1558,8 +1558,9 @@ def api_project_operations(project):
             elif stat == 'submitted': qc_status[rt] = 'submitted'
             elif stat == 'draft':     qc_status[rt] = 'draft'
             else:                     qc_status[rt] = 'started'
+        # bulk_spool_progress returns dicts keyed by 'pct' (the canonical field name)
         b = bulk.get(sid) if isinstance(bulk, dict) else None
-        progress_pct = (b.get('progress_pct', 0) if isinstance(b, dict) else (b or 0))
+        progress_pct = round(b.get('pct', 0)) if isinstance(b, dict) else 0
         stuck = bool(0 < progress_pct < 100 and last_done_dt
                      and (today - last_done_dt).days >= STUCK_DAYS)
         hold_pending = current_step in hold_step_nums
